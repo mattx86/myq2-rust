@@ -1,0 +1,512 @@
+<html>
+<head>
+<META HTTP-EQUIV="Content-Type" content="text/html; charset=Windows-1252">
+</head>
+<body>
+<pre>
+<table width=100% bgcolor=#CFCFE5><tr> <td> <font face=arial size=+3>
+Build Log
+</font></table><table width=* cellspacing=0 cellpadding=0><tr><td width=0 bgcolor=#EDEDF5>&nbsp;</td><td width=0 bgcolor=#FFFFFF>&nbsp;</td><td width=*><pre>
+<h3>------- Build started: Project: game, Configuration: Release|Win32 -------
+</h3>
+</pre></table><table width=100% bgcolor=#DFDFE5><tr><td><font face=arial size=+2>
+Command Lines
+</font></table><table width=* cellspacing=0 cellpadding=0><tr><td width=0 bgcolor=#EDEDF5>&nbsp;</td><td width=0 bgcolor=#FFFFFF>&nbsp;</td><td width=*><pre>This edition of Visual C++ does not support the optimizing compiler.
+Creating temporary file "c:\dev\myq2\game\release\RSP000001.rsp" with contents
+[
+/G5 /D "WIN32" /D "NDEBUG" /D "_WINDOWS" /FD /EHsc /MT /GS /YX"stdafx.h" /Fp".\release/game.pch" /Fo".\release/" /Fd".\release/" /W4 /c /Zd /TC
+.\q_shared.c
+.\p_weapon.c
+.\p_view.c
+.\p_trail.c
+.\p_hud.c
+.\p_client.c
+.\m_tank.c
+.\m_supertank.c
+.\m_soldier.c
+.\m_parasite.c
+.\m_mutant.c
+.\m_move.c
+.\m_medic.c
+.\m_insane.c
+.\m_infantry.c
+.\m_hover.c
+.\m_gunner.c
+.\m_gladiator.c
+.\m_flyer.c
+.\m_float.c
+.\m_flipper.c
+.\m_flash.c
+.\m_chick.c
+.\m_brain.c
+.\m_boss32.c
+.\m_boss31.c
+.\m_boss3.c
+.\m_boss2.c
+.\m_berserk.c
+.\m_actor.c
+.\g_weapon.c
+.\g_utils.c
+.\g_turret.c
+.\g_trigger.c
+.\g_target.c
+.\g_svcmds.c
+.\g_spawn.c
+.\g_save.c
+.\g_phys.c
+.\g_monster.c
+.\g_misc.c
+.\g_main.c
+.\g_items.c
+.\g_func.c
+.\g_combat.c
+.\g_cmds.c
+.\g_chase.c
+.\g_ai.c
+]
+Creating command line "cl.exe @c:\dev\myq2\game\release\RSP000001.rsp /nologo"
+Creating temporary file "c:\dev\myq2\game\release\RSP000002.rsp" with contents
+[
+/OUT:"..\release\gamex86.dll" /INCREMENTAL:NO /NOLOGO /DLL /DEF:".\game.def" /PDB:".\..\release/gamex86.pdb" /SUBSYSTEM:WINDOWS /BASE:"0x20000000" /IMPLIB:".\..\release/gamex86.lib" /MACHINE:X86 winmm.lib kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib
+.\release\g_ai.obj
+.\release\g_chase.obj
+.\release\g_cmds.obj
+.\release\g_combat.obj
+.\release\g_func.obj
+.\release\g_items.obj
+.\release\g_main.obj
+.\release\g_misc.obj
+.\release\g_monster.obj
+.\release\g_phys.obj
+.\release\g_save.obj
+.\release\g_spawn.obj
+.\release\g_svcmds.obj
+.\release\g_target.obj
+.\release\g_trigger.obj
+.\release\g_turret.obj
+.\release\g_utils.obj
+.\release\g_weapon.obj
+.\release\m_actor.obj
+.\release\m_berserk.obj
+.\release\m_boss2.obj
+.\release\m_boss3.obj
+.\release\m_boss31.obj
+.\release\m_boss32.obj
+.\release\m_brain.obj
+.\release\m_chick.obj
+.\release\m_flash.obj
+.\release\m_flipper.obj
+.\release\m_float.obj
+.\release\m_flyer.obj
+.\release\m_gladiator.obj
+.\release\m_gunner.obj
+.\release\m_hover.obj
+.\release\m_infantry.obj
+.\release\m_insane.obj
+.\release\m_medic.obj
+.\release\m_move.obj
+.\release\m_mutant.obj
+.\release\m_parasite.obj
+.\release\m_soldier.obj
+.\release\m_supertank.obj
+.\release\m_tank.obj
+.\release\p_client.obj
+.\release\p_hud.obj
+.\release\p_trail.obj
+.\release\p_view.obj
+.\release\p_weapon.obj
+.\release\q_shared.obj
+]
+Creating command line "link.exe @c:\dev\myq2\game\release\RSP000002.rsp"
+</pre></table><table width=100% bgcolor=#DFDFE5><tr><td><font face=arial size=+2>
+Output Window
+</font></table><table width=* cellspacing=0 cellpadding=0><tr><td width=0 bgcolor=#EDEDF5>&nbsp;</td><td width=0 bgcolor=#FFFFFF>&nbsp;</td><td width=*><pre>Compiling...
+q_shared.c
+q_shared.c(266) : warning C4100: 'f' : unreferenced formal parameter
+q_shared.c(418) : warning C4100: 'p' : unreferenced formal parameter
+q_shared.c(418) : warning C4100: 'emaxs' : unreferenced formal parameter
+q_shared.c(418) : warning C4100: 'emins' : unreferenced formal parameter
+q_shared.c(1136) : warning C4127: conditional expression is constant
+q_shared.c(1257) : warning C4013: 'Com_Printf' undefined; assuming extern returning int
+q_shared.c(1288) : warning C4127: conditional expression is constant
+q_shared.c(1332) : warning C4127: conditional expression is constant
+p_weapon.c
+p_view.c
+p_view.c(42) : warning C4100: 'angles' : unreferenced formal parameter
+p_trail.c
+p_hud.c
+c:\dev\myq2\game\p_hud.c(423) : warning C4701: local variable 'cells' may be used without having been initialized
+p_client.c
+p_client.c(46) : warning C4127: conditional expression is constant
+p_client.c(70) : warning C4100: 'self' : unreferenced formal parameter
+p_client.c(179) : warning C4100: 'damage' : unreferenced formal parameter
+p_client.c(179) : warning C4100: 'kick' : unreferenced formal parameter
+p_client.c(179) : warning C4100: 'other' : unreferenced formal parameter
+p_client.c(179) : warning C4100: 'self' : unreferenced formal parameter
+p_client.c(211) : warning C4100: 'inflictor' : unreferenced formal parameter
+p_client.c(501) : warning C4100: 'point' : unreferenced formal parameter
+p_client.c(846) : warning C4127: conditional expression is constant
+p_client.c(931) : warning C4100: 'point' : unreferenced formal parameter
+p_client.c(931) : warning C4100: 'attacker' : unreferenced formal parameter
+p_client.c(931) : warning C4100: 'inflictor' : unreferenced formal parameter
+p_client.c(1569) : warning C4013: 'Com_Printf' undefined; assuming extern returning int
+m_tank.c
+m_tank.c(49) : warning C4100: 'other' : unreferenced formal parameter
+m_tank.c(288) : warning C4100: 'kick' : unreferenced formal parameter
+m_tank.c(288) : warning C4100: 'other' : unreferenced formal parameter
+m_tank.c(753) : warning C4100: 'point' : unreferenced formal parameter
+m_tank.c(753) : warning C4100: 'attacker' : unreferenced formal parameter
+m_tank.c(753) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_supertank.c
+m_supertank.c(452) : warning C4100: 'kick' : unreferenced formal parameter
+m_supertank.c(452) : warning C4100: 'other' : unreferenced formal parameter
+m_supertank.c(657) : warning C4100: 'point' : unreferenced formal parameter
+m_supertank.c(657) : warning C4100: 'damage' : unreferenced formal parameter
+m_supertank.c(657) : warning C4100: 'attacker' : unreferenced formal parameter
+m_supertank.c(657) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_soldier.c
+m_soldier.c(409) : warning C4100: 'damage' : unreferenced formal parameter
+m_soldier.c(409) : warning C4100: 'kick' : unreferenced formal parameter
+m_soldier.c(409) : warning C4100: 'other' : unreferenced formal parameter
+m_soldier.c(792) : warning C4100: 'other' : unreferenced formal parameter
+m_soldier.c(1144) : warning C4100: 'attacker' : unreferenced formal parameter
+m_soldier.c(1144) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_parasite.c
+m_parasite.c(65) : warning C4100: 'other' : unreferenced formal parameter
+m_parasite.c(275) : warning C4100: 'damage' : unreferenced formal parameter
+m_parasite.c(275) : warning C4100: 'kick' : unreferenced formal parameter
+m_parasite.c(275) : warning C4100: 'other' : unreferenced formal parameter
+m_parasite.c(471) : warning C4100: 'point' : unreferenced formal parameter
+m_parasite.c(471) : warning C4100: 'attacker' : unreferenced formal parameter
+m_parasite.c(471) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_mutant.c
+m_mutant.c(62) : warning C4100: 'other' : unreferenced formal parameter
+m_mutant.c(308) : warning C4100: 'surf' : unreferenced formal parameter
+m_mutant.c(308) : warning C4100: 'plane' : unreferenced formal parameter
+m_mutant.c(496) : warning C4100: 'damage' : unreferenced formal parameter
+m_mutant.c(496) : warning C4100: 'kick' : unreferenced formal parameter
+m_mutant.c(496) : warning C4100: 'other' : unreferenced formal parameter
+m_mutant.c(574) : warning C4100: 'point' : unreferenced formal parameter
+m_mutant.c(574) : warning C4100: 'attacker' : unreferenced formal parameter
+m_mutant.c(574) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_move.c
+m_medic.c
+m_medic.c(116) : warning C4100: 'other' : unreferenced formal parameter
+m_medic.c(317) : warning C4100: 'damage' : unreferenced formal parameter
+m_medic.c(317) : warning C4100: 'kick' : unreferenced formal parameter
+m_medic.c(317) : warning C4100: 'other' : unreferenced formal parameter
+m_medic.c(413) : warning C4100: 'point' : unreferenced formal parameter
+m_medic.c(413) : warning C4100: 'attacker' : unreferenced formal parameter
+m_medic.c(413) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_medic.c(494) : warning C4100: 'eta' : unreferenced formal parameter
+m_insane.c
+m_insane.c(477) : warning C4100: 'damage' : unreferenced formal parameter
+m_insane.c(477) : warning C4100: 'kick' : unreferenced formal parameter
+m_insane.c(477) : warning C4100: 'other' : unreferenced formal parameter
+m_insane.c(581) : warning C4100: 'point' : unreferenced formal parameter
+m_insane.c(581) : warning C4100: 'attacker' : unreferenced formal parameter
+m_insane.c(581) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_infantry.c
+m_infantry.c(215) : warning C4100: 'damage' : unreferenced formal parameter
+m_infantry.c(215) : warning C4100: 'kick' : unreferenced formal parameter
+m_infantry.c(215) : warning C4100: 'other' : unreferenced formal parameter
+m_infantry.c(299) : warning C4100: 'other' : unreferenced formal parameter
+m_infantry.c(386) : warning C4100: 'point' : unreferenced formal parameter
+m_infantry.c(386) : warning C4100: 'attacker' : unreferenced formal parameter
+m_infantry.c(386) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_infantry.c(466) : warning C4100: 'eta' : unreferenced formal parameter
+m_hover.c
+m_hover.c(43) : warning C4100: 'other' : unreferenced formal parameter
+m_hover.c(487) : warning C4100: 'kick' : unreferenced formal parameter
+m_hover.c(487) : warning C4100: 'other' : unreferenced formal parameter
+m_hover.c(541) : warning C4100: 'point' : unreferenced formal parameter
+m_hover.c(541) : warning C4100: 'attacker' : unreferenced formal parameter
+m_hover.c(541) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_gunner.c
+m_gunner.c(46) : warning C4100: 'other' : unreferenced formal parameter
+m_gunner.c(283) : warning C4100: 'kick' : unreferenced formal parameter
+m_gunner.c(283) : warning C4100: 'other' : unreferenced formal parameter
+m_gunner.c(335) : warning C4100: 'point' : unreferenced formal parameter
+m_gunner.c(335) : warning C4100: 'attacker' : unreferenced formal parameter
+m_gunner.c(335) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_gunner.c(409) : warning C4100: 'eta' : unreferenced formal parameter
+m_gladiator.c
+m_gladiator.c(49) : warning C4100: 'other' : unreferenced formal parameter
+m_gladiator.c(240) : warning C4100: 'damage' : unreferenced formal parameter
+m_gladiator.c(240) : warning C4100: 'kick' : unreferenced formal parameter
+m_gladiator.c(240) : warning C4100: 'other' : unreferenced formal parameter
+m_gladiator.c(308) : warning C4100: 'point' : unreferenced formal parameter
+m_gladiator.c(308) : warning C4100: 'attacker' : unreferenced formal parameter
+m_gladiator.c(308) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_flyer.c
+m_flyer.c(52) : warning C4100: 'other' : unreferenced formal parameter
+m_flyer.c(531) : warning C4100: 'damage' : unreferenced formal parameter
+m_flyer.c(531) : warning C4100: 'kick' : unreferenced formal parameter
+m_flyer.c(531) : warning C4100: 'other' : unreferenced formal parameter
+m_flyer.c(564) : warning C4100: 'point' : unreferenced formal parameter
+m_flyer.c(564) : warning C4100: 'damage' : unreferenced formal parameter
+m_flyer.c(564) : warning C4100: 'attacker' : unreferenced formal parameter
+m_flyer.c(564) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_float.c
+m_float.c(41) : warning C4100: 'other' : unreferenced formal parameter
+m_float.c(566) : warning C4100: 'damage' : unreferenced formal parameter
+m_float.c(566) : warning C4100: 'kick' : unreferenced formal parameter
+m_float.c(566) : warning C4100: 'other' : unreferenced formal parameter
+m_float.c(603) : warning C4100: 'point' : unreferenced formal parameter
+m_float.c(603) : warning C4100: 'damage' : unreferenced formal parameter
+m_float.c(603) : warning C4100: 'attacker' : unreferenced formal parameter
+m_float.c(603) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_flipper.c
+m_flipper.c(223) : warning C4100: 'damage' : unreferenced formal parameter
+m_flipper.c(223) : warning C4100: 'kick' : unreferenced formal parameter
+m_flipper.c(223) : warning C4100: 'other' : unreferenced formal parameter
+m_flipper.c(327) : warning C4100: 'other' : unreferenced formal parameter
+m_flipper.c(332) : warning C4100: 'point' : unreferenced formal parameter
+m_flipper.c(332) : warning C4100: 'attacker' : unreferenced formal parameter
+m_flipper.c(332) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_flash.c
+m_chick.c
+m_chick.c(266) : warning C4100: 'kick' : unreferenced formal parameter
+m_chick.c(266) : warning C4100: 'other' : unreferenced formal parameter
+m_chick.c(353) : warning C4100: 'point' : unreferenced formal parameter
+m_chick.c(353) : warning C4100: 'attacker' : unreferenced formal parameter
+m_chick.c(353) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_chick.c(430) : warning C4100: 'eta' : unreferenced formal parameter
+m_chick.c(619) : warning C4100: 'other' : unreferenced formal parameter
+m_brain.c
+m_brain.c(48) : warning C4100: 'other' : unreferenced formal parameter
+m_brain.c(542) : warning C4100: 'damage' : unreferenced formal parameter
+m_brain.c(542) : warning C4100: 'kick' : unreferenced formal parameter
+m_brain.c(542) : warning C4100: 'other' : unreferenced formal parameter
+m_brain.c(586) : warning C4100: 'point' : unreferenced formal parameter
+m_brain.c(586) : warning C4100: 'attacker' : unreferenced formal parameter
+m_brain.c(586) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_boss32.c
+m_boss32.c(555) : warning C4100: 'kick' : unreferenced formal parameter
+m_boss32.c(555) : warning C4100: 'other' : unreferenced formal parameter
+m_boss32.c(601) : warning C4100: 'other' : unreferenced formal parameter
+m_boss32.c(673) : warning C4100: 'point' : unreferenced formal parameter
+m_boss32.c(673) : warning C4100: 'attacker' : unreferenced formal parameter
+m_boss32.c(673) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_boss31.c
+m_boss31.c(416) : warning C4100: 'kick' : unreferenced formal parameter
+m_boss31.c(416) : warning C4100: 'other' : unreferenced formal parameter
+m_boss31.c(560) : warning C4100: 'self' : unreferenced formal parameter
+m_boss31.c(589) : warning C4100: 'point' : unreferenced formal parameter
+m_boss31.c(589) : warning C4100: 'damage' : unreferenced formal parameter
+m_boss31.c(589) : warning C4100: 'attacker' : unreferenced formal parameter
+m_boss31.c(589) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_boss3.c
+m_boss3.c(31) : warning C4100: 'activator' : unreferenced formal parameter
+m_boss3.c(31) : warning C4100: 'other' : unreferenced formal parameter
+m_boss2.c
+m_boss2.c(470) : warning C4100: 'kick' : unreferenced formal parameter
+m_boss2.c(470) : warning C4100: 'other' : unreferenced formal parameter
+m_boss2.c(507) : warning C4100: 'point' : unreferenced formal parameter
+m_boss2.c(507) : warning C4100: 'damage' : unreferenced formal parameter
+m_boss2.c(507) : warning C4100: 'attacker' : unreferenced formal parameter
+m_boss2.c(507) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_berserk.c
+m_berserk.c(39) : warning C4100: 'other' : unreferenced formal parameter
+m_berserk.c(222) : warning C4100: 'self' : unreferenced formal parameter
+m_berserk.c(315) : warning C4100: 'kick' : unreferenced formal parameter
+m_berserk.c(315) : warning C4100: 'other' : unreferenced formal parameter
+m_berserk.c(381) : warning C4100: 'point' : unreferenced formal parameter
+m_berserk.c(381) : warning C4100: 'attacker' : unreferenced formal parameter
+m_berserk.c(381) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_actor.c
+m_actor.c(230) : warning C4100: 'damage' : unreferenced formal parameter
+m_actor.c(230) : warning C4100: 'kick' : unreferenced formal parameter
+m_actor.c(339) : warning C4100: 'point' : unreferenced formal parameter
+m_actor.c(339) : warning C4100: 'attacker' : unreferenced formal parameter
+m_actor.c(339) : warning C4100: 'inflictor' : unreferenced formal parameter
+m_actor.c(401) : warning C4100: 'activator' : unreferenced formal parameter
+m_actor.c(401) : warning C4100: 'other' : unreferenced formal parameter
+m_actor.c(496) : warning C4100: 'surf' : unreferenced formal parameter
+m_actor.c(496) : warning C4100: 'plane' : unreferenced formal parameter
+g_weapon.c
+g_weapon.c(455) : warning C4100: 'plane' : unreferenced formal parameter
+g_weapon.c(845) : warning C4127: conditional expression is constant
+g_utils.c
+g_utils.c(130) : warning C4127: conditional expression is constant
+g_utils.c(553) : warning C4127: conditional expression is constant
+c:\dev\myq2\game\g_utils.c(215) : warning C4706: assignment within conditional expression
+c:\dev\myq2\game\g_utils.c(232) : warning C4706: assignment within conditional expression
+g_turret.c
+g_turret.c(278) : warning C4100: 'point' : unreferenced formal parameter
+g_trigger.c
+g_trigger.c(66) : warning C4100: 'other' : unreferenced formal parameter
+g_trigger.c(72) : warning C4100: 'surf' : unreferenced formal parameter
+g_trigger.c(72) : warning C4100: 'plane' : unreferenced formal parameter
+g_trigger.c(111) : warning C4100: 'activator' : unreferenced formal parameter
+g_trigger.c(111) : warning C4100: 'other' : unreferenced formal parameter
+g_trigger.c(189) : warning C4100: 'other' : unreferenced formal parameter
+g_trigger.c(212) : warning C4100: 'other' : unreferenced formal parameter
+g_trigger.c(326) : warning C4100: 'other' : unreferenced formal parameter
+g_trigger.c(394) : warning C4100: 'surf' : unreferenced formal parameter
+g_trigger.c(394) : warning C4100: 'plane' : unreferenced formal parameter
+g_trigger.c(455) : warning C4100: 'activator' : unreferenced formal parameter
+g_trigger.c(455) : warning C4100: 'other' : unreferenced formal parameter
+g_trigger.c(468) : warning C4100: 'surf' : unreferenced formal parameter
+g_trigger.c(468) : warning C4100: 'plane' : unreferenced formal parameter
+g_trigger.c(532) : warning C4100: 'surf' : unreferenced formal parameter
+g_trigger.c(532) : warning C4100: 'plane' : unreferenced formal parameter
+g_trigger.c(566) : warning C4100: 'surf' : unreferenced formal parameter
+g_trigger.c(566) : warning C4100: 'plane' : unreferenced formal parameter
+g_target.c
+g_target.c(26) : warning C4100: 'activator' : unreferenced formal parameter
+g_target.c(26) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(58) : warning C4100: 'activator' : unreferenced formal parameter
+g_target.c(58) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(118) : warning C4100: 'activator' : unreferenced formal parameter
+g_target.c(118) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(154) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(189) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(244) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(338) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(380) : warning C4100: 'activator' : unreferenced formal parameter
+g_target.c(380) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(416) : warning C4100: 'activator' : unreferenced formal parameter
+g_target.c(416) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(451) : warning C4100: 'activator' : unreferenced formal parameter
+g_target.c(451) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(523) : warning C4127: conditional expression is constant
+g_target.c(576) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(687) : warning C4127: conditional expression is constant
+g_target.c(679) : warning C4100: 'activator' : unreferenced formal parameter
+g_target.c(679) : warning C4100: 'other' : unreferenced formal parameter
+g_target.c(785) : warning C4100: 'other' : unreferenced formal parameter
+g_svcmds.c
+g_spawn.c
+g_spawn.c(424) : warning C4127: conditional expression is constant
+g_spawn.c(554) : warning C4127: conditional expression is constant
+g_save.c
+g_save.c(281) : warning C4054: 'type cast' : from function pointer 'void (__cdecl *)(void)' to data pointer 'byte *'
+g_save.c(227) : warning C4100: 'f' : unreferenced formal parameter
+g_save.c(378) : warning C4054: 'type cast' : from function pointer 'void (__cdecl *)(void)' to data pointer 'byte *'
+g_save.c(645) : warning C4054: 'type cast' : from function pointer 'void (__cdecl *)(void)' to data pointer 'void *'
+g_save.c(714) : warning C4054: 'type cast' : from function pointer 'void (__cdecl *)(void)' to data pointer 'void *'
+g_save.c(727) : warning C4127: conditional expression is constant
+g_phys.c
+g_phys.c(590) : warning C4047: 'function' : 'char *' differs in levels of indirection from 'int'
+g_monster.c
+g_monster.c(91) : warning C4100: 'kick' : unreferenced formal parameter
+g_monster.c(440) : warning C4100: 'other' : unreferenced formal parameter
+g_monster.c(483) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c
+g_misc.c(31) : warning C4100: 'activator' : unreferenced formal parameter
+g_misc.c(31) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(104) : warning C4100: 'surf' : unreferenced formal parameter
+g_misc.c(104) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(130) : warning C4100: 'point' : unreferenced formal parameter
+g_misc.c(130) : warning C4100: 'damage' : unreferenced formal parameter
+g_misc.c(130) : warning C4100: 'attacker' : unreferenced formal parameter
+g_misc.c(130) : warning C4100: 'inflictor' : unreferenced formal parameter
+g_misc.c(281) : warning C4100: 'point' : unreferenced formal parameter
+g_misc.c(281) : warning C4100: 'damage' : unreferenced formal parameter
+g_misc.c(281) : warning C4100: 'attacker' : unreferenced formal parameter
+g_misc.c(281) : warning C4100: 'inflictor' : unreferenced formal parameter
+g_misc.c(342) : warning C4100: 'surf' : unreferenced formal parameter
+g_misc.c(342) : warning C4100: 'plane' : unreferenced formal parameter
+g_misc.c(422) : warning C4100: 'surf' : unreferenced formal parameter
+g_misc.c(422) : warning C4100: 'plane' : unreferenced formal parameter
+g_misc.c(545) : warning C4100: 'activator' : unreferenced formal parameter
+g_misc.c(545) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(593) : warning C4100: 'activator' : unreferenced formal parameter
+g_misc.c(593) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(665) : warning C4100: 'surf' : unreferenced formal parameter
+g_misc.c(683) : warning C4100: 'activator' : unreferenced formal parameter
+g_misc.c(683) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(745) : warning C4100: 'point' : unreferenced formal parameter
+g_misc.c(745) : warning C4100: 'damage' : unreferenced formal parameter
+g_misc.c(809) : warning C4100: 'activator' : unreferenced formal parameter
+g_misc.c(814) : warning C4100: 'activator' : unreferenced formal parameter
+g_misc.c(814) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(873) : warning C4100: 'surf' : unreferenced formal parameter
+g_misc.c(873) : warning C4100: 'plane' : unreferenced formal parameter
+g_misc.c(966) : warning C4100: 'point' : unreferenced formal parameter
+g_misc.c(966) : warning C4100: 'damage' : unreferenced formal parameter
+g_misc.c(966) : warning C4100: 'inflictor' : unreferenced formal parameter
+g_misc.c(1021) : warning C4100: 'activator' : unreferenced formal parameter
+g_misc.c(1021) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(1157) : warning C4100: 'activator' : unreferenced formal parameter
+g_misc.c(1157) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(1217) : warning C4100: 'point' : unreferenced formal parameter
+g_misc.c(1217) : warning C4100: 'attacker' : unreferenced formal parameter
+g_misc.c(1217) : warning C4100: 'inflictor' : unreferenced formal parameter
+g_misc.c(1330) : warning C4100: 'surf' : unreferenced formal parameter
+g_misc.c(1330) : warning C4100: 'plane' : unreferenced formal parameter
+g_misc.c(1330) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(1358) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(1452) : warning C4100: 'activator' : unreferenced formal parameter
+g_misc.c(1452) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(1577) : warning C4100: 'activator' : unreferenced formal parameter
+g_misc.c(1577) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(1740) : warning C4100: 'other' : unreferenced formal parameter
+g_misc.c(1783) : warning C4100: 'surf' : unreferenced formal parameter
+g_misc.c(1783) : warning C4100: 'plane' : unreferenced formal parameter
+g_main.c
+g_main.c(152) : warning C4047: 'function' : 'char *' differs in levels of indirection from 'int'
+g_items.c
+g_items.c(43) : warning C4211: nonstandard extension used : redefined extern to static
+g_items.c(44) : warning C4211: nonstandard extension used : redefined extern to static
+g_items.c(45) : warning C4211: nonstandard extension used : redefined extern to static
+g_items.c(705) : warning C4100: 'item' : unreferenced formal parameter
+g_items.c(761) : warning C4100: 'surf' : unreferenced formal parameter
+g_items.c(761) : warning C4100: 'plane' : unreferenced formal parameter
+g_items.c(892) : warning C4100: 'activator' : unreferenced formal parameter
+g_items.c(892) : warning C4100: 'other' : unreferenced formal parameter
+g_func.c
+g_func.c(428) : warning C4100: 'activator' : unreferenced formal parameter
+g_func.c(428) : warning C4100: 'other' : unreferenced formal parameter
+g_func.c(436) : warning C4100: 'surf' : unreferenced formal parameter
+g_func.c(436) : warning C4100: 'plane' : unreferenced formal parameter
+g_func.c(600) : warning C4100: 'surf' : unreferenced formal parameter
+g_func.c(600) : warning C4100: 'plane' : unreferenced formal parameter
+g_func.c(606) : warning C4100: 'activator' : unreferenced formal parameter
+g_func.c(606) : warning C4100: 'other' : unreferenced formal parameter
+g_func.c(737) : warning C4100: 'other' : unreferenced formal parameter
+g_func.c(743) : warning C4100: 'surf' : unreferenced formal parameter
+g_func.c(743) : warning C4100: 'plane' : unreferenced formal parameter
+g_func.c(755) : warning C4100: 'point' : unreferenced formal parameter
+g_func.c(755) : warning C4100: 'damage' : unreferenced formal parameter
+g_func.c(755) : warning C4100: 'inflictor' : unreferenced formal parameter
+g_func.c(949) : warning C4100: 'other' : unreferenced formal parameter
+g_func.c(980) : warning C4100: 'surf' : unreferenced formal parameter
+g_func.c(980) : warning C4100: 'plane' : unreferenced formal parameter
+g_func.c(1113) : warning C4100: 'point' : unreferenced formal parameter
+g_func.c(1113) : warning C4100: 'damage' : unreferenced formal parameter
+g_func.c(1113) : warning C4100: 'inflictor' : unreferenced formal parameter
+g_func.c(1125) : warning C4100: 'surf' : unreferenced formal parameter
+g_func.c(1125) : warning C4100: 'plane' : unreferenced formal parameter
+g_func.c(1633) : warning C4100: 'other' : unreferenced formal parameter
+g_func.c(1699) : warning C4100: 'activator' : unreferenced formal parameter
+g_func.c(1777) : warning C4100: 'other' : unreferenced formal parameter
+g_func.c(1825) : warning C4100: 'activator' : unreferenced formal parameter
+g_func.c(1825) : warning C4100: 'other' : unreferenced formal parameter
+g_func.c(1886) : warning C4100: 'activator' : unreferenced formal parameter
+g_func.c(1886) : warning C4100: 'other' : unreferenced formal parameter
+g_func.c(1960) : warning C4100: 'point' : unreferenced formal parameter
+g_func.c(1960) : warning C4100: 'damage' : unreferenced formal parameter
+g_func.c(1960) : warning C4100: 'inflictor' : unreferenced formal parameter
+g_func.c(2037) : warning C4100: 'activator' : unreferenced formal parameter
+g_func.c(2037) : warning C4100: 'other' : unreferenced formal parameter
+c:\dev\myq2\game\g_func.c(859) : warning C4706: assignment within conditional expression
+g_combat.c
+g_combat.c(370) : warning C4100: 'attacker' : unreferenced formal parameter
+g_combat.c(370) : warning C4100: 'targ' : unreferenced formal parameter
+c:\dev\myq2\game\g_combat.c(249) : warning C4701: local variable 'index' may be used without having been initialized
+c:\dev\myq2\game\g_combat.c(209) : warning C4701: local variable 'power' may be used without having been initialized
+g_cmds.c
+g_chase.c
+g_ai.c
+g_ai.c(61) : warning C4127: conditional expression is constant
+g_ai.c(771) : warning C4100: 'dist' : unreferenced formal parameter
+Linking...
+   Creating library .\..\release/gamex86.lib and object .\..\release/gamex86.exp
+</pre></table><table width=100% bgcolor=#DFDFE5><tr><td><font face=arial size=+2>
+Results
+</font></table><table width=* cellspacing=0 cellpadding=0><tr><td width=0 bgcolor=#EDEDF5>&nbsp;</td><td width=0 bgcolor=#FFFFFF>&nbsp;</td><td width=*><pre>
+Build log was saved at "file://c:\dev\myq2\game\release\BuildLog.htm"
+game - 0 error(s), 333 warning(s)</pre></table><table   width=100% height=20 bgcolor=#CFCFE5><tr><td><font face=arial size=+2>
+</font></table></body></html>

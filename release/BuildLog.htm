@@ -1,0 +1,459 @@
+<html>
+<head>
+<META HTTP-EQUIV="Content-Type" content="text/html; charset=Windows-1252">
+</head>
+<body>
+<pre>
+<table width=100% bgcolor=#CFCFE5><tr> <td> <font face=arial size=+3>
+Build Log
+</font></table><table width=* cellspacing=0 cellpadding=0><tr><td width=0 bgcolor=#EDEDF5>&nbsp;</td><td width=0 bgcolor=#FFFFFF>&nbsp;</td><td width=*><pre>
+<h3>------- Build started: Project: MyQ2, Configuration: Release|Win32 -------
+</h3>
+</pre></table><table width=100% bgcolor=#DFDFE5><tr><td><font face=arial size=+2>
+Command Lines
+</font></table><table width=* cellspacing=0 cellpadding=0><tr><td width=0 bgcolor=#EDEDF5>&nbsp;</td><td width=0 bgcolor=#FFFFFF>&nbsp;</td><td width=*><pre>This edition of Visual C++ does not support the optimizing compiler.
+Creating temporary file "c:\dev\myq2\release\RSP000003.rsp" with contents
+[
+/GT /GA /D "WIN32" /D "NDEBUG" /D "_WINDOWS" /Gm /EHsc /MT /GS /YX"stdafx.h" /Fp".\release/quake2.pch" /Fo".\release/" /Fd".\release/" /W4 /c /Zi /TC
+.\game\q_shared.c
+.\win32\glw_imp.c
+.\ref_gl\gl_warp.c
+.\ref_gl\gl_rsurf.c
+.\ref_gl\gl_rmisc.c
+.\ref_gl\gl_rmain.c
+.\ref_gl\gl_refl.c
+.\ref_gl\gl_model.c
+.\ref_gl\gl_mesh.c
+.\ref_gl\gl_light.c
+.\ref_gl\gl_image.c
+.\ref_gl\gl_draw.c
+.\client\x86.c
+.\qcommon\wildcards.c
+.\win32\vid_menu.c
+.\win32\vid_dll.c
+.\win32\sys_win.c
+.\server\sv_world.c
+.\server\sv_user.c
+.\server\sv_send.c
+.\server\sv_main.c
+.\server\sv_init.c
+.\server\sv_game.c
+.\server\sv_ents.c
+.\server\sv_ccmds.c
+.\win32\snd_win.c
+.\client\snd_mix.c
+.\client\snd_mem.c
+.\client\snd_dma.c
+.\client\qmenu.c
+.\qcommon\pmove.c
+.\win32\net_udp.c
+.\qcommon\net_chan.c
+.\client\menu.c
+.\qcommon\md4.c
+.\game\m_flash.c
+.\client\keys.c
+.\win32\in_win.c
+.\qcommon\files.c
+.\qcommon\cvar.c
+.\qcommon\crc.c
+.\client\console.c
+.\win32\conproc.c
+.\qcommon\common.c
+.\qcommon\cmodel.c
+.\qcommon\cmd.c
+.\client\cl_view.c
+.\client\cl_tent.c
+.\client\cl_scrn.c
+.\client\cl_pred.c
+.\client\cl_part.c
+.\client\cl_parse.c
+.\client\cl_newfx.c
+.\client\cl_main.c
+.\client\cl_inv.c
+.\client\cl_input.c
+.\client\cl_fx.c
+.\client\cl_ents.c
+.\client\cl_cin.c
+.\win32\cd_win.c
+]
+Creating command line "cl.exe @c:\dev\myq2\release\RSP000003.rsp /nologo"
+Creating temporary file "c:\dev\myq2\release\RSP000004.rsp" with contents
+[
+/GT /GA /D "WIN32" /D "NDEBUG" /D "_WINDOWS" /Gm /EHsc /MT /GS /YX"stdafx.h" /Fp".\release/quake2.pch" /Fo".\release/" /Fd".\release/" /W4 /c /Zi /TC
+.\win32\qgl_win.c
+.\win32\q_shwin.c
+]
+Creating command line "cl.exe @c:\dev\myq2\release\RSP000004.rsp /nologo"
+Creating command line "rc.exe /d "NDEBUG" /l 0x409 /I "win32" /fo".\release/q2.res" .\win32\q2.rc"
+Creating temporary file "c:\dev\myq2\release\RSP000005.rsp" with contents
+[
+/OUT:".\release/myq2.exe" /INCREMENTAL:NO /NOLOGO /LIBPATH:"c:\dev\myq2\lib\\" /ASSEMBLYDEBUG:DISABLE /PDB:".\release/myq2.pdb" /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /OPT:NOWIN98 /LTCG /MACHINE:X86 winmm.lib wsock32.lib libpng.lib kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib .\release\gamex86.lib
+.\release\cd_win.obj
+.\release\cl_cin.obj
+.\release\cl_ents.obj
+.\release\cl_fx.obj
+.\release\cl_input.obj
+.\release\cl_inv.obj
+.\release\cl_main.obj
+.\release\cl_newfx.obj
+.\release\cl_parse.obj
+.\release\cl_part.obj
+.\release\cl_pred.obj
+.\release\cl_scrn.obj
+.\release\cl_tent.obj
+.\release\cl_view.obj
+.\release\cmd.obj
+.\release\cmodel.obj
+.\release\common.obj
+.\release\conproc.obj
+.\release\console.obj
+.\release\crc.obj
+.\release\cvar.obj
+.\release\files.obj
+.\release\in_win.obj
+.\release\keys.obj
+.\release\m_flash.obj
+.\release\md4.obj
+.\release\menu.obj
+.\release\net_chan.obj
+.\release\net_udp.obj
+.\release\pmove.obj
+.\release\qmenu.obj
+.\release\snd_dma.obj
+.\release\snd_mem.obj
+.\release\snd_mix.obj
+.\release\snd_win.obj
+.\release\sv_ccmds.obj
+.\release\sv_ents.obj
+.\release\sv_game.obj
+.\release\sv_init.obj
+.\release\sv_main.obj
+.\release\sv_send.obj
+.\release\sv_user.obj
+.\release\sv_world.obj
+.\release\sys_win.obj
+.\release\vid_dll.obj
+.\release\vid_menu.obj
+.\release\wildcards.obj
+.\release\x86.obj
+.\release\gl_draw.obj
+.\release\gl_image.obj
+.\release\gl_light.obj
+.\release\gl_mesh.obj
+.\release\gl_model.obj
+.\release\gl_refl.obj
+.\release\gl_rmain.obj
+.\release\gl_rmisc.obj
+.\release\gl_rsurf.obj
+.\release\gl_warp.obj
+.\release\glw_imp.obj
+.\release\q_shared.obj
+.\release\q_shwin.obj
+.\release\qgl_win.obj
+.\release\q2.res
+]
+Creating command line "link.exe @c:\dev\myq2\release\RSP000005.rsp"
+</pre></table><table width=100% bgcolor=#DFDFE5><tr><td><font face=arial size=+2>
+Output Window
+</font></table><table width=* cellspacing=0 cellpadding=0><tr><td width=0 bgcolor=#EDEDF5>&nbsp;</td><td width=0 bgcolor=#FFFFFF>&nbsp;</td><td width=*><pre>Compiling...
+q_shared.c
+game\q_shared.c(266) : warning C4100: 'f' : unreferenced formal parameter
+game\q_shared.c(418) : warning C4100: 'p' : unreferenced formal parameter
+game\q_shared.c(418) : warning C4100: 'emaxs' : unreferenced formal parameter
+game\q_shared.c(418) : warning C4100: 'emins' : unreferenced formal parameter
+game\q_shared.c(1136) : warning C4127: conditional expression is constant
+game\q_shared.c(1257) : warning C4013: 'Com_Printf' undefined; assuming extern returning int
+game\q_shared.c(1288) : warning C4127: conditional expression is constant
+game\q_shared.c(1332) : warning C4127: conditional expression is constant
+glw_imp.c
+win32\glw_imp.c(58) : warning C4057: 'function' : 'const char *' differs in indirection to slightly different base types from 'const GLubyte *'
+win32\glw_imp.c(81) : warning C4055: 'type cast' : from data pointer 'void *' to function pointer 'WNDPROC'
+win32\glw_imp.c(569) : warning C4057: 'function' : 'const char *' differs in indirection to slightly different base types from 'const GLubyte *'
+gl_warp.c
+gl_rsurf.c
+ref_gl\gl_rsurf.c(1787) : warning C4100: 'm' : unreferenced formal parameter
+gl_rmisc.c
+gl_rmain.c
+ref_gl\gl_rmain.c(1739) : warning C4057: 'function' : 'int *' differs in indirection to slightly different base types from 'unsigned int *'
+ref_gl\gl_rmain.c(1739) : warning C4057: 'function' : 'int *' differs in indirection to slightly different base types from 'unsigned int *'
+ref_gl\gl_rmain.c(1750) : warning C4057: 'function' : 'int *' differs in indirection to slightly different base types from 'unsigned int *'
+ref_gl\gl_rmain.c(1750) : warning C4057: 'function' : 'int *' differs in indirection to slightly different base types from 'unsigned int *'
+ref_gl\gl_rmain.c(1761) : warning C4057: 'function' : 'int *' differs in indirection to slightly different base types from 'unsigned int *'
+ref_gl\gl_rmain.c(1761) : warning C4057: 'function' : 'int *' differs in indirection to slightly different base types from 'unsigned int *'
+ref_gl\gl_rmain.c(1781) : warning C4389: '==' : signed/unsigned mismatch
+ref_gl\gl_rmain.c(1843) : warning C4057: '=' : 'const char *' differs in indirection to slightly different base types from 'const GLubyte *'
+ref_gl\gl_rmain.c(1845) : warning C4057: '=' : 'const char *' differs in indirection to slightly different base types from 'const GLubyte *'
+ref_gl\gl_rmain.c(1847) : warning C4057: '=' : 'const char *' differs in indirection to slightly different base types from 'const GLubyte *'
+ref_gl\gl_rmain.c(1849) : warning C4057: '=' : 'const char *' differs in indirection to slightly different base types from 'const GLubyte *'
+ref_gl\gl_rmain.c(1944) : warning C4054: 'type cast' : from function pointer 'PROC' to data pointer 'void *'
+ref_gl\gl_rmain.c(1944) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+ref_gl\gl_rmain.c(1945) : warning C4054: 'type cast' : from function pointer 'PROC' to data pointer 'void *'
+ref_gl\gl_rmain.c(1945) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+ref_gl\gl_rmain.c(1989) : warning C4054: 'type cast' : from function pointer 'PROC' to data pointer 'void *'
+ref_gl\gl_rmain.c(1989) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+ref_gl\gl_rmain.c(1990) : warning C4054: 'type cast' : from function pointer 'PROC' to data pointer 'void *'
+ref_gl\gl_rmain.c(1990) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+ref_gl\gl_rmain.c(1991) : warning C4054: 'type cast' : from function pointer 'PROC' to data pointer 'void *'
+ref_gl\gl_rmain.c(1991) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+ref_gl\gl_rmain.c(2016) : warning C4054: 'type cast' : from function pointer 'PROC' to data pointer 'void *'
+ref_gl\gl_rmain.c(2016) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+ref_gl\gl_rmain.c(2017) : warning C4054: 'type cast' : from function pointer 'PROC' to data pointer 'void *'
+ref_gl\gl_rmain.c(2017) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+ref_gl\gl_rmain.c(2113) : warning C4057: 'function' : 'unsigned int *' differs in indirection to slightly different base types from 'int *'
+c:\dev\myq2\ref_gl\gl_rmain.c(2142) : warning C4715: 'R_Init' : not all control paths return a value
+gl_refl.c
+ref_gl\gl_refl.c(433) : warning C4206: nonstandard extension used : translation unit is empty
+gl_model.c
+ref_gl\gl_model.c(59) : warning C4127: conditional expression is constant
+gl_mesh.c
+ref_gl\gl_mesh.c(133) : warning C4127: conditional expression is constant
+ref_gl\gl_mesh.c(90) : warning C4100: 'posenum' : unreferenced formal parameter
+ref_gl\gl_mesh.c(275) : warning C4127: conditional expression is constant
+ref_gl\gl_mesh.c(329) : warning C4127: conditional expression is constant
+ref_gl\gl_mesh.c(428) : warning C4127: conditional expression is constant
+ref_gl\gl_mesh.c(398) : warning C4100: 'posenum' : unreferenced formal parameter
+ref_gl\gl_mesh.c(844) : warning C4210: nonstandard extension used : function given file scope
+gl_light.c
+gl_image.c
+ref_gl\gl_image.c(103) : warning C4389: '==' : signed/unsigned mismatch
+ref_gl\gl_image.c(108) : warning C4389: '==' : signed/unsigned mismatch
+ref_gl\gl_image.c(112) : warning C4389: '==' : signed/unsigned mismatch
+ref_gl\gl_image.c(144) : warning C4389: '!=' : signed/unsigned mismatch
+ref_gl\gl_image.c(166) : warning C4389: '==' : signed/unsigned mismatch
+ref_gl\gl_image.c(173) : warning C4389: '==' : signed/unsigned mismatch
+ref_gl\gl_image.c(178) : warning C4389: '==' : signed/unsigned mismatch
+ref_gl\gl_image.c(1708) : warning C4057: 'function' : 'const GLuint *' differs in indirection to slightly different base types from 'int *'
+ref_gl\gl_image.c(1860) : warning C4057: 'function' : 'const GLuint *' differs in indirection to slightly different base types from 'int *'
+gl_draw.c
+ref_gl\gl_draw.c(356) : warning C4101: 'image8' : unreferenced local variable
+x86.c
+wildcards.c
+vid_menu.c
+win32\vid_menu.c(63) : warning C4189: 'slider' : local variable is initialized but not referenced
+win32\vid_menu.c(66) : warning C4100: 'unused' : unreferenced formal parameter
+win32\vid_menu.c(71) : warning C4100: 'unused' : unreferenced formal parameter
+win32\vid_menu.c(121) : warning C4210: nonstandard extension used : function given file scope
+win32\vid_menu.c(119) : warning C4100: 'unused' : unreferenced formal parameter
+vid_dll.c
+win32\vid_dll.c(473) : warning C4210: nonstandard extension used : function given file scope
+win32\vid_dll.c(547) : warning C4100: 'y' : unreferenced formal parameter
+win32\vid_dll.c(547) : warning C4100: 'x' : unreferenced formal parameter
+win32\vid_dll.c(632) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+sys_win.c
+win32\sys_win.c(277) : warning C4057: 'function' : 'LPDWORD' differs in indirection to slightly different base types from 'int *'
+win32\sys_win.c(283) : warning C4057: 'function' : 'LPDWORD' differs in indirection to slightly different base types from 'int *'
+win32\sys_win.c(298) : warning C4057: 'function' : 'LPDWORD' differs in indirection to slightly different base types from 'int *'
+win32\sys_win.c(312) : warning C4057: 'function' : 'LPDWORD' differs in indirection to slightly different base types from 'int *'
+win32\sys_win.c(321) : warning C4057: 'function' : 'LPDWORD' differs in indirection to slightly different base types from 'int *'
+win32\sys_win.c(359) : warning C4057: 'function' : 'LPDWORD' differs in indirection to slightly different base types from 'int *'
+win32\sys_win.c(362) : warning C4057: 'function' : 'LPDWORD' differs in indirection to slightly different base types from 'int *'
+win32\sys_win.c(365) : warning C4057: 'function' : 'LPDWORD' differs in indirection to slightly different base types from 'int *'
+win32\sys_win.c(524) : warning C4127: conditional expression is constant
+win32\sys_win.c(540) : warning C4054: 'type cast' : from function pointer 'FARPROC' to data pointer 'void *'
+win32\sys_win.c(540) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+win32\sys_win.c(632) : warning C4127: conditional expression is constant
+win32\sys_win.c(596) : warning C4100: 'nCmdShow' : unreferenced formal parameter
+sv_world.c
+server\sv_world.c(327) : warning C4127: conditional expression is constant
+sv_user.c
+server\sv_user.c(554) : warning C4127: conditional expression is constant
+sv_send.c
+sv_main.c
+server\sv_main.c(445) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+sv_init.c
+sv_game.c
+c:\dev\myq2\server\sv_game.c(102) : warning C4701: local variable 'n' may be used without having been initialized
+sv_ents.c
+c:\dev\myq2\server\sv_ents.c(171) : warning C4701: local variable 'newent' may be used without having been initialized
+c:\dev\myq2\server\sv_ents.c(171) : warning C4701: local variable 'oldent' may be used without having been initialized
+sv_ccmds.c
+server\sv_ccmds.c(210) : warning C4127: conditional expression is constant
+server\sv_ccmds.c(431) : warning C4127: conditional expression is constant
+server\sv_ccmds.c(928) : warning C4057: 'function' : 'byte *' differs in indirection to slightly different base types from 'char [32768]'
+snd_win.c
+win32\snd_win.c(383) : warning C4054: 'type cast' : from function pointer 'FARPROC' to data pointer 'void *'
+win32\snd_win.c(383) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+win32\snd_win.c(782) : warning C4127: conditional expression is constant
+c:\dev\myq2\win32\snd_win.c(695) : warning C4701: local variable 's' may be used without having been initialized
+snd_mix.c
+client\snd_mix.c(188) : warning C4310: cast truncates constant value
+client\snd_mix.c(189) : warning C4310: cast truncates constant value
+client\snd_mix.c(203) : warning C4310: cast truncates constant value
+client\snd_mix.c(204) : warning C4310: cast truncates constant value
+client\snd_mix.c(244) : warning C4127: conditional expression is constant
+client\snd_mix.c(401) : warning C4100: 'offset' : unreferenced formal parameter
+client\snd_mix.c(401) : warning C4100: 'count' : unreferenced formal parameter
+client\snd_mix.c(401) : warning C4100: 'sc' : unreferenced formal parameter
+client\snd_mix.c(401) : warning C4100: 'ch' : unreferenced formal parameter
+snd_mem.c
+client\snd_mem.c(212) : warning C4127: conditional expression is constant
+client\snd_mem.c(233) : warning C4057: 'function' : 'const char *' differs in indirection to slightly different base types from 'byte *'
+client\snd_mem.c(283) : warning C4057: 'function' : 'const char *' differs in indirection to slightly different base types from 'byte *'
+client\snd_mem.c(324) : warning C4057: 'function' : 'const char *' differs in indirection to slightly different base types from 'byte *'
+snd_dma.c
+c:\dev\myq2\client\snd_dma.c(639) : warning C4701: local variable 'end' may be used without having been initialized
+qmenu.c
+client\qmenu.c(305) : warning C4127: conditional expression is constant
+client\qmenu.c(318) : warning C4127: conditional expression is constant
+client\qmenu.c(417) : warning C4189: 'maxrow' : local variable is initialized but not referenced
+pmove.c
+net_udp.c
+win32\net_udp.c(331) : warning C4100: 'to' : unreferenced formal parameter
+win32\net_udp.c(372) : warning C4057: 'function' : 'char *' differs in indirection to slightly different base types from 'byte *'
+win32\net_udp.c(530) : warning C4133: 'function' : incompatible types - from 'qboolean *' to 'u_long *'
+win32\net_udp.c(639) : warning C4057: 'function' : 'u_long *' differs in indirection to slightly different base types from 'int *'
+win32\net_udp.c(773) : warning C4389: '==' : signed/unsigned mismatch
+win32\net_udp.c(773) : warning C4127: conditional expression is constant
+win32\net_udp.c(777) : warning C4389: '==' : signed/unsigned mismatch
+win32\net_udp.c(777) : warning C4127: conditional expression is constant
+c:\dev\myq2\win32\net_udp.c(126) : warning C4715: 'NET_CompareAdr' : not all control paths return a value
+c:\dev\myq2\win32\net_udp.c(156) : warning C4715: 'NET_CompareBaseAdr' : not all control paths return a value
+c:\dev\myq2\win32\net_udp.c(252) : warning C4706: assignment within conditional expression
+c:\dev\myq2\win32\net_udp.c(467) : warning C4701: local variable 'net_socket' may be used without having been initialized
+net_chan.c
+qcommon\net_chan.c(368) : warning C4389: '==' : signed/unsigned mismatch
+menu.c
+client\menu.c(518) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(523) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(528) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1041) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1046) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1051) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1056) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1061) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1066) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1071) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1113) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1121) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1126) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1131) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1136) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1141) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1151) : warning C4210: nonstandard extension used : function given file scope
+client\menu.c(1146) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1166) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1905) : warning C4100: 'data' : unreferenced formal parameter
+client\menu.c(1911) : warning C4100: 'data' : unreferenced formal parameter
+client\menu.c(1917) : warning C4100: 'data' : unreferenced formal parameter
+client\menu.c(1923) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1928) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(1933) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(2266) : warning C4100: 'self' : unreferenced formal parameter
+client\menu.c(2271) : warning C4100: 'self' : unreferenced formal parameter
+client\menu.c(2295) : warning C4100: 'self' : unreferenced formal parameter
+client\menu.c(2390) : warning C4100: 'self' : unreferenced formal parameter
+client\menu.c(2397) : warning C4100: 'self' : unreferenced formal parameter
+client\menu.c(2434) : warning C4100: 'self' : unreferenced formal parameter
+client\menu.c(3385) : warning C4100: 'self' : unreferenced formal parameter
+client\menu.c(3390) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(3395) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(3401) : warning C4100: 'unused' : unreferenced formal parameter
+client\menu.c(3449) : warning C4210: nonstandard extension used : function given file scope
+client\menu.c(3767) : warning C4210: nonstandard extension used : function given file scope
+client\menu.c(3784) : warning C4189: 'maxframe' : local variable is initialized but not referenced
+c:\dev\myq2\client\menu.c(3578) : warning C4715: 'PlayerConfig_ScanDirectories' : not all control paths return a value
+md4.c
+m_flash.c
+keys.c
+client\keys.c(350) : warning C4389: '==' : signed/unsigned mismatch
+in_win.c
+win32\in_win.c(266) : warning C4101: 'i' : unreferenced local variable
+c:\dev\myq2\win32\in_win.c(570) : warning C4701: local variable 'mmr' may be used without having been initialized
+c:\dev\myq2\win32\in_win.c(624) : warning C4715: 'RawValuePointer' : not all control paths return a value
+files.c
+cvar.c
+crc.c
+console.c
+client\console.c(678) : warning C4146: unary minus operator applied to unsigned type, result still unsigned
+c:\dev\myq2\client\console.c(411) : warning C4706: assignment within conditional expression
+conproc.c
+win32\conproc.c(170) : warning C4127: conditional expression is constant
+win32\conproc.c(160) : warning C4100: 'arg' : unreferenced formal parameter
+win32\conproc.c(268) : warning C4244: '=' : conversion from 'int' to 'SHORT', possible loss of data
+win32\conproc.c(299) : warning C4244: '=' : conversion from 'int' to 'char', possible loss of data
+win32\conproc.c(305) : warning C4244: '=' : conversion from 'int' to 'WORD', possible loss of data
+win32\conproc.c(335) : warning C4244: '=' : conversion from 'int' to 'char', possible loss of data
+win32\conproc.c(376) : warning C4244: '=' : conversion from 'int' to 'SHORT', possible loss of data
+win32\conproc.c(383) : warning C4244: '=' : conversion from 'int' to 'SHORT', possible loss of data
+win32\conproc.c(390) : warning C4244: '=' : conversion from 'int' to 'SHORT', possible loss of data
+win32\conproc.c(404) : warning C4244: '=' : conversion from 'int' to 'SHORT', possible loss of data
+win32\conproc.c(413) : warning C4244: '=' : conversion from 'int' to 'SHORT', possible loss of data
+win32\conproc.c(420) : warning C4244: '=' : conversion from 'int' to 'SHORT', possible loss of data
+c:\dev\myq2\win32\conproc.c(116) : warning C4701: local variable 'hFile' may be used without having been initialized
+c:\dev\myq2\win32\conproc.c(116) : warning C4701: local variable 'heventParent' may be used without having been initialized
+c:\dev\myq2\win32\conproc.c(116) : warning C4701: local variable 'heventChild' may be used without having been initialized
+common.c
+qcommon\common.c(79) : warning C4152: nonstandard extension, function/data pointer conversion in expression
+qcommon\common.c(1215) : warning C4100: 'challenge' : unreferenced formal parameter
+qcommon\common.c(1215) : warning C4100: 'sequence' : unreferenced formal parameter
+qcommon\common.c(1215) : warning C4100: 'length' : unreferenced formal parameter
+qcommon\common.c(1215) : warning C4100: 'base' : unreferenced formal parameter
+qcommon\common.c(1417) : warning C4013: 'Con_Init' undefined; assuming extern returning int
+cmodel.c
+qcommon\cmodel.c(853) : warning C4127: conditional expression is constant
+cmd.c
+qcommon\cmd.c(164) : warning C4057: 'function' : 'char *' differs in indirection to slightly different base types from 'byte [65536]'
+qcommon\cmd.c(689) : warning C4127: conditional expression is constant
+qcommon\cmd.c(780) : warning C4127: conditional expression is constant
+cl_view.c
+client\cl_view.c(448) : warning C4210: nonstandard extension used : function given file scope
+cl_tent.c
+c:\dev\myq2\client\cl_tent.c(1605) : warning C4701: local variable 'framenum' may be used without having been initialized
+cl_scrn.c
+client\cl_scrn.c(246) : warning C4127: conditional expression is constant
+client\cl_scrn.c(295) : warning C4127: conditional expression is constant
+cl_pred.c
+cl_part.c
+cl_parse.c
+client\cl_parse.c(317) : warning C4127: conditional expression is constant
+client\cl_parse.c(369) : warning C4057: 'function' : 'unsigned int *' differs in indirection to slightly different base types from 'int *'
+client\cl_parse.c(791) : warning C4127: conditional expression is constant
+cl_newfx.c
+client\cl_newfx.c(274) : warning C4100: 'ent' : unreferenced formal parameter
+cl_main.c
+client\cl_main.c(204) : warning C4057: 'function' : 'byte *' differs in indirection to slightly different base types from 'char [1400]'
+client\cl_main.c(542) : warning C4310: cast truncates constant value
+client\cl_main.c(543) : warning C4310: cast truncates constant value
+client\cl_main.c(544) : warning C4310: cast truncates constant value
+client\cl_main.c(545) : warning C4310: cast truncates constant value
+client\cl_main.c(647) : warning C4057: 'function' : 'const char *' differs in indirection to slightly different base types from 'byte [32]'
+client\cl_main.c(648) : warning C4057: 'function' : 'const char *' differs in indirection to slightly different base types from 'byte [32]'
+client\cl_main.c(649) : warning C4057: 'function' : 'const char *' differs in indirection to slightly different base types from 'byte [32]'
+client\cl_main.c(702) : warning C4310: cast truncates constant value
+client\cl_main.c(1415) : warning C4389: '!=' : signed/unsigned mismatch
+c:\dev\myq2\client\cl_main.c(1088) : warning C4701: local variable 'end' may be used without having been initialized
+cl_inv.c
+cl_input.c
+c:\dev\myq2\client\cl_input.c(485) : warning C4700: local variable 'buf' used without having been initialized
+cl_fx.c
+c:\dev\myq2\client\cl_fx.c(2306) : warning C4701: local variable 'time' may be used without having been initialized
+cl_ents.c
+client\cl_ents.c(411) : warning C4127: conditional expression is constant
+client\cl_ents.c(413) : warning C4057: 'function' : 'unsigned int *' differs in indirection to slightly different base types from 'int *'
+c:\dev\myq2\client\cl_ents.c(492) : warning C4701: local variable 'oldstate' may be used without having been initialized
+cl_cin.c
+client\cl_cin.c(557) : warning C4057: 'function' : 'const unsigned char *' differs in indirection to slightly different base types from 'char [768]'
+cd_win.c
+win32\cd_win.c(377) : warning C4389: '!=' : signed/unsigned mismatch
+win32\cd_win.c(375) : warning C4100: 'uMsg' : unreferenced formal parameter
+win32\cd_win.c(375) : warning C4100: 'hWnd' : unreferenced formal parameter
+c:\dev\myq2\win32\cd_win.c(202) : warning C4706: assignment within conditional expression
+c:\dev\myq2\win32\cd_win.c(222) : warning C4706: assignment within conditional expression
+c:\dev\myq2\win32\cd_win.c(449) : warning C4706: assignment within conditional expression
+c:\dev\myq2\win32\cd_win.c(458) : warning C4706: assignment within conditional expression
+c:\dev\myq2\win32\cd_win.c(53) : warning C4706: assignment within conditional expression
+c:\dev\myq2\win32\cd_win.c(62) : warning C4706: assignment within conditional expression
+Compiling...
+qgl_win.c
+win32\qgl_win.c(3154) : warning C4057: '=' : 'GLuint (__stdcall *)(GLsizei)' differs in indirection to slightly different base types from 'FARPROC'
+win32\qgl_win.c(3159) : warning C4057: '=' : 'GLenum (__stdcall *)(void)' differs in indirection to slightly different base types from 'FARPROC'
+q_shwin.c
+Compiling resources...
+Linking...
+LINK : warning LNK4235: /LTCG specified but no code generation required; remove /LTCG from the link command line to improve linker performance
+</pre></table><table width=100% bgcolor=#DFDFE5><tr><td><font face=arial size=+2>
+Results
+</font></table><table width=* cellspacing=0 cellpadding=0><tr><td width=0 bgcolor=#EDEDF5>&nbsp;</td><td width=0 bgcolor=#FFFFFF>&nbsp;</td><td width=*><pre>
+Build log was saved at "file://c:\dev\myq2\release\BuildLog.htm"
+MyQ2 - 0 error(s), 230 warning(s)</pre></table><table   width=100% height=20 bgcolor=#CFCFE5><tr><td><font face=arial size=+2>
+</font></table></body></html>
