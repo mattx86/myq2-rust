@@ -1,0 +1,11 @@
+[package]
+name = "myq2-server"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+myq2-common = { path = "../myq2-common" }
+myq2-game = { path = "../myq2-game" }
+rand = "0.8"
+rayon = { workspace = true }
+libloading = { workspace = true }

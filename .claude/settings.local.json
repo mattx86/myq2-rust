@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(Select-String \"error\\\\[E\")",
+      "Bash(ForEach-Object { $_ -match '\\([a-z_]+\\\\.rs\\)')",
+      "Bash(Out-Null)",
+      "Bash($Matches[1] })",
+      "Bash(Sort-Object)",
+      "Bash(Get-Unique -AsString)",
+      "Bash(Group-Object)",
+      "Bash(Sort-Object Count -Descending)",
+      "Bash(Select-Object -First 15 Count, Name)",
+      "Bash(findstr:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(done)",
+      "Bash(wc:*)",
+      "Bash(dir:*)",
+      "Bash(cargo search:*)",
+      "Bash(set \"CMAKE_ARGS=-DCMAKE_POLICY_VERSION_MINIMUM=3.5\")",
+      "Bash(curl:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(ls:*)",
+      "Bash(xargs:*)",
+      "Bash(cargo check:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:panjoo.tastyspleen.net)",
+      "WebFetch(domain:skuller.net)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ]
+  }
+}

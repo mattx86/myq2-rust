@@ -1,0 +1,13 @@
+[package]
+name = "myq2-game-dll"
+version = "1.0.0"
+edition = "2021"
+description = "Quake 2 game DLL (gamex86.dll) built from Rust"
+
+[lib]
+name = "gamex86"
+crate-type = ["cdylib"]
+
+[dependencies]
+myq2-game = { path = "../myq2-game" }
+myq2-common = { path = "../myq2-common" }

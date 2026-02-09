@@ -1,0 +1,34 @@
+[workspace]
+members = [
+    "crates/myq2-common",
+    "crates/myq2-client",
+    "crates/myq2-server",
+    "crates/myq2-game",
+    "crates/myq2-game-dll",
+    "crates/myq2-renderer",
+    "crates/myq2-sys",
+    "crates/openal-soft-sys",
+]
+resolver = "2"
+
+[workspace.dependencies]
+rayon = "1.10"
+parking_lot = "0.12"
+crossbeam = "0.8"
+flate2 = "1.0"
+sha1 = "0.10"
+
+# Vulkan dependencies
+ash = { version = "0.38", default-features = false, features = ["linked", "debug"] }
+ash-window = "0.13"
+gpu-allocator = { version = "0.28", default-features = false, features = ["vulkan", "std"] }
+
+# Window management
+winit = "0.30"
+raw-window-handle = "0.6"
+
+# Utility
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# Dynamic library loading
+libloading = "0.8"

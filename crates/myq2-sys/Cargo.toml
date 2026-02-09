@@ -1,0 +1,26 @@
+[package]
+name = "myq2-sys"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "myq2-rust"
+path = "src/main.rs"
+
+[dependencies]
+myq2-common = { path = "../myq2-common" }
+myq2-client = { path = "../myq2-client" }
+myq2-server = { path = "../myq2-server" }
+myq2-renderer = { path = "../myq2-renderer" }
+socket2 = "0.5"
+openal-soft-sys = { path = "../openal-soft-sys" }
+crossbeam = { workspace = true }
+parking_lot = { workspace = true }
+
+# Window management (replaces SDL3)
+winit = { workspace = true }
+raw-window-handle = { workspace = true }
+
+# Vulkan surface creation
+ash = { workspace = true }
+ash-window = { workspace = true }

@@ -1,0 +1,26 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Build logs
+*.log
+*_err.txt
+*_errors.txt
+*_output.txt
+build_err.txt
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+nul
+
+# Debug files
+*.pdb

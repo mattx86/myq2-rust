@@ -1,0 +1,26 @@
+[package]
+name = "myq2-renderer"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+myq2-common = { path = "../myq2-common" }
+image = { version = "0.25", default-features = false, features = ["tga", "png", "jpeg"] }
+rayon = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam = { workspace = true }
+
+# Vulkan
+ash = { workspace = true }
+ash-window = { workspace = true }
+gpu-allocator = { workspace = true }
+
+# Window/Platform
+winit = { workspace = true }
+
+# Utility
+bytemuck = { workspace = true }
+raw-window-handle = { workspace = true }
+
+# Note: SDL3 has been replaced with direct Vulkan via ash.
+# Build-time shader compilation uses glslc (Vulkan SDK) targeting vulkan1.3.
