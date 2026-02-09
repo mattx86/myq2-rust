@@ -1,5 +1,7 @@
 # MyQ2 Rust
 
+> **Alpha Software** — This project is under active development and not yet feature-complete. Expect bugs, missing functionality, and general unusability.
+
 A complete rewrite of [MyQ2](myq2-original/readme.txt) (a Quake II engine fork by Matt Smith) in Rust, featuring a modern Vulkan renderer, R1Q2/Q2Pro-inspired client enhancements, and extensive parallelization.
 
 Based on id Software's Quake II engine (v3.21), licensed under the GPL.
