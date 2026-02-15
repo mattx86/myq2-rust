@@ -2022,7 +2022,7 @@ pub fn sp_misc_teleporter_dest(ctx: &mut GameContext, ent_idx: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::g_local::{Edict, GameCtx, LevelLocals, GameLocals, SpawnTemp, GClient};
+    use crate::g_local::{Edict, GameCtx, LevelLocals, GameLocals};
 
     fn init_test_gi() {
         crate::game_import::set_gi(Box::new(crate::game_import::StubGameImport));

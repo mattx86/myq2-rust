@@ -21,7 +21,7 @@ use myq2_common::qcommon::{
 use myq2_common::common::{com_printf, com_dprintf, com_error, msg_write_char, msg_write_short, msg_write_string};
 use myq2_common::cvar::{cvar_set, cvar_full_set, cvar_variable_value, cvar_get_latched_vars};
 use myq2_common::files::fs_gamedir;
-use myq2_common::cmd;
+
 
 use std::path::Path;
 use rand::Rng;
@@ -29,6 +29,65 @@ use rand::Rng;
 // Cross-module client callbacks — registered at startup by main.rs.
 // These cannot be wired directly because they live in the myq2-client crate.
 use std::sync::Mutex;
+
+// ============================================================
+// Chunked Map Loading System
+// ============================================================
+
+/// Progress tracking for chunked/interruptible map loading.
+/// Breaks sv_spawn_server into phases that execute across multiple frames
+/// to prevent Windows "Not Responding" white screen during BSP loading.
+#[derive(Debug, Clone)]
+pub enum MapLoadPhase {
+    /// Not currently loading a map
+    Idle,
+    /// Phase 1: Initialize server state (fast, single frame)
+    Init {
+        server: String,
+        spawnpoint: String,
+        serverstate: ServerState,
+        attractloop: bool,
+        loadgame: bool,
+    },
+    /// Phase 2: Load BSP collision model (slow, blocking I/O)
+    LoadingBSP {
+        server: String,
+        spawnpoint: String,
+        serverstate: ServerState,
+        attractloop: bool,
+        loadgame: bool,
+    },
+    /// Phase 3: Setup physics world and inline models (fast, single frame)
+    SetupPhysics {
+        server: String,
+        spawnpoint: String,
+        serverstate: ServerState,
+        attractloop: bool,
+        loadgame: bool,
+        checksum: u32,
+    },
+    /// Phase 4: Spawn entities via game DLL (potentially slow)
+    SpawningEntities {
+        server: String,
+        spawnpoint: String,
+        serverstate: ServerState,
+        attractloop: bool,
+        loadgame: bool,
+    },
+    /// Phase 5: Run two game frames to settle physics (potentially slow)
+    RunningFrames {
+        server: String,
+        spawnpoint: String,
+        serverstate: ServerState,
+        frames_run: u32,
+    },
+    /// Phase 6: Finalization - create baseline, check savegame (fast)
+    Finalizing {
+        serverstate: ServerState,
+    },
+    /// Map loading complete
+    Complete,
+}
 
 /// Client-side callbacks that the server needs to invoke.
 /// Registered by main.rs after both client and server are initialized.
@@ -42,6 +101,35 @@ static SV_CLIENT_CALLBACKS: Mutex<Option<SvClientCallbacks>> = Mutex::new(None);
 /// Register client callbacks so the server can call into the client module.
 pub fn sv_register_client_callbacks(cb: SvClientCallbacks) {
     *SV_CLIENT_CALLBACKS.lock().unwrap() = Some(cb);
+}
+
+// ============================================================
+// Global ServerContext — replaces C global server state
+// ============================================================
+
+static GLOBAL_SERVER_CTX: Mutex<Option<ServerContext>> = Mutex::new(None);
+
+/// Initialize the global server context. Called once at startup.
+pub fn sv_init_global_context() {
+    let mut guard = GLOBAL_SERVER_CTX.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(ServerContext::default());
+    }
+}
+
+/// Access the global ServerContext with a closure.
+pub fn with_server_context<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut ServerContext) -> R,
+{
+    GLOBAL_SERVER_CTX.lock().unwrap().as_mut().map(f)
+}
+
+/// SV_Frame wrapper for the global context — suitable as a frame callback.
+pub fn sv_frame_global(msec: i32) {
+    if let Some(ref mut ctx) = *GLOBAL_SERVER_CTX.lock().unwrap() {
+        crate::sv_main::sv_frame(ctx, msec);
+    }
 }
 
 fn cl_drop() {
@@ -68,10 +156,11 @@ fn net_string_to_adr(s: &str, adr: &mut NetAdr) {
 /// SV_ClearWorld — clears the area node tree and rebuilds it from the world model bounds.
 fn sv_clear_world() {
     // In original C: uses sv.models[1]->mins/maxs (the world BSP model).
-    // We get the bounds from the collision model system.
+    // sv.models[1] is the cmodel_t* returned by CM_LoadMap = map_cmodels[0] (worldmodel).
+    // Note: inline_model("*N") requires N >= 1, so we access map_cmodels[0] directly.
     let bounds = myq2_common::cmodel::with_cmodel_ctx(|ctx| {
         if ctx.numcmodels > 0 {
-            let model = ctx.inline_model("*1");
+            let model = &ctx.map_cmodels[0]; // worldmodel
             (model.mins, model.maxs)
         } else {
             ([-4096.0; 3], [4096.0; 3])
@@ -95,7 +184,7 @@ fn cm_load_map(name: &str, clientload: bool) -> (i32, u32) {
 fn cm_entity_string() -> String { myq2_common::cmodel::cm_entity_string() }
 
 /// Placeholder pm_airaccelerate global
-pub static mut PM_AIRACCELERATE: f32 = 0.0;
+pub static PM_AIRACCELERATE: std::sync::Mutex<f32> = std::sync::Mutex::new(0.0);
 
 // Placeholder cvar references
 fn maxclients_value() -> f32 { 1.0 }
@@ -281,16 +370,10 @@ pub fn sv_spawn_server(
     ctx.sv.configstrings[CS_NAME] = server.to_string();
     if cvar_variable_value("deathmatch") != 0.0 {
         ctx.sv.configstrings[CS_AIRACCEL] = format!("{}", sv_airaccelerate_value());
-        // SAFETY: single-threaded engine access pattern
-        unsafe {
-            PM_AIRACCELERATE = sv_airaccelerate_value();
-        }
+        *PM_AIRACCELERATE.lock().unwrap() = sv_airaccelerate_value();
     } else {
         ctx.sv.configstrings[CS_AIRACCEL] = "0".to_string();
-        // SAFETY: single-threaded engine access pattern
-        unsafe {
-            PM_AIRACCELERATE = 0.0;
-        }
+        *PM_AIRACCELERATE.lock().unwrap() = 0.0;
     }
 
     ctx.sv.multicast = SizeBuf::new(MAX_MSGLEN as i32);
@@ -389,6 +472,252 @@ pub fn sv_spawn_server(
     cvar_full_set("mapname", &ctx.sv.name, CVAR_SERVERINFO | CVAR_NOSET);
 
     com_printf("-------------------------------------\n");
+}
+
+// ============================================================
+// sv_spawn_server_tick — Process one chunk of map loading
+// ============================================================
+
+/// Process one chunk of the map loading state machine.
+/// Returns true if loading is complete, false if more chunks remain.
+///
+/// This function should be called each frame from the main loop until
+/// it returns true. It breaks the monolithic sv_spawn_server() into
+/// interruptible chunks to prevent Windows "Not Responding" freeze.
+pub fn sv_spawn_server_tick(ctx: &mut ServerContext) -> bool {
+    let current_phase = ctx.map_load_progress.clone();
+
+    match current_phase {
+        MapLoadPhase::Idle | MapLoadPhase::Complete => {
+            return true; // Nothing to do
+        }
+
+        MapLoadPhase::Init { server, spawnpoint, serverstate, attractloop, loadgame } => {
+            com_printf("------- Server Initialization -------\n");
+            com_dprintf(&format!("SpawnServer: {}\n", server));
+
+            if attractloop {
+                cvar_set("paused", "0");
+            }
+
+            if ctx.sv.demofile.is_some() {
+                ctx.sv.demofile = None; // drop/close the file
+            }
+
+            ctx.svs.spawncount += 1; // any partially connected client will be restarted
+            ctx.sv.state = ServerState::Dead;
+            crate::sv_main::com_set_server_state(ctx.sv.state);
+
+            // wipe the entire per-level structure
+            ctx.sv = Server::default();
+            ctx.svs.realtime = 0;
+            ctx.sv.loadgame = loadgame;
+            ctx.sv.attractloop = attractloop;
+
+            // save name for levels that don't set message
+            ctx.sv.configstrings[CS_NAME] = server.clone();
+            if cvar_variable_value("deathmatch") != 0.0 {
+                ctx.sv.configstrings[CS_AIRACCEL] = format!("{}", sv_airaccelerate_value());
+                *PM_AIRACCELERATE.lock().unwrap() = sv_airaccelerate_value();
+            } else {
+                ctx.sv.configstrings[CS_AIRACCEL] = "0".to_string();
+                *PM_AIRACCELERATE.lock().unwrap() = 0.0;
+            }
+
+            ctx.sv.multicast = SizeBuf::new(MAX_MSGLEN as i32);
+            ctx.sv.name = server.clone();
+
+            // leave slots at start for clients only
+            let max_cl = maxclients_value() as usize;
+            for i in 0..max_cl {
+                if i < ctx.svs.clients.len() {
+                    // needs to reconnect
+                    if ctx.svs.clients[i].state as i32 > ClientState::Connected as i32 {
+                        ctx.svs.clients[i].state = ClientState::Connected;
+                    }
+                    ctx.svs.clients[i].lastframe = -1;
+                }
+            }
+
+            ctx.sv.time = 1000;
+            ctx.sv.name = server.clone();
+            ctx.sv.configstrings[CS_NAME] = server.clone();
+
+            // Advance to next phase
+            ctx.map_load_progress = MapLoadPhase::LoadingBSP {
+                server,
+                spawnpoint,
+                serverstate,
+                attractloop,
+                loadgame,
+            };
+            com_printf("[Chunk 1/6] Initialization complete\n");
+            return false; // More work to do
+        }
+
+        MapLoadPhase::LoadingBSP { server, spawnpoint, serverstate, attractloop, loadgame } => {
+            com_printf("[Chunk 2/6] Loading BSP collision model...\n");
+
+            let checksum: u32;
+            if serverstate != ServerState::Game {
+                let (model, chk) = cm_load_map("", false); // no real map
+                ctx.sv.models[1] = model;
+                checksum = chk;
+            } else {
+                ctx.sv.configstrings[CS_MODELS + 1] = format!("maps/{}.bsp", server);
+                let map_name = ctx.sv.configstrings[CS_MODELS + 1].clone();
+                let (model, chk) = cm_load_map(&map_name, false);
+                if model == 0 && chk == 0 {
+                    // BSP load failed - abort map loading
+                    com_printf(&format!("ERROR: Failed to load maps/{}.bsp\n", server));
+                    ctx.map_load_progress = MapLoadPhase::Idle;
+                    return true; // Loading aborted
+                }
+                ctx.sv.models[1] = model;
+                checksum = chk;
+            }
+            ctx.sv.configstrings[CS_MAPCHECKSUM] = format!("{}", checksum);
+
+            // Advance to next phase
+            ctx.map_load_progress = MapLoadPhase::SetupPhysics {
+                server,
+                spawnpoint,
+                serverstate,
+                attractloop,
+                loadgame,
+                checksum,
+            };
+            com_printf("[Chunk 2/6] BSP loaded\n");
+            return false; // More work to do
+        }
+
+        MapLoadPhase::SetupPhysics { server, spawnpoint, serverstate, attractloop, loadgame, checksum: _ } => {
+            com_printf("[Chunk 3/6] Setting up physics world...\n");
+
+            // clear physics interaction links
+            sv_clear_world();
+
+            let num_inline = myq2_common::cmodel::cm_num_inline_models() as i32;
+            for i in 1..num_inline as usize {
+                ctx.sv.configstrings[CS_MODELS + 1 + i] = format!("*{}", i);
+                let model_name = ctx.sv.configstrings[CS_MODELS + 1 + i].clone();
+                ctx.sv.models[i + 1] = myq2_common::cmodel::cm_inline_model(&model_name).headnode;
+            }
+
+            // Advance to next phase
+            ctx.map_load_progress = MapLoadPhase::SpawningEntities {
+                server,
+                spawnpoint,
+                serverstate,
+                attractloop,
+                loadgame,
+            };
+            com_printf("[Chunk 3/6] Physics setup complete\n");
+            return false; // More work to do
+        }
+
+        MapLoadPhase::SpawningEntities { server, spawnpoint, serverstate, attractloop: _, loadgame: _ } => {
+            com_printf("[Chunk 4/6] Spawning entities...\n");
+
+            // precache and static commands can be issued during map initialization
+            ctx.sv.state = ServerState::Loading;
+            crate::sv_main::com_set_server_state(ctx.sv.state);
+
+            // load and spawn all other entities
+            let entity_string = cm_entity_string();
+            let sv_name = ctx.sv.name.clone();
+            if let Some(ref ge) = ctx.ge {
+                if let Some(spawn_fn) = ge.spawn_entities {
+                    spawn_fn(&sv_name, &entity_string, &spawnpoint);
+                }
+            }
+            // Sync edicts from game context to server after spawning
+            if let Some(ref mut ge) = ctx.ge {
+                crate::sv_game::sync_edicts_to_server(ge);
+            }
+
+            // Advance to next phase
+            ctx.map_load_progress = MapLoadPhase::RunningFrames {
+                server,
+                spawnpoint,
+                serverstate,
+                frames_run: 0,
+            };
+            com_printf("[Chunk 4/6] Entities spawned\n");
+            return false; // More work to do
+        }
+
+        MapLoadPhase::RunningFrames { server: _, spawnpoint: _, serverstate, frames_run } => {
+            com_printf(&format!("[Chunk 5/6] Running settle frame {}/2...\n", frames_run + 1));
+
+            // run one frame to allow things to settle
+            if let Some(ref ge) = ctx.ge {
+                if let Some(run_fn) = ge.run_frame {
+                    run_fn();
+                }
+            }
+            // Sync edicts after run frame
+            if let Some(ref mut ge) = ctx.ge {
+                crate::sv_game::sync_edicts_to_server(ge);
+            }
+
+            if frames_run + 1 >= 2 {
+                // Both frames complete, advance to finalization
+                ctx.map_load_progress = MapLoadPhase::Finalizing { serverstate };
+                com_printf("[Chunk 5/6] Settle frames complete\n");
+            } else {
+                // Need to run another frame
+                ctx.map_load_progress = MapLoadPhase::RunningFrames {
+                    server: String::new(),
+                    spawnpoint: String::new(),
+                    serverstate,
+                    frames_run: frames_run + 1,
+                };
+            }
+            return false; // More work to do
+        }
+
+        MapLoadPhase::Finalizing { serverstate } => {
+            com_printf("[Chunk 6/6] Finalizing...\n");
+
+            // all precaches are complete
+            ctx.sv.state = serverstate;
+            crate::sv_main::com_set_server_state(ctx.sv.state);
+
+            // create a baseline for more efficient communications
+            sv_create_baseline(ctx);
+
+            // check for a savegame
+            sv_check_for_savegame(ctx);
+
+            // set serverinfo variable
+            cvar_full_set("mapname", &ctx.sv.name, CVAR_SERVERINFO | CVAR_NOSET);
+
+            com_printf("-------------------------------------\n");
+
+            // Mark as complete
+            ctx.map_load_progress = MapLoadPhase::Complete;
+            return true; // Loading complete!
+        }
+    }
+}
+
+/// Start chunked map loading. Call sv_spawn_server_tick() each frame until complete.
+pub fn sv_spawn_server_chunked(
+    ctx: &mut ServerContext,
+    server: &str,
+    spawnpoint: &str,
+    serverstate: ServerState,
+    attractloop: bool,
+    loadgame: bool,
+) {
+    ctx.map_load_progress = MapLoadPhase::Init {
+        server: server.to_string(),
+        spawnpoint: spawnpoint.to_string(),
+        serverstate,
+        attractloop,
+        loadgame,
+    };
 }
 
 // ============================================================
@@ -527,21 +856,23 @@ pub fn sv_map(ctx: &mut ServerContext, attractloop: bool, levelstring: &str, loa
     if l > 4 && level.ends_with(".cin") {
         scr_begin_loading_plaque();
         crate::sv_send::sv_broadcast_command(ctx, "changing\n");
-        sv_spawn_server(ctx, &level, &spawnpoint, ServerState::Cinematic, attractloop, loadgame);
+        sv_spawn_server_chunked(ctx, &level, &spawnpoint, ServerState::Cinematic, attractloop, loadgame);
     } else if l > 4 && level.ends_with(".dm2") {
         scr_begin_loading_plaque();
         crate::sv_send::sv_broadcast_command(ctx, "changing\n");
-        sv_spawn_server(ctx, &level, &spawnpoint, ServerState::Demo, attractloop, loadgame);
+        sv_spawn_server_chunked(ctx, &level, &spawnpoint, ServerState::Demo, attractloop, loadgame);
     } else if l > 4 && level.ends_with(".pcx") {
         scr_begin_loading_plaque();
         crate::sv_send::sv_broadcast_command(ctx, "changing\n");
-        sv_spawn_server(ctx, &level, &spawnpoint, ServerState::Pic, attractloop, loadgame);
+        sv_spawn_server_chunked(ctx, &level, &spawnpoint, ServerState::Pic, attractloop, loadgame);
     } else {
         scr_begin_loading_plaque();
         crate::sv_send::sv_broadcast_command(ctx, "changing\n");
         crate::sv_send::sv_send_client_messages(ctx);
-        sv_spawn_server(ctx, &level, &spawnpoint, ServerState::Game, attractloop, loadgame);
-        cmd::cbuf_copy_to_defer();
+        sv_spawn_server_chunked(ctx, &level, &spawnpoint, ServerState::Game, attractloop, loadgame);
+        // NOTE: cbuf_copy_to_defer() is called by the CALLER (cl_map_f) instead of here,
+        // because we're already inside CMD_CTX lock (via cbuf_execute → cmd_execute_string).
+        // Calling the global cbuf_copy_to_defer() would deadlock on the non-reentrant mutex.
     }
 
     crate::sv_send::sv_broadcast_command(ctx, "reconnect\n");

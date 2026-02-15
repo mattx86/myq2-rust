@@ -27,7 +27,9 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:panjoo.tastyspleen.net)",
       "WebFetch(domain:skuller.net)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(powershell -Command \"\\(Get-Content ''crates\\\\myq2-renderer\\\\src\\\\vk_rmain.rs'' -Raw\\) -replace ''\\(?s\\)\\\\n\\\\n        // Save extensions_string.*?\\\\n\\\\n// ============================================================\\\\n// R_Shutdown'', ''\\\\n\\\\n// ============================================================\\\\n// R_Shutdown'' | Set-Content ''crates\\\\myq2-renderer\\\\src\\\\vk_rmain.rs''\")",
+      "Bash(timeout:*)"
     ]
   }
 }

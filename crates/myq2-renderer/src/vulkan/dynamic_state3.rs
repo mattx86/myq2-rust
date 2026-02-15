@@ -275,18 +275,17 @@ impl DynamicState3Commands {
 
 /// Get the list of dynamic states for EDS3.
 pub fn get_dynamic_states(caps: &DynamicState3Capabilities) -> Vec<vk::DynamicState> {
-    let mut states = Vec::new();
-
-    // Always include core dynamic states
-    states.push(vk::DynamicState::VIEWPORT);
-    states.push(vk::DynamicState::SCISSOR);
-    states.push(vk::DynamicState::LINE_WIDTH);
-    states.push(vk::DynamicState::DEPTH_BIAS);
-    states.push(vk::DynamicState::BLEND_CONSTANTS);
-    states.push(vk::DynamicState::DEPTH_BOUNDS);
-    states.push(vk::DynamicState::STENCIL_COMPARE_MASK);
-    states.push(vk::DynamicState::STENCIL_WRITE_MASK);
-    states.push(vk::DynamicState::STENCIL_REFERENCE);
+    let mut states = vec![
+        vk::DynamicState::VIEWPORT,
+        vk::DynamicState::SCISSOR,
+        vk::DynamicState::LINE_WIDTH,
+        vk::DynamicState::DEPTH_BIAS,
+        vk::DynamicState::BLEND_CONSTANTS,
+        vk::DynamicState::DEPTH_BOUNDS,
+        vk::DynamicState::STENCIL_COMPARE_MASK,
+        vk::DynamicState::STENCIL_WRITE_MASK,
+        vk::DynamicState::STENCIL_REFERENCE,
+    ];
 
     // EDS3 states
     if caps.polygon_mode {

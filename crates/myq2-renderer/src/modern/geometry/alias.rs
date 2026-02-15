@@ -285,6 +285,11 @@ impl InstancedAliasBatch {
         &self.instance_vbo
     }
 
+    /// Get the instances for iteration.
+    pub fn instances(&self) -> &[AliasInstance] {
+        &self.instances
+    }
+
     /// Draw all instances.
     ///
     /// In SDL3 GPU, draw commands are issued by the render path via command

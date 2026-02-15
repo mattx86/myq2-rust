@@ -11,20 +11,20 @@ use myq2_client::qmenu;
 
 use std::cell::UnsafeCell;
 
-/// Wrapper to allow non-Send/Sync types in statics for single-threaded engine.
-/// SAFETY: The engine is single-threaded; these globals are only accessed from the main thread.
+/// Wrapper to allow non-Send/Sync types in statics.
+/// SAFETY: These globals are only accessed from the main thread.
 struct SyncUnsafeCell<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 impl<T> SyncUnsafeCell<T> {
     const fn new(value: T) -> Self {
         Self(UnsafeCell::new(value))
     }
-    /// SAFETY: Caller must ensure no concurrent access (single-threaded engine).
+    /// SAFETY: Caller must ensure no concurrent access (main thread only).
     #[allow(clippy::mut_from_ref)]
     unsafe fn get_mut(&self) -> &mut T {
         &mut *self.0.get()
     }
-    /// SAFETY: Caller must ensure no concurrent mutable access (single-threaded engine).
+    /// SAFETY: Caller must ensure no concurrent mutable access (main thread only).
     unsafe fn get_ref(&self) -> &T {
         &*self.0.get()
     }
@@ -487,20 +487,17 @@ impl qmenu::MenuRenderer for VidConsoleMenuRenderer {
         console::sys_milliseconds()
     }
     fn vid_width(&self) -> i32 {
-        // SAFETY: single-threaded engine
-        unsafe { console::VIDDEF.width }
+        console::get_viddef().width
     }
     fn vid_height(&self) -> i32 {
-        // SAFETY: single-threaded engine
-        unsafe { console::VIDDEF.height }
+        console::get_viddef().height
     }
     fn sys_get_clipboard_data(&self) -> Option<String> {
         None
     }
     fn keydown(&self, key: i32) -> bool {
         if key >= 0 && key < 256 {
-            // SAFETY: single-threaded engine
-            unsafe { myq2_client::keys::KEYDOWN[key as usize] }
+            myq2_client::keys::ks().keydown[key as usize]
         } else {
             false
         }
@@ -533,8 +530,7 @@ pub fn vid_menu_init_global() {
     let vk_picmip_value = cvar::cvar_variable_value("vk_picmip") as f32;
     let vk_finish_value = cvar::cvar_variable_value("vk_finish") as f32;
 
-    // SAFETY: single-threaded engine
-    let viddef_width = unsafe { console::VIDDEF.width };
+    let viddef_width = console::get_viddef().width;
 
     let mut menu = VidMenuState::new();
 
@@ -615,7 +611,7 @@ pub fn vid_menu_init_global() {
     menu.s_vulkan_menu.x -= 8;
 
     // Build qmenu framework and items
-    // SAFETY: single-threaded engine
+    // SAFETY: menu UI accessed from main thread only
     unsafe {
         let qm_items = GLOBAL_QM_ITEMS.get_mut();
         qm_items.clear();
@@ -701,7 +697,7 @@ pub fn vid_menu_init_global() {
         qmenu::menu_add_item(&mut qm_menu, qm_items, qmenu::MenuItem::Action(cancel_action));
 
         // Center the menu
-        let vid_height = console::VIDDEF.height;
+        let vid_height = console::get_viddef().height;
         qmenu::menu_center(&mut qm_menu, qm_items, vid_height);
 
         *GLOBAL_QM_MENU.get_mut() = Some(qm_menu);
@@ -712,7 +708,7 @@ pub fn vid_menu_init_global() {
 /// Zero-arg wrapper for VID_MenuDraw, suitable for the dispatch table.
 /// Draws the video menu banner and the menu framework.
 pub fn vid_menu_draw_global() {
-    // SAFETY: single-threaded engine
+    // SAFETY: menu UI accessed from main thread only
     unsafe {
         if GLOBAL_VID_MENU.get_ref().is_none() {
             return;
@@ -725,9 +721,10 @@ pub fn vid_menu_draw_global() {
 
         // Draw banner
         let (w, _h) = console::draw_get_pic_size("m_banner_video");
+        let vd = console::get_viddef();
         console::draw_pic(
-            console::VIDDEF.width / 2 - w / 2,
-            console::VIDDEF.height / 2 - 110,
+            vd.width / 2 - w / 2,
+            vd.height / 2 - 110,
             "m_banner_video",
         );
 
@@ -743,7 +740,7 @@ pub fn vid_menu_draw_global() {
 pub fn vid_menu_key_global(key: i32) -> Option<&'static str> {
     use myq2_client::keys;
 
-    // SAFETY: single-threaded engine
+    // SAFETY: menu UI accessed from main thread only
     unsafe {
         let menu = GLOBAL_VID_MENU.get_mut().as_mut()?;
         let qm_menu = GLOBAL_QM_MENU.get_mut().as_mut()?;

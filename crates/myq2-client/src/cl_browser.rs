@@ -24,19 +24,16 @@ const LAN_BROADCAST: &str = "255.255.255.255:27910";
 
 /// Sort column for server list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum SortColumn {
     Name,
     Map,
     Players,
+    #[default]
     Ping,
     GameType,
 }
 
-impl Default for SortColumn {
-    fn default() -> Self {
-        SortColumn::Ping
-    }
-}
 
 /// Server filter configuration.
 #[derive(Clone, Default)]
@@ -438,7 +435,7 @@ impl ServerBrowser {
 
             // Try to parse as ip:port
             if line.contains(':') && line.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                if let Some(_) = self.add_server(line) {
+                if self.add_server(line).is_some() {
                     // Query the newly added server
                     self.query_server(line, QueryType::Info);
                 }
@@ -556,7 +553,7 @@ impl ServerBrowser {
 
     /// Add a server manually by address.
     pub fn add_manual(&mut self, address: &str) {
-        if let Some(_) = self.add_server(address) {
+        if self.add_server(address).is_some() {
             self.query_server(address, QueryType::Info);
         }
     }

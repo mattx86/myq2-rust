@@ -1,0 +1,71 @@
+# Dockerfile for building and testing myq2-rust on Linux (Wayland-only, no X11)
+#
+# Usage:
+#   docker build -f Dockerfile.linux -t myq2-linux .
+#   docker run --rm myq2-linux cargo test --release
+#
+# Build stages:
+#   1. deps    — Install system dependencies + Rust toolchain
+#   2. build   — Compile the project
+#   3. test    — Run tests with software Vulkan (lavapipe)
+
+FROM ubuntu:24.04 AS deps
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System dependencies for Wayland-only build (no X11 dev libraries)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build essentials
+    curl ca-certificates build-essential pkg-config \
+    # Wayland development libraries
+    libwayland-dev wayland-protocols libxkbcommon-dev \
+    # Vulkan loader + shader compiler
+    libvulkan-dev glslc \
+    # Software Vulkan driver for headless CI testing
+    mesa-vulkan-drivers \
+    # Audio backends for OpenAL Soft CMake build
+    libpipewire-0.3-dev libpulse-dev libasound2-dev \
+    # Build tools for OpenAL Soft
+    cmake git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Use lavapipe (software Vulkan) for headless testing
+ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+
+# ---------- Build stage ----------
+FROM deps AS build
+
+WORKDIR /build
+
+# Copy Cargo manifests first for better layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/myq2-common/Cargo.toml crates/myq2-common/Cargo.toml
+COPY crates/myq2-client/Cargo.toml crates/myq2-client/Cargo.toml
+COPY crates/myq2-server/Cargo.toml crates/myq2-server/Cargo.toml
+COPY crates/myq2-game/Cargo.toml crates/myq2-game/Cargo.toml
+COPY crates/myq2-game-dll/Cargo.toml crates/myq2-game-dll/Cargo.toml
+COPY crates/myq2-renderer/Cargo.toml crates/myq2-renderer/Cargo.toml
+COPY crates/myq2-sys/Cargo.toml crates/myq2-sys/Cargo.toml
+COPY crates/openal-soft-sys/Cargo.toml crates/openal-soft-sys/Cargo.toml
+
+# Copy full source
+COPY crates/ crates/
+
+# Build
+RUN cargo build --release 2>&1
+
+# ---------- Test stage ----------
+FROM build AS test
+
+# Run all tests
+RUN cargo test --release 2>&1
+
+# Run clippy
+RUN cargo clippy --release -- -D warnings 2>&1
+
+# Default command: run tests
+CMD ["cargo", "test", "--release"]

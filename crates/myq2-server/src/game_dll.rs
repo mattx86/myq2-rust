@@ -24,6 +24,11 @@ pub struct GameDll {
     pub export: *mut game_export_t,
 }
 
+// SAFETY: GameDll is only accessed through a Mutex in ServerContext.
+// The raw pointer `export` points to memory owned by the loaded library
+// and is only dereferenced on the main game thread.
+unsafe impl Send for GameDll {}
+
 impl GameDll {
     /// Load a game DLL from the given path
     ///

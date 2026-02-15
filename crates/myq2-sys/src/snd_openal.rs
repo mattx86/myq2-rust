@@ -1021,7 +1021,7 @@ impl AudioBackend for OpenAlBackend {
                     buffer,
                     format,
                     samples.as_ptr() as *const c_void,
-                    (samples.len() * std::mem::size_of::<i16>()) as al::ALsizei,
+                    std::mem::size_of_val(samples) as al::ALsizei,
                     rate as al::ALsizei,
                 );
 
@@ -1084,7 +1084,7 @@ impl Drop for OpenAlBackend {
     }
 }
 
-// SAFETY: OpenAlBackend is only used from the main thread in this single-threaded engine.
+// SAFETY: OpenAlBackend is only used from the main thread.
 // The raw pointers (ALCdevice, ALCcontext) are not shared across threads.
 unsafe impl Send for OpenAlBackend {}
 

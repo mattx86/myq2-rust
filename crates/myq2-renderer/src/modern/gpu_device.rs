@@ -7,7 +7,10 @@ use ash::vk;
 use crossbeam::queue::SegQueue;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::vulkan::{VulkanContext, VulkanSurface, Swapchain, CommandManager};
+use crate::vulkan::{VulkanContext, VulkanSurface, Swapchain};
+
+// Re-export CommandManager so texture_store can use it in function signatures
+pub use crate::vulkan::CommandManager;
 
 // ============================================================================
 // Vulkan buffer wrapper types (replaces SDL3 GPU types)
@@ -54,150 +57,155 @@ pub enum ShaderFormat {
 // Global device storage
 // ============================================================================
 
-/// The global Vulkan context. Set during initialization by myq2-sys.
-///
-/// SAFETY: The engine is single-threaded. All access happens on the main thread.
-static mut VULKAN_CTX: Option<VulkanContext> = None;
+/// All Vulkan device state behind a single Mutex to avoid multi-lock deadlocks.
+struct VulkanDeviceState {
+    ctx: Option<VulkanContext>,
+    surface: Option<VulkanSurface>,
+    swapchain: Option<Swapchain>,
+    commands: Option<CommandManager>,
+}
 
-/// The global Vulkan surface.
-static mut VULKAN_SURFACE: Option<VulkanSurface> = None;
+// SAFETY: Vulkan handles are thread-safe opaque handles. All Vulkan API calls
+// are serialized by the Mutex. The types contain ash function-pointer tables
+// and Vulkan handle wrappers which are safe to send between threads.
+unsafe impl Send for VulkanDeviceState {}
 
-/// The global swapchain.
-static mut VULKAN_SWAPCHAIN: Option<Swapchain> = None;
-
-/// The global command manager.
-static mut VULKAN_COMMANDS: Option<CommandManager> = None;
+static VK_DEVICE_STATE: std::sync::Mutex<VulkanDeviceState> = std::sync::Mutex::new(VulkanDeviceState {
+    ctx: None,
+    surface: None,
+    swapchain: None,
+    commands: None,
+});
 
 /// Initialize the Vulkan device. Called by myq2-sys during startup.
-///
-/// # Safety
-/// Must be called from the main thread, before any rendering occurs.
-pub unsafe fn init_device(ctx: VulkanContext) {
-    VULKAN_CTX = Some(ctx);
+pub fn init_device(ctx: VulkanContext) {
+    VK_DEVICE_STATE.lock().unwrap().ctx = Some(ctx);
 }
 
 /// Initialize the rendering surface.
-///
-/// # Safety
-/// Must be called from the main thread, after device init, with valid window.
-pub unsafe fn init_surface(surface: VulkanSurface) {
-    VULKAN_SURFACE = Some(surface);
+pub fn init_surface(surface: VulkanSurface) {
+    VK_DEVICE_STATE.lock().unwrap().surface = Some(surface);
 }
 
 /// Initialize the swapchain.
-///
-/// # Safety
-/// Must be called from the main thread, after surface init.
-pub unsafe fn init_swapchain(swapchain: Swapchain) {
-    VULKAN_SWAPCHAIN = Some(swapchain);
+pub fn init_swapchain(swapchain: Swapchain) {
+    VK_DEVICE_STATE.lock().unwrap().swapchain = Some(swapchain);
 }
 
 /// Initialize the command manager.
-///
-/// # Safety
-/// Must be called from the main thread, after device init.
-pub unsafe fn init_commands(commands: CommandManager) {
-    VULKAN_COMMANDS = Some(commands);
+pub fn init_commands(commands: CommandManager) {
+    VK_DEVICE_STATE.lock().unwrap().commands = Some(commands);
 }
 
 /// Shut down and release the Vulkan device.
-///
-/// # Safety
-/// Must be called from the main thread, after all rendering has stopped.
-pub unsafe fn shutdown_device() {
+pub fn shutdown_device() {
+    let mut state = VK_DEVICE_STATE.lock().unwrap();
     // Shut down in reverse order of initialization
-    if let Some(commands) = VULKAN_COMMANDS.take() {
+    if let Some(commands) = state.commands.take() {
         drop(commands);
     }
-    if let Some(swapchain) = VULKAN_SWAPCHAIN.take() {
+    if let Some(swapchain) = state.swapchain.take() {
         drop(swapchain);
     }
-    if let Some(surface) = VULKAN_SURFACE.take() {
-        drop(surface);
-    }
-    if let Some(ctx) = VULKAN_CTX.take() {
+    state.surface.take();
+    if let Some(ctx) = state.ctx.take() {
         drop(ctx);
     }
 }
 
 /// Access the Vulkan context immutably.
-///
-/// # Safety
-/// Must be called from the main thread.
 pub fn with_device<R>(f: impl FnOnce(&VulkanContext) -> R) -> Option<R> {
-    // SAFETY: Single-threaded engine, all access from main thread.
-    unsafe { VULKAN_CTX.as_ref().map(f) }
+    VK_DEVICE_STATE.lock().unwrap().ctx.as_ref().map(f)
 }
 
 /// Access the Vulkan context mutably.
-///
-/// # Safety
-/// Must be called from the main thread.
 pub fn with_device_mut<R>(f: impl FnOnce(&mut VulkanContext) -> R) -> Option<R> {
-    // SAFETY: Single-threaded engine, all access from main thread.
-    unsafe { VULKAN_CTX.as_mut().map(f) }
+    VK_DEVICE_STATE.lock().unwrap().ctx.as_mut().map(f)
 }
 
 /// Access the swapchain immutably.
 pub fn with_swapchain<R>(f: impl FnOnce(&Swapchain) -> R) -> Option<R> {
-    // SAFETY: Single-threaded engine, all access from main thread.
-    unsafe { VULKAN_SWAPCHAIN.as_ref().map(f) }
+    VK_DEVICE_STATE.lock().unwrap().swapchain.as_ref().map(f)
 }
 
 /// Access the swapchain mutably.
 pub fn with_swapchain_mut<R>(f: impl FnOnce(&mut Swapchain) -> R) -> Option<R> {
-    // SAFETY: Single-threaded engine, all access from main thread.
-    unsafe { VULKAN_SWAPCHAIN.as_mut().map(f) }
+    VK_DEVICE_STATE.lock().unwrap().swapchain.as_mut().map(f)
 }
 
 /// Access the command manager immutably.
 pub fn with_commands<R>(f: impl FnOnce(&CommandManager) -> R) -> Option<R> {
-    // SAFETY: Single-threaded engine, all access from main thread.
-    unsafe { VULKAN_COMMANDS.as_ref().map(f) }
+    VK_DEVICE_STATE.lock().unwrap().commands.as_ref().map(f)
 }
 
 /// Access the command manager mutably.
 pub fn with_commands_mut<R>(f: impl FnOnce(&mut CommandManager) -> R) -> Option<R> {
-    // SAFETY: Single-threaded engine, all access from main thread.
-    unsafe { VULKAN_COMMANDS.as_mut().map(f) }
+    VK_DEVICE_STATE.lock().unwrap().commands.as_mut().map(f)
+}
+
+/// Get the current swapchain extent (actual framebuffer dimensions).
+/// Returns None if swapchain is not initialized.
+pub fn get_swapchain_extent() -> Option<vk::Extent2D> {
+    VK_DEVICE_STATE.lock().unwrap().swapchain.as_ref().map(|sc| sc.extent)
+}
+
+/// Access both the context and command manager together (single lock).
+pub fn with_device_and_commands_mut<R>(
+    f: impl FnOnce(&VulkanContext, &mut CommandManager) -> R
+) -> Option<R> {
+    let mut state = VK_DEVICE_STATE.lock().unwrap();
+    let ctx_ptr = state.ctx.as_ref()? as *const VulkanContext;
+    let commands = state.commands.as_mut()?;
+    // SAFETY: ctx and commands are disjoint fields; ctx is only read.
+    Some(f(unsafe { &*ctx_ptr }, commands))
 }
 
 /// Access both the context and swapchain together.
 pub fn with_device_and_swapchain<R>(
     f: impl FnOnce(&VulkanContext, &mut Swapchain) -> R
 ) -> Option<R> {
-    // SAFETY: Single-threaded engine, all access from main thread.
-    unsafe {
-        match (VULKAN_CTX.as_ref(), VULKAN_SWAPCHAIN.as_mut()) {
-            (Some(ctx), Some(sc)) => Some(f(ctx, sc)),
-            _ => None,
-        }
-    }
+    let mut state = VK_DEVICE_STATE.lock().unwrap();
+    // Split borrow: need immutable ctx + mutable swapchain from the same struct.
+    let ctx_ptr = state.ctx.as_ref()? as *const VulkanContext;
+    let sc = state.swapchain.as_mut()?;
+    // SAFETY: ctx and swapchain are disjoint fields; ctx is only read.
+    Some(f(unsafe { &*ctx_ptr }, sc))
+}
+
+/// Access context, swapchain, and commands together (for submit + present).
+/// This avoids deadlocks from nesting with_device_and_swapchain and with_commands.
+pub fn with_device_swapchain_commands<R>(
+    f: impl FnOnce(&VulkanContext, &mut Swapchain, &CommandManager) -> R
+) -> Option<R> {
+    let mut state = VK_DEVICE_STATE.lock().unwrap();
+    // Use raw pointers to allow split borrows
+    let ctx_ptr = state.ctx.as_ref()? as *const VulkanContext;
+    let commands_ptr = state.commands.as_ref()? as *const CommandManager;
+    let sc = state.swapchain.as_mut()?;
+    // SAFETY: ctx, swapchain, and commands are disjoint fields; ctx and commands are only read.
+    Some(f(unsafe { &*ctx_ptr }, sc, unsafe { &*commands_ptr }))
 }
 
 /// Access context, swapchain, and surface together (for swapchain recreation).
 pub fn with_device_swapchain_surface<R>(
     f: impl FnOnce(&VulkanContext, &mut Swapchain, &VulkanSurface) -> R
 ) -> Option<R> {
-    // SAFETY: Single-threaded engine, all access from main thread.
-    unsafe {
-        match (VULKAN_CTX.as_ref(), VULKAN_SWAPCHAIN.as_mut(), VULKAN_SURFACE.as_ref()) {
-            (Some(ctx), Some(sc), Some(surface)) => Some(f(ctx, sc, surface)),
-            _ => None,
-        }
-    }
+    let mut state = VK_DEVICE_STATE.lock().unwrap();
+    let ctx_ptr = state.ctx.as_ref()? as *const VulkanContext;
+    let surface_ptr = state.surface.as_ref()? as *const VulkanSurface;
+    let sc = state.swapchain.as_mut()?;
+    // SAFETY: ctx, surface, and swapchain are disjoint fields; ctx and surface are only read.
+    Some(f(unsafe { &*ctx_ptr }, sc, unsafe { &*surface_ptr }))
 }
 
 /// Check if the GPU device is initialized.
 pub fn is_initialized() -> bool {
-    // SAFETY: Single-threaded engine.
-    unsafe { VULKAN_CTX.is_some() }
+    VK_DEVICE_STATE.lock().unwrap().ctx.is_some()
 }
 
 /// Check if the swapchain is initialized.
 pub fn is_swapchain_initialized() -> bool {
-    // SAFETY: Single-threaded engine.
-    unsafe { VULKAN_SWAPCHAIN.is_some() }
+    VK_DEVICE_STATE.lock().unwrap().swapchain.is_some()
 }
 
 /// Supported shader format for the current GPU backend.
@@ -294,8 +302,8 @@ pub fn flush_uploads() -> Result<usize, String> {
     // Calculate total staging buffer size needed
     let total_size: usize = uploads.iter().map(|u| u.data.len()).sum();
 
-    // Get access to Vulkan resources
-    let result = with_device(|ctx| {
+    // Get access to Vulkan resources (single lock for ctx + commands to avoid deadlock)
+    let result = with_device_and_commands_mut(|ctx, commands| {
         unsafe {
             // Allocate staging buffer
             let staging_buffer = match allocate_staging_buffer(ctx, total_size) {
@@ -329,30 +337,25 @@ pub fn flush_uploads() -> Result<usize, String> {
             }
 
             // Record and submit copy commands
-            with_commands_mut(|commands| {
-                let cmd = commands.begin_single_time()
-                    .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
+            let cmd = commands.begin_single_time()
+                .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
 
-                // Record all buffer-to-buffer copies
-                for region in &copy_regions {
-                    let copy_region = vk::BufferCopy::default()
-                        .src_offset(region.src_offset)
-                        .dst_offset(region.dst_offset)
-                        .size(region.size);
+            for region in &copy_regions {
+                let copy_region = vk::BufferCopy::default()
+                    .src_offset(region.src_offset)
+                    .dst_offset(region.dst_offset)
+                    .size(region.size);
 
-                    ctx.device.cmd_copy_buffer(
-                        cmd,
-                        staging_buffer.buffer,
-                        region.dst_buffer,
-                        &[copy_region],
-                    );
-                }
+                ctx.device.cmd_copy_buffer(
+                    cmd,
+                    staging_buffer.buffer,
+                    region.dst_buffer,
+                    &[copy_region],
+                );
+            }
 
-                commands.end_single_time(ctx, cmd)
-                    .map_err(|e| format!("Failed to submit uploads: {}", e))?;
-
-                Ok(())
-            }).unwrap_or_else(|| Err("Command manager not initialized".to_string()))?;
+            commands.end_single_time(ctx, cmd)
+                .map_err(|e| format!("Failed to submit uploads: {}", e))?;
 
             // Free staging buffer
             free_staging_buffer(ctx, staging_buffer);
@@ -454,7 +457,8 @@ fn flush_uploads_immediate(uploads: Vec<PendingUpload>) -> Result<usize, String>
     let count = uploads.len();
 
     for upload in uploads {
-        let result = with_device(|ctx| {
+        // Single lock for ctx + commands to avoid deadlock
+        let result = with_device_and_commands_mut(|ctx, commands| {
             unsafe {
                 // Create small staging buffer for this upload
                 let staging = allocate_staging_buffer(ctx, upload.data.len())?;
@@ -469,23 +473,21 @@ fn flush_uploads_immediate(uploads: Vec<PendingUpload>) -> Result<usize, String>
                 }
 
                 // Record and submit copy
-                with_commands_mut(|commands| {
-                    let cmd = commands.begin_single_time()?;
+                let cmd = commands.begin_single_time()?;
 
-                    let copy_region = vk::BufferCopy::default()
-                        .src_offset(0)
-                        .dst_offset(upload.offset as vk::DeviceSize)
-                        .size(upload.size as vk::DeviceSize);
+                let copy_region = vk::BufferCopy::default()
+                    .src_offset(0)
+                    .dst_offset(upload.offset as vk::DeviceSize)
+                    .size(upload.size as vk::DeviceSize);
 
-                    ctx.device.cmd_copy_buffer(
-                        cmd,
-                        staging.buffer,
-                        upload.target_buffer.buffer,
-                        &[copy_region],
-                    );
+                ctx.device.cmd_copy_buffer(
+                    cmd,
+                    staging.buffer,
+                    upload.target_buffer.buffer,
+                    &[copy_region],
+                );
 
-                    commands.end_single_time(ctx, cmd)
-                }).unwrap_or_else(|| Err("Command manager not initialized".to_string()))?;
+                commands.end_single_time(ctx, cmd)?;
 
                 // Free staging
                 free_staging_buffer(ctx, staging);
@@ -515,6 +517,7 @@ pub fn pending_upload_count() -> usize {
 ///
 /// Triple buffering allows the CPU to prepare frame N+1 while the GPU
 /// is still rendering frame N, with frame N-1's resources available for reuse.
+#[derive(Default)]
 pub struct FrameResources {
     /// Command buffer for this frame (if acquired).
     pub command_buffer: Option<vk::CommandBuffer>,
@@ -526,16 +529,6 @@ pub struct FrameResources {
     pub frame_index: u64,
 }
 
-impl Default for FrameResources {
-    fn default() -> Self {
-        Self {
-            command_buffer: None,
-            fence: None,
-            transfer_buffer_indices: Vec::new(),
-            frame_index: 0,
-        }
-    }
-}
 
 /// Manages triple-buffered frame submission for async GPU work.
 ///
@@ -698,37 +691,27 @@ impl Default for FrameManager {
     }
 }
 
-/// Global frame manager instance.
-///
-/// SAFETY: Single-threaded engine, all access from main thread.
-static mut FRAME_MANAGER: FrameManager = FrameManager::new();
+/// Global frame manager instance, protected by Mutex.
+static FRAME_MANAGER: std::sync::Mutex<FrameManager> = std::sync::Mutex::new(FrameManager::new());
 
 /// Initialize the global frame manager.
-///
-/// # Safety
-/// Must be called from the main thread, after GPU device init.
-pub unsafe fn init_frame_manager() {
-    FRAME_MANAGER.init();
+pub fn init_frame_manager() {
+    FRAME_MANAGER.lock().unwrap().init();
 }
 
 /// Shut down the global frame manager.
-///
-/// # Safety
-/// Must be called from the main thread, before GPU device shutdown.
-pub unsafe fn shutdown_frame_manager() {
-    FRAME_MANAGER.shutdown();
+pub fn shutdown_frame_manager() {
+    FRAME_MANAGER.lock().unwrap().shutdown();
 }
 
 /// Access the frame manager immutably.
 pub fn with_frame_manager<R>(f: impl FnOnce(&FrameManager) -> R) -> R {
-    // SAFETY: Single-threaded engine, all access from main thread.
-    unsafe { f(&FRAME_MANAGER) }
+    f(&FRAME_MANAGER.lock().unwrap())
 }
 
 /// Access the frame manager mutably.
 pub fn with_frame_manager_mut<R>(f: impl FnOnce(&mut FrameManager) -> R) -> R {
-    // SAFETY: Single-threaded engine, all access from main thread.
-    unsafe { f(&mut FRAME_MANAGER) }
+    f(&mut FRAME_MANAGER.lock().unwrap())
 }
 
 /// Begin a new frame (convenience wrapper).

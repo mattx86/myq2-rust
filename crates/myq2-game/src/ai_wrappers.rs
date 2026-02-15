@@ -11,9 +11,9 @@ use crate::g_local::Edict;
 
 /// Raw pointer to the current AiContext, set before executing monster AI frames.
 ///
-/// SAFETY: The game logic runs single-threaded. The pointer is set just before
-/// calling ai_fn callbacks and cleared immediately after. The AiContext must
-/// outlive the frame execution.
+/// SAFETY: Thread-local storage ensures no cross-thread access. The pointer is
+/// set just before calling ai_fn callbacks and cleared immediately after.
+/// The AiContext must outlive the frame execution.
 thread_local! {
     static AI_CTX: Cell<*mut AiContext> = const { Cell::new(std::ptr::null_mut()) };
 }

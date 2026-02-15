@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 /// Present wait capabilities.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct PresentWaitCapabilities {
     /// Whether present wait is supported.
     pub present_wait_supported: bool,
@@ -20,14 +21,6 @@ pub struct PresentWaitCapabilities {
     pub present_id_supported: bool,
 }
 
-impl Default for PresentWaitCapabilities {
-    fn default() -> Self {
-        Self {
-            present_wait_supported: false,
-            present_id_supported: false,
-        }
-    }
-}
 
 /// Frame timing statistics.
 #[derive(Debug, Clone, Default)]
@@ -94,7 +87,7 @@ impl PresentWaitManager {
         // Get function pointer for wait_for_present if supported
         let fp_wait_for_present = if capabilities.present_wait_supported {
             unsafe {
-                let name = std::ffi::CStr::from_bytes_with_nul_unchecked(b"vkWaitForPresentKHR\0");
+                let name = c"vkWaitForPresentKHR";
                 ctx.instance.get_device_proc_addr(ctx.device.handle(), name.as_ptr())
                     .map(|fp| std::mem::transmute(fp))
             }

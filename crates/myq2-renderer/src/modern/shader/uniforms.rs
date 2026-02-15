@@ -264,3 +264,34 @@ impl<T> Drop for UniformBuffer<T> {
         self.destroy();
     }
 }
+
+/// Uniforms for the postprocess (fullscreen quad) pass.
+///
+/// Layout matches `postprocess.frag.glsl` FragUniforms:
+///   vec4  u_PolyBlend
+///   int   u_EnablePolyBlend
+///   float u_Gamma
+///   int   u_EnableGamma
+///
+/// Uploaded via push constants (32 bytes, well within the 128-byte minimum).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PostProcessUniforms {
+    pub polyblend_color: [f32; 4],
+    pub enable_polyblend: i32,
+    pub gamma: f32,
+    pub enable_gamma: i32,
+    pub _pad: i32,
+}
+
+impl Default for PostProcessUniforms {
+    fn default() -> Self {
+        Self {
+            polyblend_color: [0.0; 4],
+            enable_polyblend: 0,
+            gamma: 1.0,
+            enable_gamma: 0,
+            _pad: 0,
+        }
+    }
+}

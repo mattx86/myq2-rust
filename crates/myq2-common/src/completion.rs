@@ -185,7 +185,7 @@ fn list_maps(partial: &str) -> Vec<String> {
         }
     });
 
-    maps.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    maps.sort_by_key(|a| a.to_lowercase());
     maps.dedup();
     maps
 }
@@ -234,7 +234,7 @@ fn list_configs(partial: &str) -> Vec<String> {
         }
     });
 
-    configs.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    configs.sort_by_key(|a| a.to_lowercase());
     configs.dedup();
     configs
 }
@@ -279,7 +279,7 @@ fn list_demos(partial: &str) -> Vec<String> {
         }
     });
 
-    demos.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    demos.sort_by_key(|a| a.to_lowercase());
     demos.dedup();
     demos
 }
@@ -305,7 +305,7 @@ fn list_save_dirs(partial: &str) -> Vec<String> {
         }
     });
 
-    saves.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    saves.sort_by_key(|a| a.to_lowercase());
     saves.dedup();
     saves
 }

@@ -752,7 +752,7 @@ pub fn sp_monster_berserk(self_ent: &mut Edict, ctx: &mut GameContext) {
     self_ent.monsterinfo.attack_fn = None;
     self_ent.monsterinfo.melee_fn = Some(crate::dispatch::MMELEE_BERSERK);
     self_ent.monsterinfo.sight_fn = Some(crate::dispatch::MSIGHT_BERSERK);
-    self_ent.monsterinfo.search_fn = None;  // berserk_search exists but no MSEARCH_BERSERK constant
+    self_ent.monsterinfo.search_fn = Some(crate::dispatch::MSEARCH_BERSERK);
 
     self_ent.monsterinfo.currentmove = Some(MOVE_STAND);
     self_ent.monsterinfo.scale = MODEL_SCALE;

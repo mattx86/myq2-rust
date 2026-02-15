@@ -84,7 +84,7 @@ pub fn netchan_transmit(
 /// * `curtime` - Current time in milliseconds
 /// * `qport_value` - Client's qport value
 /// * `dup_count` - Number of duplicate packets to send (0-2). The original packet
-///                 is always sent; dup_count specifies additional copies.
+///   is always sent; dup_count specifies additional copies.
 pub fn netchan_transmit_with_dup(
     chan: &mut NetChan,
     data: &[u8],

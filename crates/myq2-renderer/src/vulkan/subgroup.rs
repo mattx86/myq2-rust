@@ -283,7 +283,7 @@ pub fn optimal_workgroup_size(caps: &SubgroupCapabilities, min_threads: u32) -> 
         subgroup_size
     } else {
         // Round up to multiple of subgroup size
-        ((min_threads + subgroup_size - 1) / subgroup_size) * subgroup_size
+        min_threads.div_ceil(subgroup_size) * subgroup_size
     };
 
     // For 2D workgroups, try to keep threads_x * threads_y divisible by subgroup_size
@@ -295,5 +295,5 @@ pub fn optimal_workgroup_size(caps: &SubgroupCapabilities, min_threads: u32) -> 
 
 /// Calculate number of subgroups for a given thread count.
 pub fn num_subgroups(caps: &SubgroupCapabilities, thread_count: u32) -> u32 {
-    (thread_count + caps.subgroup_size - 1) / caps.subgroup_size
+    thread_count.div_ceil(caps.subgroup_size)
 }

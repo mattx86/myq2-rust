@@ -111,7 +111,7 @@ impl MemoryPriorityManager {
 
         let fp_set_priority = if caps.supported {
             unsafe {
-                let name = std::ffi::CStr::from_bytes_with_nul_unchecked(b"vkSetDeviceMemoryPriorityEXT\0");
+                let name = c"vkSetDeviceMemoryPriorityEXT";
                 ctx.instance.get_device_proc_addr(ctx.device.handle(), name.as_ptr())
                     .map(|fp| std::mem::transmute(fp))
             }

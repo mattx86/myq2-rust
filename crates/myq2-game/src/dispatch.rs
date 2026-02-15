@@ -272,6 +272,7 @@ pub const TOUCH_PLAT_CENTER: usize = 22;
 pub const TOUCH_ROTATING: usize = 23;
 pub const TOUCH_BUTTON: usize = 24;
 pub const TOUCH_DOOR: usize = 25;
+pub const TOUCH_TARGET_ACTOR: usize = 26;
 
 pub const TOUCH_TABLE_SIZE: usize = 28;
 
@@ -337,6 +338,7 @@ pub const USE_FUNC_ROTATING: usize = 47;
 pub const USE_FUNC_DOOR_SECRET: usize = 48;
 pub const USE_FUNC_ELEVATOR: usize = 49;
 pub const USE_FUNC_CONVEYOR: usize = 50;
+pub const USE_ACTOR: usize = 51;
 
 pub const USE_TABLE_SIZE: usize = 52;
 
@@ -462,6 +464,7 @@ pub const MATTACK_JORG: usize = 15;
 pub const MATTACK_MAKRON: usize = 16;
 pub const MATTACK_SUPERTANK: usize = 17;
 pub const MATTACK_TANK: usize = 18;
+pub const MATTACK_ACTOR: usize = 19;
 
 pub const MATTACK_TABLE_SIZE: usize = 32;
 
@@ -540,6 +543,8 @@ pub const MSEARCH_MEDIC: usize = 7;
 pub const MSEARCH_SUPERTANK: usize = 8;
 pub const MSEARCH_JORG: usize = 9;
 pub const MSEARCH_BOSS2: usize = 10;
+pub const MSEARCH_MUTANT: usize = 11;
+pub const MSEARCH_BERSERK: usize = 12;
 
 pub const MSEARCH_TABLE_SIZE: usize = 16;
 
@@ -2233,6 +2238,22 @@ fn w_berserk_die(
 }
 
 // --- Actor ---
+fn w_actor_attack(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+    let mut edicts_vec = edicts.to_vec();
+    crate::m_actor::actor_attack(&mut edicts_vec, self_idx, level);
+    edicts.clone_from_slice(&edicts_vec);
+}
+fn w_actor_use(
+    self_idx: usize,
+    other_idx: usize,
+    activator_idx: usize,
+    edicts: &mut [Edict],
+    level: &mut LevelLocals,
+) {
+    let mut edicts_vec = edicts.to_vec();
+    crate::m_actor::actor_use(&mut edicts_vec, self_idx, other_idx, activator_idx, level);
+    edicts.clone_from_slice(&edicts_vec);
+}
 fn w_actor_stand(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
     let mut edicts_vec = edicts.to_vec();
     crate::m_actor::actor_stand(&mut edicts_vec, self_idx, level);
@@ -2262,6 +2283,17 @@ fn w_actor_die(
 ) {
     let mut edicts_vec = edicts.to_vec();
     crate::m_actor::actor_die(&mut edicts_vec, self_idx, inflictor_idx, attacker_idx, damage, point);
+    edicts.clone_from_slice(&edicts_vec);
+}
+
+fn w_target_actor_touch(
+    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    _plane: Option<&CPlane>, _surf: Option<&CSurface>,
+) {
+    let game_locals = crate::g_local::with_global_game_ctx(|gctx| gctx.game.clone())
+        .unwrap_or_default();
+    let mut edicts_vec = edicts.to_vec();
+    crate::m_actor::target_actor_touch(&mut edicts_vec, self_idx, other_idx, level, &game_locals);
     edicts.clone_from_slice(&edicts_vec);
 }
 
@@ -2785,6 +2817,10 @@ fn w_mutant_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocal
 fn w_mutant_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
     crate::m_mutant::mutant_search(&mut edicts[self_idx]);
 }
+fn w_mutant_jump(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+    let mut ctx = make_temp_ctx(_level);
+    crate::m_mutant::mutant_jump(&mut edicts[self_idx], &mut ctx);
+}
 fn w_mutant_melee(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_mutant::mutant_melee(&mut edicts[self_idx], &mut ctx);
@@ -3295,6 +3331,8 @@ pub static TOUCH_TABLE: [TouchFn; TOUCH_TABLE_SIZE] = {
     table[TOUCH_ROTATING] = w_rotating_touch;
     table[TOUCH_BUTTON] = w_button_touch;
     table[TOUCH_DOOR] = w_door_touch;
+    // m_actor
+    table[TOUCH_TARGET_ACTOR] = w_target_actor_touch;
     table
 };
 
@@ -3358,6 +3396,7 @@ pub static USE_TABLE: [UseFn; USE_TABLE_SIZE] = {
     table[USE_FUNC_DOOR_SECRET] = w_door_secret_use;
     table[USE_FUNC_ELEVATOR] = w_trigger_elevator_use;
     table[USE_FUNC_CONVEYOR] = w_func_conveyor_use;
+    table[USE_ACTOR] = w_actor_use;
     table
 };
 
@@ -3488,6 +3527,8 @@ pub static MATTACK_TABLE: [MonsterThinkFn; MATTACK_TABLE_SIZE] = {
     table[MATTACK_MAKRON] = w_makron_attack;
     table[MATTACK_SUPERTANK] = w_supertank_attack;
     table[MATTACK_TANK] = w_tank_attack;
+    table[MATTACK_ACTOR] = w_actor_attack;
+    table[MATTACK_MUTANT] = w_mutant_jump;
     table
 };
 
@@ -3559,6 +3600,8 @@ pub static MSEARCH_TABLE: [MonsterThinkFn; MSEARCH_TABLE_SIZE] = {
     table[MSEARCH_SUPERTANK] = w_supertank_search;
     table[MSEARCH_JORG] = w_jorg_search_fn;
     table[MSEARCH_BOSS2] = w_boss2_search_fn;
+    table[MSEARCH_MUTANT] = w_mutant_search;
+    table[MSEARCH_BERSERK] = w_berserk_search;
     table
 };
 
@@ -4012,7 +4055,7 @@ mod tests {
             TOUCH_FUNC_OBJECT, TOUCH_BARREL, TOUCH_MISC_VIPER_BOMB,
             TOUCH_TELEPORTER, TOUCH_MULTI, TOUCH_TRIGGER_MONSTERJUMP,
             TOUCH_TRIGGER_GRAVITY, TOUCH_PLAT_CENTER, TOUCH_ROTATING,
-            TOUCH_BUTTON, TOUCH_DOOR,
+            TOUCH_BUTTON, TOUCH_DOOR, TOUCH_TARGET_ACTOR,
         ];
         for &id in touch_ids {
             assert!(id < TOUCH_TABLE_SIZE,
@@ -4045,6 +4088,7 @@ mod tests {
             USE_MULTI, USE_TRIGGER_ENABLE, USE_TRIGGER_KEY, USE_HURT,
             USE_BOSS3, USE_FUNC_PLAT, USE_FUNC_ROTATING,
             USE_FUNC_DOOR_SECRET, USE_FUNC_ELEVATOR, USE_FUNC_CONVEYOR,
+            USE_ACTOR,
         ];
         for &id in use_ids {
             assert!(id < USE_TABLE_SIZE,
@@ -4150,7 +4194,7 @@ mod tests {
             MATTACK_GUNNER, MATTACK_INFANTRY, MATTACK_PARASITE, MATTACK_FLIPPER,
             MATTACK_FLYER, MATTACK_FLOAT, MATTACK_HOVER, MATTACK_CHICK,
             MATTACK_MUTANT, MATTACK_MEDIC, MATTACK_BOSS2, MATTACK_JORG,
-            MATTACK_MAKRON, MATTACK_SUPERTANK, MATTACK_TANK,
+            MATTACK_MAKRON, MATTACK_SUPERTANK, MATTACK_TANK, MATTACK_ACTOR,
         ];
         for &id in ids {
             assert!(id < MATTACK_TABLE_SIZE, "MATTACK {} >= table size {}", id, MATTACK_TABLE_SIZE);
@@ -4219,7 +4263,8 @@ mod tests {
         let ids: &[usize] = &[
             MSEARCH_SOLDIER, MSEARCH_BRAIN, MSEARCH_GUNNER, MSEARCH_INFANTRY,
             MSEARCH_FLYER, MSEARCH_HOVER, MSEARCH_CHICK, MSEARCH_MEDIC,
-            MSEARCH_SUPERTANK, MSEARCH_JORG, MSEARCH_BOSS2,
+            MSEARCH_SUPERTANK, MSEARCH_JORG, MSEARCH_BOSS2, MSEARCH_MUTANT,
+            MSEARCH_BERSERK,
         ];
         for &id in ids {
             assert!(id < MSEARCH_TABLE_SIZE, "MSEARCH {} >= table size {}", id, MSEARCH_TABLE_SIZE);

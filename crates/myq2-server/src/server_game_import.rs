@@ -245,14 +245,20 @@ impl GameImport for ServerGameImport {
     fn trace(&self, start: &Vec3, mins: &Vec3, maxs: &Vec3, end: &Vec3, _passent: i32, contentmask: i32) -> Trace {
         // Delegate to cmodel collision
         // Full implementation would use SV_Trace from sv_world.rs
-        myq2_common::cmodel::with_cmodel_ctx(|cctx| {
+        let mut tr = myq2_common::cmodel::with_cmodel_ctx(|cctx| {
             let headnode = if cctx.numcmodels > 0 {
                 cctx.map_cmodels[0].headnode
             } else {
                 0
             };
             cctx.box_trace(start, end, mins, maxs, headnode, contentmask)
-        }).unwrap_or_default()
+        }).unwrap_or_default();
+        // In C Q2, SV_Trace always ensures trace.ent points to g_edicts[0] (world entity)
+        // when no specific entity was hit. Match that behavior.
+        if tr.ent_index < 0 {
+            tr.ent_index = 0; // world entity
+        }
+        tr
     }
 
     fn pointcontents(&self, point: &Vec3) -> i32 {

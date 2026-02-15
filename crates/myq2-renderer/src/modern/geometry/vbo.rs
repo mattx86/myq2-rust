@@ -3,9 +3,9 @@
 //! Replaces the SDL3 GPU buffer implementation with direct Vulkan buffers.
 //! Data is uploaded to the GPU via staging buffers and command buffers.
 
-use std::mem;
 use ash::vk;
 use crate::modern::gpu_device;
+use crate::modern::gpu_device::CommandManager;
 use crate::vulkan::VulkanContext;
 
 // ============================================================================
@@ -15,6 +15,7 @@ use crate::vulkan::VulkanContext;
 /// A GPU-resident vertex buffer.
 pub struct VertexBuffer {
     buffer: Option<vk::Buffer>,
+    memory: Option<vk::DeviceMemory>,
     size: u32,
 }
 
@@ -23,6 +24,7 @@ impl VertexBuffer {
     pub fn new() -> Self {
         Self {
             buffer: None,
+            memory: None,
             size: 0,
         }
     }
@@ -36,9 +38,10 @@ impl VertexBuffer {
 
     /// Upload data to the vertex buffer, replacing any existing content.
     pub fn upload<T: Copy>(&mut self, data: &[T], _usage: u32) {
-        let byte_size = (data.len() * mem::size_of::<T>()) as u32;
+        let byte_size = std::mem::size_of_val(data) as u32;
         if byte_size == 0 {
             self.buffer = None;
+            self.memory = None;
             self.size = 0;
             return;
         }
@@ -47,39 +50,69 @@ impl VertexBuffer {
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 data.as_ptr() as *const u8,
-                data.len() * mem::size_of::<T>(),
+                std::mem::size_of_val(data),
             )
         };
 
-        // Create vertex buffer and upload via staging buffer
-        self.buffer = gpu_device::with_device(|ctx| {
+        // If we already have a buffer that's large enough, reuse it and just update the data
+        if self.buffer.is_some() && self.memory.is_some() && byte_size <= self.size {
+            let memory = self.memory.unwrap();
+            gpu_device::with_device(|ctx| {
+                unsafe {
+                    // Map, copy, unmap
+                    match ctx.device.map_memory(memory, 0, byte_size as vk::DeviceSize, vk::MemoryMapFlags::empty()) {
+                        Ok(mapped_ptr) => {
+                            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped_ptr as *mut u8, byte_size as usize);
+                            ctx.device.unmap_memory(memory);
+                        }
+                        Err(e) => {
+                            eprintln!("VBO::upload - map_memory FAILED on reuse: {:?}", e);
+                        }
+                    }
+                }
+            });
+            return;
+        }
+
+        // Create new vertex buffer (only when needed)
+        let result = gpu_device::with_device(|ctx| {
             unsafe {
-                // Create GPU-local vertex buffer
+                // Wait for device idle before creating resources (avoid driver hangs)
+                if let Err(e) = ctx.device.device_wait_idle() {
+                    eprintln!("VBO::upload - device_wait_idle failed: {:?}", e);
+                    return None;
+                }
+
+                // Create host-visible vertex buffer (CPU-accessible, simpler than staging)
                 let buffer_info = vk::BufferCreateInfo::default()
                     .size(byte_size as vk::DeviceSize)
-                    .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
+                    .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
                     .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
                 let buffer = match ctx.device.create_buffer(&buffer_info, None) {
                     Ok(buf) => buf,
-                    Err(_) => return None,
+                    Err(e) => {
+                        eprintln!("VBO::upload - create_buffer FAILED: {:?}", e);
+                        return None;
+                    }
                 };
 
                 let mem_requirements = ctx.device.get_buffer_memory_requirements(buffer);
                 let memory_properties = ctx.instance.get_physical_device_memory_properties(ctx.physical_device);
 
-                // Find GPU-local memory type
+                // Find host-visible memory type (CPU-accessible)
                 let memory_type_index = (0..memory_properties.memory_type_count)
                     .find(|&i| {
                         (mem_requirements.memory_type_bits & (1 << i)) != 0 &&
                         memory_properties.memory_types[i as usize].property_flags.contains(
-                            vk::MemoryPropertyFlags::DEVICE_LOCAL
+                            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
                         )
                     });
 
                 let memory_type_index = match memory_type_index {
                     Some(i) => i,
                     None => {
+                        eprintln!("VBO::upload - no host-visible memory found!");
                         ctx.device.destroy_buffer(buffer, None);
                         return None;
                     }
@@ -91,30 +124,47 @@ impl VertexBuffer {
 
                 let buffer_memory = match ctx.device.allocate_memory(&alloc_info, None) {
                     Ok(mem) => mem,
-                    Err(_) => {
+                    Err(e) => {
+                        eprintln!("VBO::upload - allocate_memory FAILED: {:?}", e);
                         ctx.device.destroy_buffer(buffer, None);
                         return None;
                     }
                 };
 
                 if ctx.device.bind_buffer_memory(buffer, buffer_memory, 0).is_err() {
+                    eprintln!("VBO::upload - bind_buffer_memory FAILED");
                     ctx.device.free_memory(buffer_memory, None);
                     ctx.device.destroy_buffer(buffer, None);
                     return None;
                 }
 
-                // Upload via staging buffer
-                if !upload_buffer_data(ctx, buffer, bytes) {
-                    ctx.device.free_memory(buffer_memory, None);
-                    ctx.device.destroy_buffer(buffer, None);
-                    return None;
-                }
+                // Upload data directly via mapped memory (host-visible)
+                let mapped_ptr = match ctx.device.map_memory(
+                    buffer_memory,
+                    0,
+                    byte_size as vk::DeviceSize,
+                    vk::MemoryMapFlags::empty(),
+                ) {
+                    Ok(ptr) => ptr,
+                    Err(e) => {
+                        eprintln!("VBO::upload - map_memory FAILED: {:?}", e);
+                        ctx.device.free_memory(buffer_memory, None);
+                        ctx.device.destroy_buffer(buffer, None);
+                        return None;
+                    }
+                };
 
-                Some(buffer)
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped_ptr as *mut u8, byte_size as usize);
+                ctx.device.unmap_memory(buffer_memory);
+
+                Some((buffer, buffer_memory))
             }
         }).flatten();
-
-        self.size = byte_size;
+        if let Some((buf, mem)) = result {
+            self.buffer = Some(buf);
+            self.memory = Some(mem);
+            self.size = byte_size;
+        }
     }
 
     /// Update a region of the vertex buffer.
@@ -131,14 +181,16 @@ impl VertexBuffer {
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 data.as_ptr() as *const u8,
-                data.len() * std::mem::size_of::<T>(),
+                std::mem::size_of_val(data),
             )
         };
 
-        gpu_device::with_device(|ctx| {
+        // Use single lock for ctx + commands to avoid deadlock
+        // (update_buffer_region needs commands for staging buffer copy)
+        gpu_device::with_device_and_commands_mut(|ctx, commands| {
             // SAFETY: Vulkan context is valid and we're on the main thread.
             unsafe {
-                update_buffer_region(ctx, buffer, offset as vk::DeviceSize, bytes);
+                update_buffer_region(ctx, commands, buffer, offset as vk::DeviceSize, bytes);
             }
         });
     }
@@ -218,18 +270,20 @@ impl IndexBuffer {
             return;
         }
 
-        let byte_size = (data.len() * mem::size_of::<u16>()) as u32;
+        let byte_size = std::mem::size_of_val(data) as u32;
 
         // Convert data to bytes
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 data.as_ptr() as *const u8,
-                data.len() * mem::size_of::<u16>(),
+                std::mem::size_of_val(data),
             )
         };
 
-        // Create index buffer and upload via staging buffer
-        self.buffer = gpu_device::with_device(|ctx| {
+        // Create index buffer and upload via staging buffer.
+        // Use with_device_and_commands_mut to get both ctx and commands in a single lock,
+        // avoiding deadlock from re-locking VK_DEVICE_STATE inside upload_buffer_data.
+        self.buffer = gpu_device::with_device_and_commands_mut(|ctx, commands| {
             unsafe {
                 // Create GPU-local index buffer
                 let buffer_info = vk::BufferCreateInfo::default()
@@ -280,8 +334,8 @@ impl IndexBuffer {
                     return None;
                 }
 
-                // Upload via staging buffer
-                if !upload_buffer_data(ctx, buffer, bytes) {
+                // Upload via staging buffer (pass commands directly to avoid re-locking)
+                if !upload_buffer_data_with_commands(ctx, commands, buffer, bytes) {
                     ctx.device.free_memory(buffer_memory, None);
                     ctx.device.destroy_buffer(buffer, None);
                     return None;
@@ -303,18 +357,20 @@ impl IndexBuffer {
             return;
         }
 
-        let byte_size = (data.len() * mem::size_of::<u32>()) as u32;
+        let byte_size = std::mem::size_of_val(data) as u32;
 
         // Convert data to bytes
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 data.as_ptr() as *const u8,
-                data.len() * mem::size_of::<u32>(),
+                std::mem::size_of_val(data),
             )
         };
 
-        // Create index buffer and upload via staging buffer
-        self.buffer = gpu_device::with_device(|ctx| {
+        // Create index buffer and upload via staging buffer.
+        // Use with_device_and_commands_mut to get both ctx and commands in a single lock,
+        // avoiding deadlock from re-locking VK_DEVICE_STATE inside upload_buffer_data.
+        self.buffer = gpu_device::with_device_and_commands_mut(|ctx, commands| {
             unsafe {
                 // Create GPU-local index buffer
                 let buffer_info = vk::BufferCreateInfo::default()
@@ -365,8 +421,8 @@ impl IndexBuffer {
                     return None;
                 }
 
-                // Upload via staging buffer
-                if !upload_buffer_data(ctx, buffer, bytes) {
+                // Upload via staging buffer (pass commands directly to avoid re-locking)
+                if !upload_buffer_data_with_commands(ctx, commands, buffer, bytes) {
                     ctx.device.free_memory(buffer_memory, None);
                     ctx.device.destroy_buffer(buffer, None);
                     return None;
@@ -714,7 +770,117 @@ unsafe fn upload_buffer_data(ctx: &VulkanContext, dst_buffer: vk::Buffer, data: 
     success
 }
 
+/// Upload data to a GPU buffer via staging buffer, using a pre-acquired CommandManager.
+///
+/// This variant avoids re-locking VK_DEVICE_STATE by accepting the command manager
+/// directly instead of calling `gpu_device::with_commands_mut()`.
+///
+/// # Safety
+/// The destination buffer must have TRANSFER_DST usage flag and be large enough.
+unsafe fn upload_buffer_data_with_commands(
+    ctx: &VulkanContext,
+    commands: &mut CommandManager,
+    dst_buffer: vk::Buffer,
+    data: &[u8],
+) -> bool {
+    if data.is_empty() {
+        return true;
+    }
+
+    let size = data.len() as vk::DeviceSize;
+
+    // Create staging buffer
+    let staging_info = vk::BufferCreateInfo::default()
+        .size(size)
+        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    let staging_buffer = match ctx.device.create_buffer(&staging_info, None) {
+        Ok(buf) => buf,
+        Err(_) => return false,
+    };
+
+    let staging_requirements = ctx.device.get_buffer_memory_requirements(staging_buffer);
+    let memory_properties = ctx.instance.get_physical_device_memory_properties(ctx.physical_device);
+
+    // Find host-visible, host-coherent memory type
+    let staging_memory_type = (0..memory_properties.memory_type_count).find(|&i| {
+        (staging_requirements.memory_type_bits & (1 << i)) != 0
+            && memory_properties.memory_types[i as usize]
+                .property_flags
+                .contains(vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
+    });
+
+    let staging_memory_type = match staging_memory_type {
+        Some(i) => i,
+        None => {
+            ctx.device.destroy_buffer(staging_buffer, None);
+            return false;
+        }
+    };
+
+    let staging_alloc_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(staging_requirements.size)
+        .memory_type_index(staging_memory_type);
+
+    let staging_memory = match ctx.device.allocate_memory(&staging_alloc_info, None) {
+        Ok(mem) => mem,
+        Err(_) => {
+            ctx.device.destroy_buffer(staging_buffer, None);
+            return false;
+        }
+    };
+
+    if ctx.device.bind_buffer_memory(staging_buffer, staging_memory, 0).is_err() {
+        ctx.device.free_memory(staging_memory, None);
+        ctx.device.destroy_buffer(staging_buffer, None);
+        return false;
+    }
+
+    // Map and copy data to staging buffer
+    let mapped_ptr = match ctx.device.map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty()) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            ctx.device.free_memory(staging_memory, None);
+            ctx.device.destroy_buffer(staging_buffer, None);
+            return false;
+        }
+    };
+
+    std::ptr::copy_nonoverlapping(data.as_ptr(), mapped_ptr as *mut u8, data.len());
+    ctx.device.unmap_memory(staging_memory);
+
+    // Record and submit copy command using pre-acquired commands
+    let success = {
+        let cmd = match commands.begin_single_time() {
+            Ok(c) => c,
+            Err(_) => {
+                ctx.device.free_memory(staging_memory, None);
+                ctx.device.destroy_buffer(staging_buffer, None);
+                return false;
+            }
+        };
+
+        let copy_region = vk::BufferCopy::default()
+            .src_offset(0)
+            .dst_offset(0)
+            .size(size);
+
+        ctx.device.cmd_copy_buffer(cmd, staging_buffer, dst_buffer, &[copy_region]);
+
+        commands.end_single_time(ctx, cmd).is_ok()
+    };
+
+    // Cleanup staging resources
+    ctx.device.free_memory(staging_memory, None);
+    ctx.device.destroy_buffer(staging_buffer, None);
+
+    success
+}
+
 /// Upload data to a region of an existing buffer via staging buffer.
+///
+/// Accepts pre-acquired commands to avoid re-locking VK_DEVICE_STATE.
 ///
 /// # Safety
 /// - `ctx` must be a valid Vulkan context.
@@ -722,6 +888,7 @@ unsafe fn upload_buffer_data(ctx: &VulkanContext, dst_buffer: vk::Buffer, data: 
 /// - Offset + data length must not exceed buffer size.
 unsafe fn update_buffer_region(
     ctx: &VulkanContext,
+    commands: &mut CommandManager,
     dst_buffer: vk::Buffer,
     dst_offset: vk::DeviceSize,
     data: &[u8],
@@ -793,22 +960,24 @@ unsafe fn update_buffer_region(
     std::ptr::copy_nonoverlapping(data.as_ptr(), mapped_ptr as *mut u8, data.len());
     ctx.device.unmap_memory(staging_memory);
 
-    // Record and submit copy command
-    gpu_device::with_commands_mut(|commands| {
-        let cmd = match commands.begin_single_time() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+    // Record and submit copy command (commands already available, no nested lock)
+    let cmd = match commands.begin_single_time() {
+        Ok(c) => c,
+        Err(_) => {
+            ctx.device.free_memory(staging_memory, None);
+            ctx.device.destroy_buffer(staging_buffer, None);
+            return;
+        }
+    };
 
-        let copy_region = vk::BufferCopy::default()
-            .src_offset(0)
-            .dst_offset(dst_offset)
-            .size(size);
+    let copy_region = vk::BufferCopy::default()
+        .src_offset(0)
+        .dst_offset(dst_offset)
+        .size(size);
 
-        ctx.device.cmd_copy_buffer(cmd, staging_buffer, dst_buffer, &[copy_region]);
+    ctx.device.cmd_copy_buffer(cmd, staging_buffer, dst_buffer, &[copy_region]);
 
-        let _ = commands.end_single_time(ctx, cmd);
-    });
+    let _ = commands.end_single_time(ctx, cmd);
 
     // Cleanup staging resources
     ctx.device.free_memory(staging_memory, None);

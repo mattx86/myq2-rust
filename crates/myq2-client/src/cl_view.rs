@@ -282,17 +282,20 @@ pub fn cl_prep_refresh(
     // Load locations for this map (R1Q2/Q2Pro feature)
     crate::cl_loc::loc_load_map(&mapname, &cl.gamedir);
 
+    com_printf("cl_prep_refresh: begin_registration\n");
+
     // register models, pics, and skins
-    com_printf(&format!("Map: {}\r", mapname));
+    scr.scr_draw_loading = 2;
     scr_update_screen(scr, cls, cl);
     r_begin_registration(&mapname);
     com_printf("                                     \r");
 
+    com_printf("cl_prep_refresh: loading pics\n");
+
     // precache status bar pics
-    com_printf("pics\r");
+    scr.scr_draw_loading = 2;
     scr_update_screen(scr, cls, cl);
     scr_touch_pics(scr);
-    com_printf("                                     \r");
 
     cl_register_tent_models();
 
@@ -300,15 +303,12 @@ pub fn cl_prep_refresh(
     view.cl_weaponmodels[0] = "weapon.md2".to_string();
 
     let mut i = 1;
+    let mut model_count = 0;
     while i < MAX_MODELS && !cl.configstrings[CS_MODELS + i].is_empty() {
-        let mut name = cl.configstrings[CS_MODELS + i].clone();
-        name.truncate(37); // never go beyond one line
-        if !name.starts_with('*') {
-            com_printf(&format!("{}\r", name));
-        }
+        scr.scr_draw_loading = 2;
         scr_update_screen(scr, cls, cl);
         sys_send_key_events(); // pump message loop
-        if name.starts_with('#') {
+        if cl.configstrings[CS_MODELS + i].starts_with('#') {
             // special player weapon model
             if (view.num_cl_weaponmodels as usize) < MAX_CLIENTWEAPONMODELS {
                 view.cl_weaponmodels[view.num_cl_weaponmodels as usize] =
@@ -317,19 +317,16 @@ pub fn cl_prep_refresh(
             }
         } else {
             cl.model_draw[i] = r_register_model(&cl.configstrings[CS_MODELS + i]);
-            if name.starts_with('*') {
+            if cl.configstrings[CS_MODELS + i].starts_with('*') {
                 cl.model_clip[i] = cm_inline_model(&cl.configstrings[CS_MODELS + i]);
             } else {
                 cl.model_clip[i] = 0;
             }
         }
-        if !name.starts_with('*') {
-            com_printf("                                     \r");
-        }
+        model_count += 1;
         i += 1;
     }
-
-    com_printf("images\r");
+    scr.scr_draw_loading = 2;
     scr_update_screen(scr, cls, cl);
     i = 1;
     while i < MAX_IMAGES && !cl.configstrings[CS_IMAGES + i].is_empty() {
@@ -338,22 +335,20 @@ pub fn cl_prep_refresh(
         i += 1;
     }
 
-    com_printf("                                     \r");
     for i in 0..MAX_CLIENTS {
         if cl.configstrings[CS_PLAYERSKINS + i].is_empty() {
             continue;
         }
-        com_printf(&format!("client {}\r", i));
+        scr.scr_draw_loading = 2;
         scr_update_screen(scr, cls, cl);
         sys_send_key_events(); // pump message loop
         cl_parse_clientinfo(cl, i);
-        com_printf("                                     \r");
     }
 
     cl_load_clientinfo(&mut cl.baseclientinfo, "Player\\male/grunt");
 
     // set sky textures and speed
-    com_printf("sky\r");
+    scr.scr_draw_loading = 2;
     scr_update_screen(scr, cls, cl);
     let rotate = cl.configstrings[CS_SKYROTATE].parse::<f32>().unwrap_or(0.0);
     let axis_str = &cl.configstrings[CS_SKYAXIS];
@@ -367,7 +362,6 @@ pub fn cl_prep_refresh(
         parts.get(2).copied().unwrap_or(0.0),
     ];
     r_set_sky(&cl.configstrings[CS_SKY], rotate, &axis);
-    com_printf("                                     \r");
 
     // the renderer can now free unneeded stuff
     r_end_registration();
@@ -375,10 +369,11 @@ pub fn cl_prep_refresh(
     // clear any lines of console text
     con_clear_notify();
 
+    scr.scr_draw_loading = 2;
     scr_update_screen(scr, cls, cl);
     cl.refresh_prepped = true;
     cl.force_refdef = true; // make sure we have a valid refdef
-
+    com_printf("cl_prep_refresh: complete\n");
 }
 
 // ============================================================

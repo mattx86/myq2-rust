@@ -28,15 +28,8 @@ const VK_LIGHTMAP_FORMAT: u32 = VK_RGBA as u32;
 const BACKFACE_EPSILON: f32 = 0.01;
 
 // ============================================================
-// Module globals
+// Module globals — SurfaceState
 // ============================================================
-
-static mut MODELORG: Vec3 = [0.0; 3];
-
-pub static mut r_alpha_surfaces: *mut MSurface = std::ptr::null_mut();
-
-pub static mut c_visible_lightmaps: i32 = 0;
-pub static mut c_visible_textures: i32 = 0;
 
 // fogDensity accessed via fog_density() in vk_local
 
@@ -52,13 +45,42 @@ struct VkLightmapState {
     lightmap_buffer: [u8; 4 * BLOCK_WIDTH as usize * BLOCK_HEIGHT as usize],
 }
 
-static mut VK_LMS: VkLightmapState = VkLightmapState {
-    internal_format: 0,
-    current_lightmap_texture: 0,
-    lightmap_surfaces: [std::ptr::null_mut(); MAX_LIGHTMAPS],
-    allocated: [0; BLOCK_WIDTH as usize],
-    lightmap_buffer: [0; 4 * BLOCK_WIDTH as usize * BLOCK_HEIGHT as usize],
-};
+/// Combined surface rendering state behind a single Mutex.
+pub struct SurfaceState {
+    /// Alpha (transparent) surface chain head
+    r_alpha_surfaces: *mut MSurface,
+    /// Lightmap allocation state
+    vk_lms: VkLightmapState,
+    /// Deferred render command queue
+    render_queue: RenderCommandQueue,
+    /// Base lightstyles for lightmap building
+    lightstyles: [LightStyle; MAX_LIGHTSTYLES],
+}
+
+// SAFETY: SurfaceState contains raw pointers (r_alpha_surfaces, lightmap_surfaces)
+// but all access is serialized by the Mutex. Pointers are valid for the struct's lifetime.
+unsafe impl Send for SurfaceState {}
+
+static SURFACE_STATE: std::sync::Mutex<SurfaceState> = std::sync::Mutex::new(SurfaceState {
+    r_alpha_surfaces: std::ptr::null_mut(),
+    vk_lms: VkLightmapState {
+        internal_format: 0,
+        current_lightmap_texture: 0,
+        lightmap_surfaces: [std::ptr::null_mut(); MAX_LIGHTMAPS],
+        allocated: [0; BLOCK_WIDTH as usize],
+        lightmap_buffer: [0; 4 * BLOCK_WIDTH as usize * BLOCK_HEIGHT as usize],
+    },
+    render_queue: RenderCommandQueue::new(),
+    lightstyles: [LightStyle {
+        rgb: [0.0; 3],
+        white: 0.0,
+    }; MAX_LIGHTSTYLES],
+});
+
+fn with_surface_state<R>(f: impl FnOnce(&mut SurfaceState) -> R) -> R {
+    let mut ss = SURFACE_STATE.lock().unwrap();
+    f(&mut ss)
+}
 
 // ============================================================
 // DEFERRED RENDER COMMAND BATCHING
@@ -163,7 +185,7 @@ impl RenderCommandQueue {
         for cmd in &self.commands {
             texture_map
                 .entry(cmd.texture_id)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(*cmd);
         }
 
@@ -220,21 +242,15 @@ impl Default for RenderCommandQueue {
     }
 }
 
-/// Global render command queue
-static mut RENDER_QUEUE: RenderCommandQueue = RenderCommandQueue::new();
-
-/// Initialize render command queue for a new frame
-///
-/// # Safety
-/// Accesses global mutable state. Call once at frame start.
-pub unsafe fn vk_begin_render_queue() {
-    RENDER_QUEUE.clear();
+/// Initialize render command queue for a new frame.
+pub fn vk_begin_render_queue() {
+    with_surface_state(|ss| ss.render_queue.clear());
 }
 
-/// Queue a surface for batched rendering
+/// Queue a surface for batched rendering.
 ///
 /// # Safety
-/// Accesses global mutable state and surface pointers.
+/// Dereferences surface and texinfo pointers.
 pub unsafe fn vk_queue_surface(surface: *mut MSurface) {
     if surface.is_null() {
         return;
@@ -253,46 +269,38 @@ pub unsafe fn vk_queue_surface(surface: *mut MSurface) {
         0
     };
 
-    RENDER_QUEUE.queue_surface(surface, texture_id, lightmap_num, flags);
+    with_surface_state(|ss| ss.render_queue.queue_surface(surface, texture_id, lightmap_num, flags));
 }
 
-/// Get batch count for rendering
-///
-/// # Safety
-/// Accesses global mutable state.
-pub unsafe fn vk_get_batch_count() -> usize {
-    RENDER_QUEUE.batch_count()
+/// Get batch count for rendering.
+pub fn vk_get_batch_count() -> usize {
+    with_surface_state(|ss| ss.render_queue.batch_count())
 }
 
-/// Get a specific batch for rendering
+/// Get a specific batch for rendering.
 ///
-/// # Safety
-/// Accesses global mutable state.
-pub unsafe fn vk_get_batch(index: usize) -> Option<&'static SurfaceBatch> {
-    // SAFETY: The returned reference is valid for the frame duration
-    // since RENDER_QUEUE is only cleared at frame start
-    let queue = &mut *std::ptr::addr_of_mut!(RENDER_QUEUE);
-    queue.build_batches();
-    queue.batches.get(index)
+/// Note: Returns a cloned batch to avoid holding the lock.
+pub fn vk_get_batch(index: usize) -> Option<SurfaceBatch> {
+    with_surface_state(|ss| {
+        ss.render_queue.build_batches();
+        ss.render_queue.batches.get(index).map(|b| SurfaceBatch {
+            texture_id: b.texture_id,
+            lightmap_num: b.lightmap_num,
+            surfaces: b.surfaces.clone(),
+        })
+    })
 }
 
-/// Get alpha surfaces for back-to-front rendering
+/// Get alpha surfaces for back-to-front rendering.
 ///
-/// # Safety
-/// Accesses global mutable state.
-pub unsafe fn vk_get_alpha_surfaces() -> &'static [SurfaceDrawCmd] {
-    // SAFETY: The returned reference is valid for the frame duration
-    let queue = &*std::ptr::addr_of!(RENDER_QUEUE);
-    queue.alpha_surfaces()
+/// Note: Returns a cloned Vec to avoid holding the lock.
+pub fn vk_get_alpha_surfaces() -> Vec<SurfaceDrawCmd> {
+    with_surface_state(|ss| ss.render_queue.alpha_commands.clone())
 }
 
-/// Get total surface count for statistics
-///
-/// # Safety
-/// Accesses global mutable state.
-pub unsafe fn vk_get_queued_surface_count() -> usize {
-    let queue = &*std::ptr::addr_of!(RENDER_QUEUE);
-    queue.total_surfaces()
+/// Get total surface count for statistics.
+pub fn vk_get_queued_surface_count() -> usize {
+    with_surface_state(|ss| ss.render_queue.total_surfaces())
 }
 
 // ============================================================
@@ -309,7 +317,7 @@ pub unsafe fn r_texture_animation(tex: *const MTexInfo) -> *mut Image {
         return tex_ref.image;
     }
 
-    let mut c = (*currententity).frame % tex_ref.numframes;
+    let mut c = (*rfs().currententity).frame % tex_ref.numframes;
     let mut t = tex;
     while c > 0 {
         t = (*t).next;
@@ -365,7 +373,7 @@ const PLANE_Z: u8 = 2;
 ///
 /// # Safety
 /// Accesses global renderer state and BSP data.
-pub unsafe fn r_recursive_world_node(node: *mut MNode) {
+pub unsafe fn r_recursive_world_node(node: *mut MNode, alpha_surfaces: &mut *mut MSurface) {
     if node.is_null() {
         return;
     }
@@ -375,7 +383,7 @@ pub unsafe fn r_recursive_world_node(node: *mut MNode) {
         return; // solid
     }
 
-    if node_ref.visframe != r_visframecount {
+    if node_ref.visframe != rfs().r_visframecount {
         return;
     }
 
@@ -388,9 +396,9 @@ pub unsafe fn r_recursive_world_node(node: *mut MNode) {
         let pleaf = node as *mut MLeaf;
 
         // check for door connected areas
-        if !r_newrefdef.areabits.is_null() {
+        if !rfs().r_newrefdef.areabits.is_null() {
             let area = (*pleaf).area;
-            if *r_newrefdef.areabits.offset((area >> 3) as isize) & (1 << (area & 7)) == 0 {
+            if *rfs().r_newrefdef.areabits.offset((area >> 3) as isize) & (1 << (area & 7)) == 0 {
                 return; // not visible
             }
         }
@@ -400,7 +408,7 @@ pub unsafe fn r_recursive_world_node(node: *mut MNode) {
 
         if c > 0 {
             loop {
-                (**mark).visframe = r_framecount;
+                (**mark).visframe = rfs().r_framecount;
                 mark = mark.offset(1);
                 c -= 1;
                 if c == 0 {
@@ -416,16 +424,16 @@ pub unsafe fn r_recursive_world_node(node: *mut MNode) {
     let plane = node_ref.plane;
 
     let dot = match (*plane).plane_type {
-        PLANE_X => MODELORG[0] - (*plane).dist,
-        PLANE_Y => MODELORG[1] - (*plane).dist,
-        PLANE_Z => MODELORG[2] - (*plane).dist,
-        _ => dot_product(&MODELORG, &(*plane).normal) - (*plane).dist,
+        PLANE_X => rfs().r_origin[0] - (*plane).dist,
+        PLANE_Y => rfs().r_origin[1] - (*plane).dist,
+        PLANE_Z => rfs().r_origin[2] - (*plane).dist,
+        _ => dot_product(&rfs().r_origin, &(*plane).normal) - (*plane).dist,
     };
 
     let (side, sidebit) = if dot >= 0.0 { (0usize, 0i32) } else { (1usize, SURF_PLANEBACK) };
 
     // recurse down front side first
-    r_recursive_world_node(node_ref.children[side]);
+    r_recursive_world_node(node_ref.children[side], alpha_surfaces);
 
     // draw stuff
     let surfaces = r_worldmodel_surfaces();
@@ -433,7 +441,7 @@ pub unsafe fn r_recursive_world_node(node: *mut MNode) {
     let mut surf = surfaces.offset(node_ref.firstsurface as isize);
 
     while c > 0 {
-        if (*surf).visframe != r_framecount {
+        if (*surf).visframe != rfs().r_framecount {
             surf = surf.offset(1);
             c -= 1;
             continue;
@@ -448,8 +456,8 @@ pub unsafe fn r_recursive_world_node(node: *mut MNode) {
         if (*(*surf).texinfo).flags & SURF_SKY != 0 {
             r_add_sky_surface(&*surf);
         } else if (*(*surf).texinfo).flags & (SURF_TRANS33 | SURF_TRANS66) != 0 {
-            (*surf).texturechain = r_alpha_surfaces;
-            r_alpha_surfaces = surf;
+            (*surf).texturechain = *alpha_surfaces;
+            *alpha_surfaces = surf;
         } else {
             // Legacy vk_render_lightmapped_poly call removed;
             // chain texture for modern rendering pipeline.
@@ -464,7 +472,7 @@ pub unsafe fn r_recursive_world_node(node: *mut MNode) {
 
     // recurse down the back side
     let other_side = if side == 0 { 1 } else { 0 };
-    r_recursive_world_node(node_ref.children[other_side]);
+    r_recursive_world_node(node_ref.children[other_side], alpha_surfaces);
 }
 
 // r_draw_world: removed (legacy immediate-mode GL rendering).
@@ -475,44 +483,46 @@ pub unsafe fn r_recursive_world_node(node: *mut MNode) {
 /// # Safety
 /// Accesses global renderer state and BSP data.
 pub unsafe fn r_mark_leaves() {
-    if r_oldviewcluster == r_viewcluster
-        && r_oldviewcluster2 == r_viewcluster2
-        && crate::vk_rmain::R_NOVIS.value == 0.0
-        && r_viewcluster != -1
+    let s = rfs();
+    if s.r_oldviewcluster == s.r_viewcluster
+        && s.r_oldviewcluster2 == s.r_viewcluster2
+        && crate::vk_rmain::rcvars().r_novis.value == 0.0
+        && s.r_viewcluster != -1
     {
         return;
     }
 
-    if crate::vk_rmain::VK_LOCKPVS.value != 0.0 {
+    if crate::vk_rmain::rcvars().vk_lockpvs.value != 0.0 {
         return;
     }
 
-    r_visframecount += 1;
-    r_oldviewcluster = r_viewcluster;
-    r_oldviewcluster2 = r_viewcluster2;
+    let s = rfs();
+    s.r_visframecount += 1;
+    s.r_oldviewcluster = s.r_viewcluster;
+    s.r_oldviewcluster2 = s.r_viewcluster2;
 
-    if crate::vk_rmain::R_NOVIS.value != 0.0 || r_viewcluster == -1 || r_worldmodel_vis().is_null() {
+    if crate::vk_rmain::rcvars().r_novis.value != 0.0 || rfs().r_viewcluster == -1 || r_worldmodel_vis().is_null() {
         // mark everything
         let numleafs = r_worldmodel_numleafs();
         for i in 0..numleafs {
-            r_worldmodel_leaf(i).visframe = r_visframecount;
+            r_worldmodel_leaf(i).visframe = rfs().r_visframecount;
         }
         let numnodes = r_worldmodel_numnodes();
         for i in 0..numnodes {
-            (*r_worldmodel_node(i)).visframe = r_visframecount;
+            (*r_worldmodel_node(i)).visframe = rfs().r_visframecount;
         }
         return;
     }
 
-    let mut vis = mod_cluster_pvs(r_viewcluster);
+    let mut vis = mod_cluster_pvs(rfs().r_viewcluster);
 
     // may have to combine two clusters because of solid water boundaries
     let mut fatvis = [0u8; MAX_MAP_LEAFS / 8];
-    if r_viewcluster2 != r_viewcluster {
+    if rfs().r_viewcluster2 != rfs().r_viewcluster {
         let numleafs = r_worldmodel_numleafs();
         let vis_len = (numleafs + 7) / 8;
         std::ptr::copy_nonoverlapping(vis, fatvis.as_mut_ptr(), vis_len as usize);
-        vis = mod_cluster_pvs(r_viewcluster2);
+        vis = mod_cluster_pvs(rfs().r_viewcluster2);
         let c = ((numleafs + 31) / 32) as usize;
         let fat_ints = fatvis.as_mut_ptr() as *mut i32;
         let vis_ints = vis as *const i32;
@@ -532,10 +542,10 @@ pub unsafe fn r_mark_leaves() {
         if *vis.offset((cluster >> 3) as isize) & (1 << (cluster & 7)) != 0 {
             let mut node = leaf as *mut MLeaf as *mut MNode;
             loop {
-                if (*node).visframe == r_visframecount {
+                if (*node).visframe == rfs().r_visframecount {
                     break;
                 }
-                (*node).visframe = r_visframecount;
+                (*node).visframe = rfs().r_visframecount;
                 node = (*node).parent;
                 if node.is_null() {
                     break;
@@ -549,20 +559,20 @@ pub unsafe fn r_mark_leaves() {
 // LIGHTMAP ALLOCATION
 // ============================================================
 
-unsafe fn lm_init_block() {
+unsafe fn lm_init_block(ss: &mut SurfaceState) {
     for i in 0..BLOCK_WIDTH as usize {
-        VK_LMS.allocated[i] = 0;
+        ss.vk_lms.allocated[i] = 0;
     }
 }
 
-unsafe fn lm_upload_block(dynamic: bool) {
+unsafe fn lm_upload_block(ss: &mut SurfaceState, dynamic: bool) {
     let texture;
     let mut height = 0;
 
     if dynamic {
         texture = 0;
     } else {
-        texture = VK_LMS.current_lightmap_texture;
+        texture = ss.vk_lms.current_lightmap_texture;
     }
 
     vk_bind(vk_state_lightmap_textures() + texture);
@@ -571,8 +581,8 @@ unsafe fn lm_upload_block(dynamic: bool) {
 
     if dynamic {
         for i in 0..BLOCK_WIDTH as usize {
-            if VK_LMS.allocated[i] > height {
-                height = VK_LMS.allocated[i];
+            if ss.vk_lms.allocated[i] > height {
+                height = ss.vk_lms.allocated[i];
             }
         }
 
@@ -585,39 +595,39 @@ unsafe fn lm_upload_block(dynamic: bool) {
             height,
             VK_LIGHTMAP_FORMAT,
             VK_UNSIGNED_BYTE,
-            VK_LMS.lightmap_buffer.as_ptr(),
+            ss.vk_lms.lightmap_buffer.as_ptr(),
         );
     } else {
         qvk_tex_image_2d(
             VK_TEXTURE_2D,
             0,
-            VK_LMS.internal_format,
+            ss.vk_lms.internal_format,
             BLOCK_WIDTH,
             BLOCK_HEIGHT,
             0,
             VK_LIGHTMAP_FORMAT,
             VK_UNSIGNED_BYTE,
-            VK_LMS.lightmap_buffer.as_ptr(),
+            ss.vk_lms.lightmap_buffer.as_ptr(),
         );
-        VK_LMS.current_lightmap_texture += 1;
-        if VK_LMS.current_lightmap_texture == MAX_LIGHTMAPS as i32 {
+        ss.vk_lms.current_lightmap_texture += 1;
+        if ss.vk_lms.current_lightmap_texture == MAX_LIGHTMAPS as i32 {
             vid_printf(ERR_DROP, "LM_UploadBlock() - MAX_LIGHTMAPS exceeded\n");
         }
     }
 }
 
-unsafe fn lm_alloc_block(w: i32, h: i32, x: &mut i32, y: &mut i32) -> bool {
+unsafe fn lm_alloc_block(ss: &mut SurfaceState, w: i32, h: i32, x: &mut i32, y: &mut i32) -> bool {
     let mut best = BLOCK_HEIGHT;
 
     for i in 0..(BLOCK_WIDTH - w) as usize {
         let mut best2 = 0;
         let mut j = 0;
         while j < w as usize {
-            if VK_LMS.allocated[i + j] >= best {
+            if ss.vk_lms.allocated[i + j] >= best {
                 break;
             }
-            if VK_LMS.allocated[i + j] > best2 {
-                best2 = VK_LMS.allocated[i + j];
+            if ss.vk_lms.allocated[i + j] > best2 {
+                best2 = ss.vk_lms.allocated[i + j];
             }
             j += 1;
         }
@@ -634,7 +644,7 @@ unsafe fn lm_alloc_block(w: i32, h: i32, x: &mut i32, y: &mut i32) -> bool {
     }
 
     for i in 0..w as usize {
-        VK_LMS.allocated[*x as usize + i] = best + h;
+        ss.vk_lms.allocated[*x as usize + i] = best + h;
     }
 
     true
@@ -709,6 +719,8 @@ pub unsafe fn vk_build_polygon_from_surface(fa: &mut MSurface) {
 /// # Safety
 /// Accesses lightmap allocation state.
 pub unsafe fn vk_create_surface_lightmap(surf: &mut MSurface) {
+    let mut ss = SURFACE_STATE.lock().unwrap();
+
     if surf.flags & (SURF_DRAWSKY | SURF_DRAWTURB) != 0 {
         return;
     }
@@ -716,10 +728,10 @@ pub unsafe fn vk_create_surface_lightmap(surf: &mut MSurface) {
     let smax = (surf.extents[0] as i32 >> 4) + 1;
     let tmax = (surf.extents[1] as i32 >> 4) + 1;
 
-    if !lm_alloc_block(smax, tmax, &mut surf.light_s, &mut surf.light_t) {
-        lm_upload_block(false);
-        lm_init_block();
-        if !lm_alloc_block(smax, tmax, &mut surf.light_s, &mut surf.light_t) {
+    if !lm_alloc_block(&mut ss, smax, tmax, &mut surf.light_s, &mut surf.light_t) {
+        lm_upload_block(&mut ss, false);
+        lm_init_block(&mut ss);
+        if !lm_alloc_block(&mut ss, smax, tmax, &mut surf.light_s, &mut surf.light_t) {
             vid_printf(ERR_FATAL, &format!(
                 "Consecutive calls to LM_AllocBlock({},{}) failed\n",
                 smax, tmax
@@ -727,11 +739,11 @@ pub unsafe fn vk_create_surface_lightmap(surf: &mut MSurface) {
         }
     }
 
-    surf.lightmaptexturenum = VK_LMS.current_lightmap_texture;
+    surf.lightmaptexturenum = ss.vk_lms.current_lightmap_texture;
 
     let base_offset =
         (surf.light_t * BLOCK_WIDTH + surf.light_s) * LIGHTMAP_BYTES;
-    let base = VK_LMS
+    let base = ss.vk_lms
         .lightmap_buffer
         .as_mut_ptr()
         .offset(base_offset as isize);
@@ -766,49 +778,46 @@ pub unsafe fn vk_create_surface_stainmap(surf: &mut MSurface) {
 /// # Safety
 /// Accesses GL state and lightmap system.
 pub unsafe fn vk_begin_building_lightmaps(_m: *mut Model) {
+    let mut ss = SURFACE_STATE.lock().unwrap();
+
     for i in 0..BLOCK_WIDTH as usize {
-        VK_LMS.allocated[i] = 0;
+        ss.vk_lms.allocated[i] = 0;
     }
 
-    r_framecount = 1; // no dlightcache
+    rfs().r_framecount = 1; // no dlightcache
 
     vk_enable_multitexture(true);
     vk_select_texture(VK_TEXTURE1);
 
     // setup base lightstyles
-    static mut LIGHTSTYLES: [LightStyle; MAX_LIGHTSTYLES] = [LightStyle {
-        rgb: [0.0; 3],
-        white: 0.0,
-    }; MAX_LIGHTSTYLES];
-
     for i in 0..MAX_LIGHTSTYLES {
-        LIGHTSTYLES[i].rgb = [1.0, 1.0, 1.0];
-        LIGHTSTYLES[i].white = 3.0;
+        ss.lightstyles[i].rgb = [1.0, 1.0, 1.0];
+        ss.lightstyles[i].white = 3.0;
     }
-    r_newrefdef.lightstyles = LIGHTSTYLES.as_mut_ptr();
+    rfs().r_newrefdef.lightstyles = ss.lightstyles.as_mut_ptr();
 
     if vk_state_lightmap_textures() == 0 {
         set_lightmap_textures(TEXNUM_LIGHTMAPS);
     }
 
-    VK_LMS.current_lightmap_texture = 1;
+    ss.vk_lms.current_lightmap_texture = 1;
 
     let mono = vk_monolightmap_char().to_ascii_uppercase();
     match mono {
         b'A' => {
-            VK_LMS.internal_format = vk_tex_alpha_format();
+            ss.vk_lms.internal_format = vk_tex_alpha_format();
         }
         b'C' => {
-            VK_LMS.internal_format = vk_tex_alpha_format();
+            ss.vk_lms.internal_format = vk_tex_alpha_format();
         }
         b'I' => {
-            VK_LMS.internal_format = VK_INTENSITY8 as i32;
+            ss.vk_lms.internal_format = VK_INTENSITY8 as i32;
         }
         b'L' => {
-            VK_LMS.internal_format = VK_LUMINANCE8 as i32;
+            ss.vk_lms.internal_format = VK_LUMINANCE8 as i32;
         }
         _ => {
-            VK_LMS.internal_format = vk_tex_solid_format();
+            ss.vk_lms.internal_format = vk_tex_solid_format();
         }
     }
 
@@ -821,7 +830,7 @@ pub unsafe fn vk_begin_building_lightmaps(_m: *mut Model) {
     qvk_tex_image_2d(
         VK_TEXTURE_2D,
         0,
-        VK_LMS.internal_format,
+        ss.vk_lms.internal_format,
         BLOCK_WIDTH,
         BLOCK_HEIGHT,
         0,
@@ -836,7 +845,8 @@ pub unsafe fn vk_begin_building_lightmaps(_m: *mut Model) {
 /// # Safety
 /// Accesses GL state.
 pub unsafe fn vk_end_building_lightmaps() {
-    lm_upload_block(false);
+    let mut ss = SURFACE_STATE.lock().unwrap();
+    lm_upload_block(&mut ss, false);
     vk_enable_multitexture(false);
 }
 

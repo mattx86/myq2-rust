@@ -219,8 +219,8 @@ impl VrsManager {
         }
 
         // Calculate attachment dimensions (each texel covers texel_size pixels)
-        let att_width = (width + texel_size.width - 1) / texel_size.width;
-        let att_height = (height + texel_size.height - 1) / texel_size.height;
+        let att_width = width.div_ceil(texel_size.width);
+        let att_height = height.div_ceil(texel_size.height);
 
         unsafe {
             // Create image

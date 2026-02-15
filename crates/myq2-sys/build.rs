@@ -28,7 +28,14 @@ fn main() {
     println!("cargo:rustc-link-lib=vulkan-1");
 
     #[cfg(target_os = "linux")]
-    println!("cargo:rustc-link-lib=vulkan");
+    {
+        if let Ok(vulkan_sdk) = std::env::var("VULKAN_SDK") {
+            println!("cargo:rustc-link-search=native={}/lib", vulkan_sdk);
+        }
+        // Common system library paths on Debian/Ubuntu x86_64
+        println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
+        println!("cargo:rustc-link-lib=vulkan");
+    }
 
     #[cfg(target_os = "macos")]
     println!("cargo:rustc-link-lib=vulkan");

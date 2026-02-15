@@ -20,6 +20,7 @@ pub const PUSH_DESCRIPTOR_EXTENSION: &CStr = push_descriptor::NAME;
 
 /// Push descriptor capabilities.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct PushDescriptorCapabilities {
     /// Whether push descriptors are supported.
     pub supported: bool,
@@ -27,14 +28,6 @@ pub struct PushDescriptorCapabilities {
     pub max_push_descriptors: u32,
 }
 
-impl Default for PushDescriptorCapabilities {
-    fn default() -> Self {
-        Self {
-            supported: false,
-            max_push_descriptors: 0,
-        }
-    }
-}
 
 /// Push descriptor manager.
 pub struct PushDescriptorManager {

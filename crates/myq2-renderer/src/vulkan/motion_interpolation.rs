@@ -1398,8 +1398,8 @@ impl FrameInterpolator {
                 ),
             );
 
-            let groups_x = (self.width + 7) / 8;
-            let groups_y = (self.height + 7) / 8;
+            let groups_x = self.width.div_ceil(8);
+            let groups_y = self.height.div_ceil(8);
             ctx.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
         }
     }

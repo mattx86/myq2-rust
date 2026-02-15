@@ -4,7 +4,7 @@
 // vk_model.c -> vk_model.rs
 // Model loading and caching
 
-#![allow(dead_code, non_upper_case_globals, static_mut_refs)]
+#![allow(dead_code, non_upper_case_globals)]
 
 use crate::vk_local::*;
 use crate::vk_rmain::vid_printf;
@@ -27,65 +27,114 @@ use myq2_common::q_shared::{little_short, little_long};
 pub const MAX_MOD_KNOWN: usize = 512;
 
 // =============================================================
-//  Module-level state (matches C globals)
+//  Module-level state
 // =============================================================
 
-/// Length of the file being loaded.
-static mut modfilelen: i32 = 0;
+use std::sync::{LazyLock, Mutex, MutexGuard};
 
-/// No-vis data: all clusters visible.
-static mut mod_novis: [u8; MAX_MAP_LEAFS / 8] = [0xFF; MAX_MAP_LEAFS / 8];
+/// No-vis data: all clusters visible. Immutable after init.
+static MOD_NOVIS: [u8; MAX_MAP_LEAFS / 8] = [0xFF; MAX_MAP_LEAFS / 8];
 
-/// All known models.
-static mut mod_known: [Model; MAX_MOD_KNOWN] = unsafe { std::mem::zeroed() };
-static mut mod_numknown: i32 = 0;
+pub struct ModelState {
+    /// Length of the file being loaded.
+    modfilelen: i32,
+    /// All known models (heap-allocated to avoid stack overflow).
+    mod_known: Box<[Model; MAX_MOD_KNOWN]>,
+    mod_numknown: i32,
+    /// Inline submodels from the current map, kept separate (heap-allocated).
+    mod_inline: Box<[Model; MAX_MOD_KNOWN]>,
+    /// Registration sequence counter.
+    registration_sequence: i32,
+    /// Raw base pointer for the currently-loading BSP.
+    mod_base: *const u8,
+    // Hunk allocator state — each hunk_begin() creates a new allocation that
+    // persists until mod_free_all(). This is critical: models store raw
+    // `extradata` pointers into these buffers, so earlier allocations must
+    // remain valid even after later models are loaded.
+    hunk_allocations: Vec<Vec<u8>>,
+    hunk_cur: usize,
+    /// Decompressed PVS buffer.
+    decompressed: [u8; MAX_MAP_LEAFS / 8],
+}
 
-/// Inline submodels from the current map, kept separate.
-static mut mod_inline: [Model; MAX_MOD_KNOWN] = unsafe { std::mem::zeroed() };
+// SAFETY: Raw pointers in ModelState (mod_base) are valid for struct
+// lifetime. All access is serialized by Mutex.
+unsafe impl Send for ModelState {}
 
-/// Registration sequence counter.
-pub static mut registration_sequence: i32 = 0;
+// Helper to allocate large arrays on heap without stack overflow
+fn alloc_model_array() -> Box<[Model; MAX_MOD_KNOWN]> {
+    // Allocate via Vec to avoid stack, then convert to boxed array
+    let vec: Vec<Model> = (0..MAX_MOD_KNOWN).map(|_| Model::default()).collect();
+    let boxed_slice: Box<[Model]> = vec.into_boxed_slice();
+    // SAFETY: We allocated exactly MAX_MOD_KNOWN elements
+    unsafe {
+        let raw = Box::into_raw(boxed_slice) as *mut [Model; MAX_MOD_KNOWN];
+        Box::from_raw(raw)
+    }
+}
 
-/// Raw base pointer for the currently-loading BSP.
-static mut mod_base: *const u8 = std::ptr::null();
+static MODEL_STATE: LazyLock<Mutex<ModelState>> = LazyLock::new(|| {
+    Mutex::new(ModelState {
+        modfilelen: 0,
+        mod_known: alloc_model_array(),
+        mod_numknown: 0,
+        mod_inline: alloc_model_array(),
+        registration_sequence: 0,
+        mod_base: std::ptr::null(),
+        hunk_allocations: Vec::new(),
+        hunk_cur: 0,
+        decompressed: [0u8; MAX_MAP_LEAFS / 8],
+    })
+});
+
+pub fn ms() -> MutexGuard<'static, ModelState> {
+    MODEL_STATE.lock().unwrap()
+}
+
+/// Get the current registration sequence value.
+pub fn get_registration_sequence() -> i32 {
+    ms().registration_sequence
+}
 
 // =============================================================
-//  Hunk allocator stubs
+//  Hunk allocator
 //  In the original C code, Hunk_Begin/Hunk_Alloc/Hunk_End
 //  manage a contiguous memory region. We simulate this with
 //  a simple bump allocator backed by a Vec<u8>.
 // =============================================================
 
-static mut hunk_buf: Vec<u8> = Vec::new();
-static mut hunk_cur: usize = 0;
-
-unsafe fn hunk_begin(maxsize: usize) -> *mut u8 {
-    hunk_buf = Vec::with_capacity(maxsize);
-    hunk_buf.resize(maxsize, 0);
-    hunk_cur = 0;
-    hunk_buf.as_mut_ptr()
+unsafe fn hunk_begin(ms: &mut ModelState, maxsize: usize) -> *mut u8 {
+    let buf = vec![0u8; maxsize];
+    ms.hunk_cur = 0;
+    ms.hunk_allocations.push(buf);
+    // SAFETY: The Vec we just pushed lives in hunk_allocations and won't be
+    // moved or dropped until mod_free_all() clears the list. Vec's internal
+    // heap buffer is stable across moves of the Vec struct itself.
+    ms.hunk_allocations.last_mut().unwrap().as_mut_ptr()
 }
 
-unsafe fn hunk_alloc(size: usize) -> *mut u8 {
+unsafe fn hunk_alloc(ms: &mut ModelState, size: usize) -> *mut u8 {
+    let buf = ms.hunk_allocations.last_mut().expect("hunk not initialized");
     // Align to 16 bytes
-    let aligned = (hunk_cur + 15) & !15;
-    if aligned + size > hunk_buf.len() {
+    let aligned = (ms.hunk_cur + 15) & !15;
+    if aligned + size > buf.len() {
         com_error(ERR_DROP, "Hunk_Alloc: overflow");
     }
-    let ptr = hunk_buf.as_mut_ptr().add(aligned);
-    hunk_cur = aligned + size;
+    let ptr = buf.as_mut_ptr().add(aligned);
+    ms.hunk_cur = aligned + size;
     ptr
 }
 
-unsafe fn hunk_end() -> i32 {
-    hunk_buf.truncate(hunk_cur);
-    hunk_buf.shrink_to_fit();
-    hunk_cur as i32
+unsafe fn hunk_end(ms: &mut ModelState) -> i32 {
+    // Note: we intentionally do NOT truncate or shrink_to_fit here.
+    // Models store raw `extradata` pointers into this buffer, and
+    // shrink_to_fit could reallocate, invalidating those pointers.
+    ms.hunk_cur as i32
 }
 
-unsafe fn hunk_free(_data: *mut u8) {
-    // In a real implementation this would free the hunk.
-    // For now, leak — matching the C code's lifetime semantics.
+unsafe fn hunk_free(_ms: &mut ModelState, _data: *mut u8) {
+    // Individual hunk frees are no-ops — all hunks are freed together
+    // in mod_free_all() when the model cache is cleared.
 }
 
 // =============================================================
@@ -217,15 +266,13 @@ pub unsafe fn mod_point_in_leaf(p: &Vec3, model: *mut Model) -> *mut MLeaf {
 //  Mod_DecompressVis
 // =============================================================
 
-/// Decompress run-length encoded PVS data.
+/// Decompress run-length encoded PVS data (internal helper).
 ///
 /// # Safety
 /// Dereferences raw pointers.
-pub unsafe fn mod_decompress_vis(input: *mut u8, model: *mut Model) -> *mut u8 {
-    static mut decompressed: [u8; MAX_MAP_LEAFS / 8] = [0u8; MAX_MAP_LEAFS / 8];
-
+unsafe fn decompress_vis_impl(ms: &mut ModelState, input: *mut u8, model: *mut Model) -> *mut u8 {
     let row = (((*(*model).vis).numclusters + 7) >> 3) as usize;
-    let out_base = decompressed.as_mut_ptr();
+    let out_base = ms.decompressed.as_mut_ptr();
     let mut out = out_base;
 
     if input.is_null() {
@@ -260,6 +307,15 @@ pub unsafe fn mod_decompress_vis(input: *mut u8, model: *mut Model) -> *mut u8 {
     out_base
 }
 
+/// Decompress run-length encoded PVS data (public entry point).
+///
+/// # Safety
+/// Dereferences raw pointers. Returned pointer valid until next call.
+pub unsafe fn mod_decompress_vis(input: *mut u8, model: *mut Model) -> *mut u8 {
+    let mut state = ms();
+    decompress_vis_impl(&mut state, input, model)
+}
+
 // =============================================================
 //  Mod_ClusterPVS
 // =============================================================
@@ -267,17 +323,18 @@ pub unsafe fn mod_decompress_vis(input: *mut u8, model: *mut Model) -> *mut u8 {
 /// Get the PVS for a cluster.
 ///
 /// # Safety
-/// Dereferences raw model pointers.
+/// Dereferences raw model pointers. Returned pointer valid until next call.
 pub unsafe fn mod_cluster_pvs_raw(cluster: i32, model: *mut Model) -> *mut u8 {
     if cluster == -1 || (*model).vis.is_null() {
-        return mod_novis.as_mut_ptr();
+        return MOD_NOVIS.as_ptr() as *mut u8;
     }
+    let mut state = ms();
     let vis = (*model).vis;
     // SAFETY: bitofs is declared as [[i32; 2]; 1] but is variable-sized.
     // Access via raw pointer arithmetic.
     let bitofs_ptr = (*vis).bitofs.as_ptr() as *const [i32; 2];
     let ofs = (*bitofs_ptr.add(cluster as usize))[DVIS_PVS as usize];
-    mod_decompress_vis((vis as *mut u8).add(ofs as usize), model)
+    decompress_vis_impl(&mut state, (vis as *mut u8).add(ofs as usize), model)
 }
 
 // =============================================================
@@ -285,14 +342,12 @@ pub unsafe fn mod_cluster_pvs_raw(cluster: i32, model: *mut Model) -> *mut u8 {
 // =============================================================
 
 /// Console command: list all loaded models and their sizes.
-///
-/// # Safety
-/// Accesses global model arrays.
-pub unsafe fn mod_modellist_f() {
+pub fn mod_modellist_f() {
+    let state = ms();
     let mut total = 0i32;
     vid_printf(PRINT_ALL, "Loaded models:\n");
-    for i in 0..mod_numknown {
-        let m = &mod_known[i as usize];
+    for i in 0..state.mod_numknown {
+        let m = &state.mod_known[i as usize];
         if model_name_is_empty(&m.name) {
             continue;
         }
@@ -307,11 +362,10 @@ pub unsafe fn mod_modellist_f() {
 // =============================================================
 
 /// Initialize the model subsystem.
-///
-/// # Safety
-/// Writes to global state.
-pub unsafe fn mod_init() {
-    mod_novis = [0xFF; MAX_MAP_LEAFS / 8];
+pub fn mod_init() {
+    // MOD_NOVIS is a const static — no initialization needed.
+    // Force MODEL_STATE lazy init.
+    let _state = ms();
 }
 
 // =============================================================
@@ -321,8 +375,8 @@ pub unsafe fn mod_init() {
 /// Load a model by name. If `crash` is true, errors are fatal.
 ///
 /// # Safety
-/// Accesses global model arrays and filesystem.
-pub unsafe fn mod_for_name(name: &str, crash: bool) -> *mut Model {
+/// Accesses vk_local globals (loadmodel, r_worldmodel) and filesystem.
+unsafe fn mod_for_name(state: &mut ModelState, name: &str, crash: bool) -> *mut Model {
     if name.is_empty() {
         com_error(ERR_DROP, "Mod_ForName: NULL name");
     }
@@ -330,67 +384,68 @@ pub unsafe fn mod_for_name(name: &str, crash: bool) -> *mut Model {
     // inline models are grabbed only from worldmodel
     if name.starts_with('*') {
         let i: i32 = name[1..].parse().unwrap_or(0);
-        if i < 1 || r_worldmodel.is_null() || i >= (*r_worldmodel).numsubmodels {
+        if i < 1 || rfs().r_worldmodel.is_null() || i >= (*rfs().r_worldmodel).numsubmodels {
             com_error(ERR_DROP, "bad inline model number");
         }
-        return &mut mod_inline[i as usize];
+        return &mut state.mod_inline[i as usize];
     }
 
     // search the currently loaded models
-    for i in 0..mod_numknown as usize {
-        if model_name_is_empty(&mod_known[i].name) {
+    for i in 0..state.mod_numknown as usize {
+        if model_name_is_empty(&state.mod_known[i].name) {
             continue;
         }
-        if model_name_matches_str(&mod_known[i].name, name) {
-            return &mut mod_known[i];
+        if model_name_matches_str(&state.mod_known[i].name, name) {
+            return &mut state.mod_known[i];
         }
     }
 
     // find a free model slot
-    let mut slot: usize = mod_numknown as usize;
-    for i in 0..mod_numknown as usize {
-        if model_name_is_empty(&mod_known[i].name) {
+    let mut slot: usize = state.mod_numknown as usize;
+    for i in 0..state.mod_numknown as usize {
+        if model_name_is_empty(&state.mod_known[i].name) {
             slot = i;
             break;
         }
     }
-    if slot == mod_numknown as usize {
-        if mod_numknown as usize == MAX_MOD_KNOWN {
+    if slot == state.mod_numknown as usize {
+        if state.mod_numknown as usize == MAX_MOD_KNOWN {
             com_error(ERR_DROP, "mod_numknown == MAX_MOD_KNOWN");
         }
-        mod_numknown += 1;
+        state.mod_numknown += 1;
     }
-    set_model_name(&mut mod_known[slot].name, name);
+    set_model_name(&mut state.mod_known[slot].name, name);
 
     // load the file
-    let buf = fs_load_file(&mod_known[slot].name);
+    let buf = fs_load_file(&state.mod_known[slot].name);
     if buf.is_none() {
         if crash {
             com_error(ERR_DROP, &format!("Mod_NumForName: {} not found", name));
         }
-        mod_known[slot].name = [0u8; MAX_QPATH];
+        state.mod_known[slot].name = [0u8; MAX_QPATH];
         return std::ptr::null_mut();
     }
     let buf = buf.unwrap();
-    modfilelen = buf.len() as i32;
+    state.modfilelen = buf.len() as i32;
 
-    loadmodel = &mut mod_known[slot];
+    let model_ptr = state.mod_known.as_mut_ptr().add(slot);
+    rfs().loadmodel = model_ptr;
 
     // call the appropriate loader based on file magic
     if buf.len() >= 4 {
         let ident = little_long(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]));
         match ident {
             IDALIASHEADER => {
-                (*loadmodel).extradata = hunk_begin(0x200000);
-                mod_load_alias_model(&mut mod_known[slot], buf.as_ptr() as *mut u8);
+                (*rfs().loadmodel).extradata = hunk_begin(state, 0x200000);
+                mod_load_alias_model(state, model_ptr, buf.as_ptr() as *mut u8);
             }
             IDSPRITEHEADER => {
-                (*loadmodel).extradata = hunk_begin(0x10000);
-                mod_load_sprite_model(&mut mod_known[slot], buf.as_ptr() as *mut u8);
+                (*rfs().loadmodel).extradata = hunk_begin(state, 0x10000);
+                mod_load_sprite_model(state, model_ptr, buf.as_ptr() as *mut u8);
             }
             IDBSPHEADER => {
-                (*loadmodel).extradata = hunk_begin(0x1000000);
-                mod_load_brush_model(&mut mod_known[slot], buf.as_ptr() as *mut u8);
+                (*rfs().loadmodel).extradata = hunk_begin(state, 0x1000000);
+                mod_load_brush_model(state, model_ptr, buf.as_ptr() as *mut u8);
             }
             _ => {
                 com_error(ERR_DROP, &format!("Mod_NumForName: unknown fileid for {}", name));
@@ -398,9 +453,9 @@ pub unsafe fn mod_for_name(name: &str, crash: bool) -> *mut Model {
         }
     }
 
-    (*loadmodel).extradatasize = hunk_end();
+    (*rfs().loadmodel).extradatasize = hunk_end(state);
 
-    &mut mod_known[slot]
+    &mut *state.mod_known.as_mut_ptr().add(slot)
 }
 
 // =============================================================
@@ -427,30 +482,30 @@ pub fn radius_from_bounds(mins: &Vec3, maxs: &Vec3) -> f32 {
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_lighting(l: *const Lump) {
+unsafe fn mod_load_lighting(state: &mut ModelState, l: *const Lump) {
     if (*l).filelen == 0 {
-        (*loadmodel).lightdata = std::ptr::null_mut();
+        (*rfs().loadmodel).lightdata = std::ptr::null_mut();
         return;
     }
     let size = (*l).filelen as usize;
-    let dst = hunk_alloc(size);
-    std::ptr::copy_nonoverlapping(mod_base.add((*l).fileofs as usize), dst, size);
-    (*loadmodel).lightdata = dst;
+    let dst = hunk_alloc(state, size);
+    std::ptr::copy_nonoverlapping(state.mod_base.add((*l).fileofs as usize), dst, size);
+    (*rfs().loadmodel).lightdata = dst;
 }
 
 /// Load visibility lump from BSP.
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_visibility(l: *const Lump) {
+unsafe fn mod_load_visibility(state: &mut ModelState, l: *const Lump) {
     if (*l).filelen == 0 {
-        (*loadmodel).vis = std::ptr::null_mut();
+        (*rfs().loadmodel).vis = std::ptr::null_mut();
         return;
     }
     let size = (*l).filelen as usize;
-    let dst = hunk_alloc(size) as *mut DvisT;
-    std::ptr::copy_nonoverlapping(mod_base.add((*l).fileofs as usize), dst as *mut u8, size);
-    (*loadmodel).vis = dst;
+    let dst = hunk_alloc(state, size) as *mut DvisT;
+    std::ptr::copy_nonoverlapping(state.mod_base.add((*l).fileofs as usize), dst as *mut u8, size);
+    (*rfs().loadmodel).vis = dst;
 
     (*dst).numclusters = little_long((*dst).numclusters);
     let bitofs_ptr = (*dst).bitofs.as_mut_ptr() as *mut [i32; 2];
@@ -464,18 +519,18 @@ unsafe fn mod_load_visibility(l: *const Lump) {
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_vertexes(l: *const Lump) {
+unsafe fn mod_load_vertexes(state: &mut ModelState, l: *const Lump) {
     let in_size = std::mem::size_of::<DVertex>();
     if !((*l).filelen as usize).is_multiple_of(in_size) {
-        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*loadmodel).name)));
+        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*rfs().loadmodel).name)));
     }
     let count = (*l).filelen as usize / in_size;
-    let out = hunk_alloc(count * std::mem::size_of::<MVertex>()) as *mut MVertex;
+    let out = hunk_alloc(state, count * std::mem::size_of::<MVertex>()) as *mut MVertex;
 
-    (*loadmodel).vertexes = out;
-    (*loadmodel).numvertexes = count as i32;
+    (*rfs().loadmodel).vertexes = out;
+    (*rfs().loadmodel).numvertexes = count as i32;
 
-    let mut inp = (mod_base.add((*l).fileofs as usize)) as *const DVertex;
+    let mut inp = (state.mod_base.add((*l).fileofs as usize)) as *const DVertex;
     let mut outp = out;
     for _ in 0..count {
         (*outp).position[0] = little_float((*inp).point[0]);
@@ -490,18 +545,18 @@ unsafe fn mod_load_vertexes(l: *const Lump) {
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_submodels(l: *const Lump) {
+unsafe fn mod_load_submodels(state: &mut ModelState, l: *const Lump) {
     let in_size = std::mem::size_of::<DModel>();
     if !((*l).filelen as usize).is_multiple_of(in_size) {
-        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*loadmodel).name)));
+        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*rfs().loadmodel).name)));
     }
     let count = (*l).filelen as usize / in_size;
-    let out = hunk_alloc(count * std::mem::size_of::<MModel>()) as *mut MModel;
+    let out = hunk_alloc(state, count * std::mem::size_of::<MModel>()) as *mut MModel;
 
-    (*loadmodel).submodels = out;
-    (*loadmodel).numsubmodels = count as i32;
+    (*rfs().loadmodel).submodels = out;
+    (*rfs().loadmodel).numsubmodels = count as i32;
 
-    let mut inp = (mod_base.add((*l).fileofs as usize)) as *const DModel;
+    let mut inp = (state.mod_base.add((*l).fileofs as usize)) as *const DModel;
     let mut outp = out;
     for _ in 0..count {
         for j in 0..3 {
@@ -522,18 +577,18 @@ unsafe fn mod_load_submodels(l: *const Lump) {
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_edges(l: *const Lump) {
+unsafe fn mod_load_edges(state: &mut ModelState, l: *const Lump) {
     let in_size = std::mem::size_of::<DEdge>();
     if !((*l).filelen as usize).is_multiple_of(in_size) {
-        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*loadmodel).name)));
+        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*rfs().loadmodel).name)));
     }
     let count = (*l).filelen as usize / in_size;
-    let out = hunk_alloc((count + 1) * std::mem::size_of::<MEdge>()) as *mut MEdge;
+    let out = hunk_alloc(state, (count + 1) * std::mem::size_of::<MEdge>()) as *mut MEdge;
 
-    (*loadmodel).edges = out;
-    (*loadmodel).numedges = count as i32;
+    (*rfs().loadmodel).edges = out;
+    (*rfs().loadmodel).numedges = count as i32;
 
-    let mut inp = (mod_base.add((*l).fileofs as usize)) as *const DEdge;
+    let mut inp = (state.mod_base.add((*l).fileofs as usize)) as *const DEdge;
     let mut outp = out;
     for _ in 0..count {
         (*outp).v[0] = little_short((*inp).v[0] as i16) as u16;
@@ -547,20 +602,20 @@ unsafe fn mod_load_edges(l: *const Lump) {
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_texinfo(l: *const Lump) {
+unsafe fn mod_load_texinfo(state: &mut ModelState, l: *const Lump) {
     let in_size = std::mem::size_of::<TexInfo>();
     if !((*l).filelen as usize).is_multiple_of(in_size) {
-        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*loadmodel).name)));
+        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*rfs().loadmodel).name)));
     }
     let count = (*l).filelen as usize / in_size;
-    let out = hunk_alloc(count * std::mem::size_of::<MTexInfo>()) as *mut MTexInfo;
+    let out = hunk_alloc(state, count * std::mem::size_of::<MTexInfo>()) as *mut MTexInfo;
 
-    (*loadmodel).texinfo = out;
-    (*loadmodel).numtexinfo = count as i32;
+    (*rfs().loadmodel).texinfo = out;
+    (*rfs().loadmodel).numtexinfo = count as i32;
 
     // Phase 1: Parse texinfo and collect all texture names
     let mut texture_names: Vec<String> = Vec::with_capacity(count);
-    let mut inp = (mod_base.add((*l).fileofs as usize)) as *const TexInfo;
+    let mut inp = (state.mod_base.add((*l).fileofs as usize)) as *const TexInfo;
     let mut outp = out;
 
     for _i in 0..count {
@@ -574,7 +629,7 @@ unsafe fn mod_load_texinfo(l: *const Lump) {
         (*outp).flags = little_long((*inp).flags);
         let next = little_long((*inp).nexttexinfo);
         if next > 0 {
-            (*outp).next = (*loadmodel).texinfo.add(next as usize);
+            (*outp).next = (*rfs().loadmodel).texinfo.add(next as usize);
         } else {
             (*outp).next = std::ptr::null_mut();
         }
@@ -604,10 +659,10 @@ unsafe fn mod_load_texinfo(l: *const Lump) {
 
     // Phase 3: Assign loaded images to texinfo entries
     for (idx, img_ptr) in loaded_images.into_iter().enumerate() {
-        let ti = (*loadmodel).texinfo.add(idx);
+        let ti = (*rfs().loadmodel).texinfo.add(idx);
         if img_ptr.is_null() {
             vid_printf(PRINT_ALL, &format!("Couldn't load {}\n", texture_names[idx]));
-            (*ti).image = r_notexture;
+            (*ti).image = rfs().r_notexture;
         } else {
             (*ti).image = img_ptr;
         }
@@ -615,7 +670,7 @@ unsafe fn mod_load_texinfo(l: *const Lump) {
 
     // count animation frames
     for idx in 0..count {
-        let ti = (*loadmodel).texinfo.add(idx);
+        let ti = (*rfs().loadmodel).texinfo.add(idx);
         (*ti).numframes = 1;
         let mut step = (*ti).next;
         while !step.is_null() && step != ti {
@@ -636,12 +691,12 @@ unsafe fn calc_surface_extents(s: *mut MSurface) {
     let tex = (*s).texinfo;
 
     for i in 0..(*s).numedges {
-        let e = *(*loadmodel).surfedges.add(((*s).firstedge + i) as usize);
+        let e = *(*rfs().loadmodel).surfedges.add(((*s).firstedge + i) as usize);
         let v: *const MVertex;
         if e >= 0 {
-            v = (*loadmodel).vertexes.add((*(*loadmodel).edges.add(e as usize)).v[0] as usize);
+            v = (*rfs().loadmodel).vertexes.add((*(*rfs().loadmodel).edges.add(e as usize)).v[0] as usize);
         } else {
-            v = (*loadmodel).vertexes.add((*(*loadmodel).edges.add((-e) as usize)).v[1] as usize);
+            v = (*rfs().loadmodel).vertexes.add((*(*rfs().loadmodel).edges.add((-e) as usize)).v[1] as usize);
         }
 
         for j in 0..2usize {
@@ -666,22 +721,22 @@ unsafe fn calc_surface_extents(s: *mut MSurface) {
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_faces(l: *const Lump) {
+unsafe fn mod_load_faces(state: &mut ModelState, l: *const Lump) {
     let in_size = std::mem::size_of::<DFace>();
     if !((*l).filelen as usize).is_multiple_of(in_size) {
-        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*loadmodel).name)));
+        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*rfs().loadmodel).name)));
     }
     let count = (*l).filelen as usize / in_size;
-    let out = hunk_alloc(count * std::mem::size_of::<MSurface>()) as *mut MSurface;
+    let out = hunk_alloc(state, count * std::mem::size_of::<MSurface>()) as *mut MSurface;
 
-    (*loadmodel).surfaces = out;
-    (*loadmodel).numsurfaces = count as i32;
+    (*rfs().loadmodel).surfaces = out;
+    (*rfs().loadmodel).numsurfaces = count as i32;
 
-    currentmodel = loadmodel;
+    rfs().currentmodel = rfs().loadmodel;
 
-    vk_begin_building_lightmaps(loadmodel);
+    vk_begin_building_lightmaps(rfs().loadmodel);
 
-    let mut inp = (mod_base.add((*l).fileofs as usize)) as *const DFace;
+    let mut inp = (state.mod_base.add((*l).fileofs as usize)) as *const DFace;
     let mut outp = out;
     for _surfnum in 0..count {
         (*outp).firstedge = little_long((*inp).firstedge);
@@ -695,13 +750,13 @@ unsafe fn mod_load_faces(l: *const Lump) {
             (*outp).flags |= SURF_PLANEBACK;
         }
 
-        (*outp).plane = (*loadmodel).planes.add(planenum);
+        (*outp).plane = (*rfs().loadmodel).planes.add(planenum);
 
         let ti = little_short((*inp).texinfo) as i32;
-        if ti < 0 || ti >= (*loadmodel).numtexinfo {
+        if ti < 0 || ti >= (*rfs().loadmodel).numtexinfo {
             com_error(ERR_DROP, "MOD_LoadBmodel: bad texinfo number");
         }
-        (*outp).texinfo = (*loadmodel).texinfo.add(ti as usize);
+        (*outp).texinfo = (*rfs().loadmodel).texinfo.add(ti as usize);
 
         calc_surface_extents(outp);
 
@@ -714,7 +769,7 @@ unsafe fn mod_load_faces(l: *const Lump) {
             (*outp).samples = std::ptr::null_mut();
             (*outp).stains = std::ptr::null_mut();
         } else {
-            (*outp).samples = (*loadmodel).lightdata.add(lightofs as usize);
+            (*outp).samples = (*rfs().loadmodel).lightdata.add(lightofs as usize);
         }
 
         // set the drawing flags
@@ -761,18 +816,18 @@ unsafe fn mod_set_parent(node: *mut MNode, parent: *mut MNode) {
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_nodes(l: *const Lump) {
+unsafe fn mod_load_nodes(state: &mut ModelState, l: *const Lump) {
     let in_size = std::mem::size_of::<DNode>();
     if !((*l).filelen as usize).is_multiple_of(in_size) {
-        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*loadmodel).name)));
+        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*rfs().loadmodel).name)));
     }
     let count = (*l).filelen as usize / in_size;
-    let out = hunk_alloc(count * std::mem::size_of::<MNode>()) as *mut MNode;
+    let out = hunk_alloc(state, count * std::mem::size_of::<MNode>()) as *mut MNode;
 
-    (*loadmodel).nodes = out;
-    (*loadmodel).numnodes = count as i32;
+    (*rfs().loadmodel).nodes = out;
+    (*rfs().loadmodel).numnodes = count as i32;
 
-    let mut inp = (mod_base.add((*l).fileofs as usize)) as *const DNode;
+    let mut inp = (state.mod_base.add((*l).fileofs as usize)) as *const DNode;
     let mut outp = out;
     for _ in 0..count {
         for j in 0..3 {
@@ -781,7 +836,7 @@ unsafe fn mod_load_nodes(l: *const Lump) {
         }
 
         let p = little_long((*inp).planenum);
-        (*outp).plane = (*loadmodel).planes.add(p as usize);
+        (*outp).plane = (*rfs().loadmodel).planes.add(p as usize);
 
         (*outp).firstsurface = little_short((*inp).firstface as i16) as u16;
         (*outp).numsurfaces = little_short((*inp).numfaces as i16) as u16;
@@ -790,9 +845,9 @@ unsafe fn mod_load_nodes(l: *const Lump) {
         for j in 0..2 {
             let child = little_long((*inp).children[j]);
             if child >= 0 {
-                (*outp).children[j] = (*loadmodel).nodes.add(child as usize);
+                (*outp).children[j] = (*rfs().loadmodel).nodes.add(child as usize);
             } else {
-                (*outp).children[j] = (*loadmodel).leafs.add((-1 - child) as usize) as *mut MNode;
+                (*outp).children[j] = (*rfs().loadmodel).leafs.add((-1 - child) as usize) as *mut MNode;
             }
         }
 
@@ -800,25 +855,25 @@ unsafe fn mod_load_nodes(l: *const Lump) {
         outp = outp.add(1);
     }
 
-    mod_set_parent((*loadmodel).nodes, std::ptr::null_mut()); // sets nodes and leafs
+    mod_set_parent((*rfs().loadmodel).nodes, std::ptr::null_mut()); // sets nodes and leafs
 }
 
 /// Load leafs lump from BSP.
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_leafs(l: *const Lump) {
+unsafe fn mod_load_leafs(state: &mut ModelState, l: *const Lump) {
     let in_size = std::mem::size_of::<DLeaf>();
     if !((*l).filelen as usize).is_multiple_of(in_size) {
-        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*loadmodel).name)));
+        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*rfs().loadmodel).name)));
     }
     let count = (*l).filelen as usize / in_size;
-    let out = hunk_alloc(count * std::mem::size_of::<MLeaf>()) as *mut MLeaf;
+    let out = hunk_alloc(state, count * std::mem::size_of::<MLeaf>()) as *mut MLeaf;
 
-    (*loadmodel).leafs = out;
-    (*loadmodel).numleafs = count as i32;
+    (*rfs().loadmodel).leafs = out;
+    (*rfs().loadmodel).numleafs = count as i32;
 
-    let mut inp = (mod_base.add((*l).fileofs as usize)) as *const DLeaf;
+    let mut inp = (state.mod_base.add((*l).fileofs as usize)) as *const DLeaf;
     let mut outp = out;
     for _ in 0..count {
         for j in 0..3 {
@@ -830,7 +885,7 @@ unsafe fn mod_load_leafs(l: *const Lump) {
         (*outp).cluster = little_short((*inp).cluster) as i32;
         (*outp).area = little_short((*inp).area) as i32;
 
-        (*outp).firstmarksurface = (*loadmodel).marksurfaces.add(
+        (*outp).firstmarksurface = (*rfs().loadmodel).marksurfaces.add(
             little_short((*inp).firstleafface as i16) as usize,
         );
         (*outp).nummarksurfaces = little_short((*inp).numleaffaces as i16) as i32;
@@ -857,24 +912,24 @@ unsafe fn mod_load_leafs(l: *const Lump) {
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_marksurfaces(l: *const Lump) {
+unsafe fn mod_load_marksurfaces(state: &mut ModelState, l: *const Lump) {
     let in_size = std::mem::size_of::<i16>();
     if !((*l).filelen as usize).is_multiple_of(in_size) {
-        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*loadmodel).name)));
+        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*rfs().loadmodel).name)));
     }
     let count = (*l).filelen as usize / in_size;
-    let out = hunk_alloc(count * std::mem::size_of::<*mut MSurface>()) as *mut *mut MSurface;
+    let out = hunk_alloc(state, count * std::mem::size_of::<*mut MSurface>()) as *mut *mut MSurface;
 
-    (*loadmodel).marksurfaces = out;
-    (*loadmodel).nummarksurfaces = count as i32;
+    (*rfs().loadmodel).marksurfaces = out;
+    (*rfs().loadmodel).nummarksurfaces = count as i32;
 
-    let inp = mod_base.add((*l).fileofs as usize) as *const i16;
+    let inp = state.mod_base.add((*l).fileofs as usize) as *const i16;
     for i in 0..count {
         let j = little_short(*inp.add(i)) as i32;
-        if j < 0 || j >= (*loadmodel).numsurfaces {
+        if j < 0 || j >= (*rfs().loadmodel).numsurfaces {
             com_error(ERR_DROP, "Mod_ParseMarksurfaces: bad surface number");
         }
-        *out.add(i) = (*loadmodel).surfaces.add(j as usize);
+        *out.add(i) = (*rfs().loadmodel).surfaces.add(j as usize);
     }
 }
 
@@ -882,26 +937,26 @@ unsafe fn mod_load_marksurfaces(l: *const Lump) {
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_surfedges(l: *const Lump) {
+unsafe fn mod_load_surfedges(state: &mut ModelState, l: *const Lump) {
     let in_size = std::mem::size_of::<i32>();
     if !((*l).filelen as usize).is_multiple_of(in_size) {
-        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*loadmodel).name)));
+        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*rfs().loadmodel).name)));
     }
     let count = (*l).filelen as usize / in_size;
     if !(1..MAX_MAP_SURFEDGES).contains(&count) {
         com_error(ERR_DROP, &format!(
             "MOD_LoadBmodel: bad surfedges count in {}: {}",
-            model_name_str(&(*loadmodel).name),
+            model_name_str(&(*rfs().loadmodel).name),
             count
         ));
     }
 
-    let out = hunk_alloc(count * std::mem::size_of::<i32>()) as *mut i32;
+    let out = hunk_alloc(state, count * std::mem::size_of::<i32>()) as *mut i32;
 
-    (*loadmodel).surfedges = out;
-    (*loadmodel).numsurfedges = count as i32;
+    (*rfs().loadmodel).surfedges = out;
+    (*rfs().loadmodel).numsurfedges = count as i32;
 
-    let inp = mod_base.add((*l).fileofs as usize) as *const i32;
+    let inp = state.mod_base.add((*l).fileofs as usize) as *const i32;
     for i in 0..count {
         *out.add(i) = little_long(*inp.add(i));
     }
@@ -911,18 +966,18 @@ unsafe fn mod_load_surfedges(l: *const Lump) {
 ///
 /// # Safety
 /// Dereferences raw pointers, writes to loadmodel.
-unsafe fn mod_load_planes(l: *const Lump) {
+unsafe fn mod_load_planes(state: &mut ModelState, l: *const Lump) {
     let in_size = std::mem::size_of::<DPlane>();
     if !((*l).filelen as usize).is_multiple_of(in_size) {
-        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*loadmodel).name)));
+        com_error(ERR_DROP, &format!("MOD_LoadBmodel: funny lump size in {}", model_name_str(&(*rfs().loadmodel).name)));
     }
     let count = (*l).filelen as usize / in_size;
-    let out = hunk_alloc(count * 2 * std::mem::size_of::<CPlane>()) as *mut CPlane;
+    let out = hunk_alloc(state, count * 2 * std::mem::size_of::<CPlane>()) as *mut CPlane;
 
-    (*loadmodel).planes = out;
-    (*loadmodel).numplanes = count as i32;
+    (*rfs().loadmodel).planes = out;
+    (*rfs().loadmodel).numplanes = count as i32;
 
-    let mut inp = (mod_base.add((*l).fileofs as usize)) as *const DPlane;
+    let mut inp = (state.mod_base.add((*l).fileofs as usize)) as *const DPlane;
     let mut outp = out;
     for _ in 0..count {
         let mut bits: u8 = 0;
@@ -945,9 +1000,9 @@ unsafe fn mod_load_planes(l: *const Lump) {
 ///
 /// # Safety
 /// Dereferences raw pointers, accesses global model state.
-unsafe fn mod_load_brush_model(model: *mut Model, buffer: *mut u8) {
-    (*loadmodel).r#type = ModType::Brush;
-    if loadmodel != mod_known.as_mut_ptr() {
+unsafe fn mod_load_brush_model(state: &mut ModelState, model: *mut Model, buffer: *mut u8) {
+    (*rfs().loadmodel).r#type = ModType::Brush;
+    if rfs().loadmodel != state.mod_known.as_mut_ptr() {
         com_error(ERR_DROP, "Loaded a brush model after the world");
     }
 
@@ -964,7 +1019,7 @@ unsafe fn mod_load_brush_model(model: *mut Model, buffer: *mut u8) {
     }
 
     // swap all the lumps
-    mod_base = buffer as *const u8;
+    state.mod_base = buffer as *const u8;
     let header_ints = header as *mut i32;
     let num_ints = std::mem::size_of::<DHeader>() / 4;
     for i in 0..num_ints {
@@ -972,32 +1027,32 @@ unsafe fn mod_load_brush_model(model: *mut Model, buffer: *mut u8) {
     }
 
     // load into heap
-    mod_load_vertexes(&(*header).lumps[LUMP_VERTEXES]);
-    mod_load_edges(&(*header).lumps[LUMP_EDGES]);
-    mod_load_surfedges(&(*header).lumps[LUMP_SURFEDGES]);
-    mod_load_lighting(&(*header).lumps[LUMP_LIGHTING]);
-    mod_load_planes(&(*header).lumps[LUMP_PLANES]);
-    mod_load_texinfo(&(*header).lumps[LUMP_TEXINFO]);
-    mod_load_faces(&(*header).lumps[LUMP_FACES]);
-    mod_load_marksurfaces(&(*header).lumps[LUMP_LEAFFACES]);
-    mod_load_visibility(&(*header).lumps[LUMP_VISIBILITY]);
-    mod_load_leafs(&(*header).lumps[LUMP_LEAFS]);
-    mod_load_nodes(&(*header).lumps[LUMP_NODES]);
-    mod_load_submodels(&(*header).lumps[LUMP_MODELS]);
+    mod_load_vertexes(state, &(*header).lumps[LUMP_VERTEXES]);
+    mod_load_edges(state, &(*header).lumps[LUMP_EDGES]);
+    mod_load_surfedges(state, &(*header).lumps[LUMP_SURFEDGES]);
+    mod_load_lighting(state, &(*header).lumps[LUMP_LIGHTING]);
+    mod_load_planes(state, &(*header).lumps[LUMP_PLANES]);
+    mod_load_texinfo(state, &(*header).lumps[LUMP_TEXINFO]);
+    mod_load_faces(state, &(*header).lumps[LUMP_FACES]);
+    mod_load_marksurfaces(state, &(*header).lumps[LUMP_LEAFFACES]);
+    mod_load_visibility(state, &(*header).lumps[LUMP_VISIBILITY]);
+    mod_load_leafs(state, &(*header).lumps[LUMP_LEAFS]);
+    mod_load_nodes(state, &(*header).lumps[LUMP_NODES]);
+    mod_load_submodels(state, &(*header).lumps[LUMP_MODELS]);
     (*model).numframes = 2; // regular and alternate animation
 
     // set up the submodels
     for i in 0..(*model).numsubmodels {
         let bm = &*(*model).submodels.add(i as usize);
-        let starmod = &mut mod_inline[i as usize];
+        let starmod = &mut *state.mod_inline.as_mut_ptr().add(i as usize);
 
         // Copy the entire loadmodel into starmod
-        std::ptr::copy_nonoverlapping(loadmodel as *const Model, starmod as *mut Model, 1);
+        std::ptr::copy_nonoverlapping(rfs().loadmodel as *const Model, starmod as *mut Model, 1);
 
         starmod.firstmodelsurface = bm.firstface;
         starmod.nummodelsurfaces = bm.numfaces;
         starmod.firstnode = bm.headnode;
-        if starmod.firstnode >= (*loadmodel).numnodes {
+        if starmod.firstnode >= (*rfs().loadmodel).numnodes {
             com_error(ERR_DROP, &format!("Inline model {} has bad firstnode", i));
         }
 
@@ -1006,7 +1061,7 @@ unsafe fn mod_load_brush_model(model: *mut Model, buffer: *mut u8) {
         starmod.radius = bm.radius;
 
         if i == 0 {
-            std::ptr::copy_nonoverlapping(starmod as *const Model, loadmodel, 1);
+            std::ptr::copy_nonoverlapping(starmod as *const Model, rfs().loadmodel, 1);
         }
 
         starmod.numleafs = bm.visleafs;
@@ -1021,7 +1076,7 @@ unsafe fn mod_load_brush_model(model: *mut Model, buffer: *mut u8) {
 ///
 /// # Safety
 /// Dereferences raw pointers, accesses global model state.
-unsafe fn mod_load_alias_model(model: *mut Model, buffer: *mut u8) {
+unsafe fn mod_load_alias_model(state: &mut ModelState, model: *mut Model, buffer: *mut u8) {
     let pinmodel = buffer as *const DMdl;
 
     let version = little_long((*pinmodel).version);
@@ -1035,7 +1090,7 @@ unsafe fn mod_load_alias_model(model: *mut Model, buffer: *mut u8) {
     }
 
     let ofs_end = little_long((*pinmodel).ofs_end) as usize;
-    let pheader = hunk_alloc(ofs_end) as *mut DMdl;
+    let pheader = hunk_alloc(state, ofs_end) as *mut DMdl;
 
     // byte swap the header fields and sanity check
     let num_ints = std::mem::size_of::<DMdl>() / 4;
@@ -1145,9 +1200,9 @@ unsafe fn mod_load_alias_model(model: *mut Model, buffer: *mut u8) {
 ///
 /// # Safety
 /// Dereferences raw pointers, accesses global model state.
-unsafe fn mod_load_sprite_model(model: *mut Model, buffer: *mut u8) {
+unsafe fn mod_load_sprite_model(state: &mut ModelState, model: *mut Model, buffer: *mut u8) {
     let sprin = buffer as *const DSprite;
-    let sprout = hunk_alloc(modfilelen as usize) as *mut DSprite;
+    let sprout = hunk_alloc(state, state.modfilelen as usize) as *mut DSprite;
 
     (*sprout).ident = little_long((*sprin).ident);
     (*sprout).version = little_long((*sprin).version);
@@ -1199,10 +1254,11 @@ unsafe fn mod_load_sprite_model(model: *mut Model, buffer: *mut u8) {
 /// Begin model registration for a new map.
 ///
 /// # Safety
-/// Accesses global model state.
+/// Accesses vk_local globals (r_worldmodel, r_viewcluster, etc.).
 pub unsafe fn r_begin_registration(model_name: &str) {
-    registration_sequence += 1;
-    r_oldviewcluster = -1; // force markleafs
+    let mut state = ms();
+    state.registration_sequence += 1;
+    rfs().r_oldviewcluster = -1; // force markleafs
 
     let fullname = format!("maps/{}.bsp", model_name);
 
@@ -1210,12 +1266,16 @@ pub unsafe fn r_begin_registration(model_name: &str) {
     // this guarantees that mod_known[0] is the world map
     // Also flush if flushmap cvar is set
     let flushmap = myq2_common::cvar::cvar_variable_value("flushmap");
-    if flushmap != 0.0 || !model_name_matches_str(&mod_known[0].name, &fullname) {
-        mod_free(&mut mod_known[0]);
+    if flushmap != 0.0 || !model_name_matches_str(&state.mod_known[0].name, &fullname) {
+        let first_model = state.mod_known.as_mut_ptr();
+        mod_free(&mut state, first_model);
     }
-    r_worldmodel = mod_for_name(&fullname, true);
+    rfs().r_worldmodel = mod_for_name(&mut state, &fullname, true);
 
-    r_viewcluster = -1;
+    rfs().r_viewcluster = -1;
+
+    // Release lock before build_modern_bsp_geometry (which locks rg())
+    drop(state);
 
     // Build modern BSP geometry from loaded world model
     build_modern_bsp_geometry();
@@ -1226,16 +1286,19 @@ pub unsafe fn r_begin_registration(model_name: &str) {
 unsafe fn build_modern_bsp_geometry() {
     use crate::modern::geometry::{BspVertex, SurfaceDrawInfo};
 
-    if r_worldmodel.is_null() {
+    if rfs().r_worldmodel.is_null() {
         return;
     }
 
-    let modern = match crate::vk_rmain::MODERN.as_mut() {
+    let mut globals = crate::vk_rmain::rg();
+    let modern = match globals.modern.as_mut() {
         Some(m) => m,
-        None => return,
+        None => {
+            return;
+        }
     };
 
-    let model = &*r_worldmodel;
+    let model = &*rfs().r_worldmodel;
     let num_surfaces = model.numsurfaces;
     let surfaces_ptr = model.surfaces;
     if surfaces_ptr.is_null() || num_surfaces <= 0 {
@@ -1328,14 +1391,15 @@ unsafe fn build_modern_bsp_geometry() {
 /// Register a model by name.
 ///
 /// # Safety
-/// Accesses global model state.
+/// Accesses vk_local globals and filesystem.
 pub unsafe fn r_register_model(name: &str) -> *mut Model {
-    let model = mod_for_name(name, false);
+    let mut state = ms();
+    let model = mod_for_name(&mut state, name, false);
     if model.is_null() {
         return std::ptr::null_mut();
     }
 
-    (*model).registration_sequence = registration_sequence;
+    (*model).registration_sequence = state.registration_sequence;
 
     // register any images used by the models
     match (*model).r#type {
@@ -1360,7 +1424,7 @@ pub unsafe fn r_register_model(name: &str) -> *mut Model {
             for i in 0..(*model).numtexinfo {
                 let ti = &mut *(*model).texinfo.add(i as usize);
                 if !ti.image.is_null() {
-                    (*ti.image).registration_sequence = registration_sequence;
+                    (*ti.image).registration_sequence = state.registration_sequence;
                 }
             }
         }
@@ -1373,14 +1437,19 @@ pub unsafe fn r_register_model(name: &str) -> *mut Model {
 /// End model registration: free unused models and images.
 ///
 /// # Safety
-/// Accesses global model state.
+/// Accesses vk_local globals.
 pub unsafe fn r_end_registration() {
-    for i in 0..mod_numknown as usize {
-        if model_name_is_empty(&mod_known[i].name) {
-            continue;
-        }
-        if mod_known[i].registration_sequence != registration_sequence {
-            mod_free(&mut mod_known[i]);
+    {
+        let mut state = ms();
+        let reg_seq = state.registration_sequence;
+        for i in 0..state.mod_numknown as usize {
+            if model_name_is_empty(&state.mod_known[i].name) {
+                continue;
+            }
+            if state.mod_known[i].registration_sequence != reg_seq {
+                let model_ptr = state.mod_known.as_mut_ptr().add(i);
+                mod_free(&mut state, model_ptr);
+            }
         }
     }
 
@@ -1394,23 +1463,28 @@ pub unsafe fn r_end_registration() {
 /// Free a single model.
 ///
 /// # Safety
-/// Mutates the model struct.
-pub unsafe fn mod_free(model: *mut Model) {
-    hunk_free((*model).extradata);
+/// `model` must be a valid pointer to a Model (typically inside ModelState).
+unsafe fn mod_free(state: &mut ModelState, model: *mut Model) {
+    hunk_free(state, (*model).extradata);
     // SAFETY: zeroing a repr(C) struct with raw pointers is valid (null pointers).
     std::ptr::write_bytes(model as *mut u8, 0, std::mem::size_of::<Model>());
 }
 
 /// Free all models.
-///
-/// # Safety
-/// Mutates global model array.
-pub unsafe fn mod_free_all() {
-    for i in 0..mod_numknown as usize {
-        if mod_known[i].extradatasize != 0 {
-            mod_free(&mut mod_known[i]);
+pub fn mod_free_all() {
+    let mut state = ms();
+    for i in 0..state.mod_numknown as usize {
+        if state.mod_known[i].extradatasize != 0 {
+            let model_ptr = state.mod_known.as_mut_ptr();
+            unsafe {
+                let ptr = model_ptr.add(i);
+                mod_free(&mut state, ptr);
+            }
         }
     }
+    // Free all hunk allocations — model extradata pointers are now invalid
+    // (which is fine since we just zeroed all models above).
+    state.hunk_allocations.clear();
 }
 
 // =============================================================

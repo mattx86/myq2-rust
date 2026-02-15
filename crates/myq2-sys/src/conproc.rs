@@ -209,10 +209,11 @@ struct ConProcHandles {
     h_stdin: win32::HANDLE,
 }
 
-#[cfg(target_os = "windows")]
 // SAFETY: Win32 HANDLEs are thread-safe when used with proper synchronization.
 // We protect all access behind a Mutex.
+#[cfg(target_os = "windows")]
 unsafe impl Send for ConProcHandles {}
+#[cfg(target_os = "windows")]
 unsafe impl Sync for ConProcHandles {}
 
 #[cfg(target_os = "windows")]

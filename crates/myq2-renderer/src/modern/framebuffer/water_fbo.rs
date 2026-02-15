@@ -5,6 +5,7 @@
 use super::RenderTarget;
 
 /// Water effect framebuffers.
+#[derive(Default)]
 pub struct WaterFbo {
     /// Reflection render target.
     reflection: Option<RenderTarget>,
@@ -110,12 +111,3 @@ impl WaterFbo {
     }
 }
 
-impl Default for WaterFbo {
-    fn default() -> Self {
-        Self {
-            reflection: None,
-            refraction: None,
-            enabled: false,
-        }
-    }
-}

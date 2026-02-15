@@ -21,10 +21,6 @@ pub type GlimpBeginFrameFn = Box<dyn Fn(f32) + Send>;
 pub type GlimpEndFrameFn = Box<dyn Fn() + Send>;
 /// GLimp_SetMode(width, height, mode, fullscreen) -> rserr_t as i32
 pub type GlimpSetModeFn = Box<dyn Fn(&mut i32, &mut i32, f32, bool) -> i32 + Send>;
-/// QGL_Init(driver) -> bool
-pub type QglInitFn = Box<dyn Fn(&str) -> bool + Send>;
-/// QGL_Shutdown()
-pub type QglShutdownFn = Box<dyn Fn() + Send>;
 /// VID_MenuInit()
 pub type VidMenuInitFn = Box<dyn Fn() + Send>;
 /// UpdateGammaRamp()
@@ -34,33 +30,17 @@ pub type UpdateGammaRampFn = Box<dyn Fn() + Send>;
 // Dispatch table
 // ============================================================
 
+#[derive(Default)]
 pub struct PlatformDispatch {
     pub glimp_init: Option<GlimpInitFn>,
     pub glimp_shutdown: Option<GlimpShutdownFn>,
     pub glimp_begin_frame: Option<GlimpBeginFrameFn>,
     pub glimp_end_frame: Option<GlimpEndFrameFn>,
     pub glimp_set_mode: Option<GlimpSetModeFn>,
-    pub qvk_init: Option<QglInitFn>,
-    pub qvk_shutdown: Option<QglShutdownFn>,
     pub vid_menu_init: Option<VidMenuInitFn>,
     pub update_gamma_ramp: Option<UpdateGammaRampFn>,
 }
 
-impl Default for PlatformDispatch {
-    fn default() -> Self {
-        Self {
-            glimp_init: None,
-            glimp_shutdown: None,
-            glimp_begin_frame: None,
-            glimp_end_frame: None,
-            glimp_set_mode: None,
-            qvk_init: None,
-            qvk_shutdown: None,
-            vid_menu_init: None,
-            update_gamma_ramp: None,
-        }
-    }
-}
 
 static PLATFORM: OnceLock<Mutex<PlatformDispatch>> = OnceLock::new();
 
@@ -118,22 +98,6 @@ pub fn glimp_set_mode(width: &mut i32, height: &mut i32, mode: f32, fullscreen: 
         f(width, height, mode, fullscreen)
     } else {
         0 // RSERR_OK
-    }
-}
-
-pub fn qvk_init(driver: &str) -> bool {
-    let d = dispatch().lock().unwrap();
-    if let Some(ref f) = d.qvk_init {
-        f(driver)
-    } else {
-        true
-    }
-}
-
-pub fn qvk_shutdown() {
-    let d = dispatch().lock().unwrap();
-    if let Some(ref f) = d.qvk_shutdown {
-        f();
     }
 }
 

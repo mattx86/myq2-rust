@@ -256,14 +256,14 @@ pub mod math {
     }
 
     /// Interpolate a value using barycentric coordinates.
-    pub fn interpolate<T: Copy + Default>(
+    pub fn interpolate<T>(
         bary: [f32; 3],
         v0: T,
         v1: T,
         v2: T,
     ) -> T
     where
-        T: std::ops::Mul<f32, Output = T> + std::ops::Add<Output = T>,
+        T: Copy + Default + std::ops::Mul<f32, Output = T> + std::ops::Add<Output = T>,
     {
         v0 * bary[0] + v1 * bary[1] + v2 * bary[2]
     }

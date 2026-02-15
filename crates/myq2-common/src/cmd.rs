@@ -907,44 +907,70 @@ fn com_parse_inline(data: &[u8], mut pos: usize) -> (String, usize) {
 // Global singleton and free-function wrappers
 // ============================================================
 
-use std::sync::Mutex;
+use std::cell::UnsafeCell;
+use parking_lot::ReentrantMutex;
 
-static CMD_CTX: Mutex<Option<CmdContext>> = Mutex::new(None);
+// SAFETY: CmdContext is only accessed from the main thread.
+// ReentrantMutex allows nested locking (e.g. cbuf_execute -> cmd_exec_f -> bind
+// -> cmd_argc/cmd_argv) without deadlock. UnsafeCell provides interior mutability
+// since RefCell would panic on nested borrow_mut()/borrow() combinations.
+struct SyncUnsafeCell<T>(UnsafeCell<T>);
+unsafe impl<T> Sync for SyncUnsafeCell<T> {}
+
+static CMD_CTX: ReentrantMutex<SyncUnsafeCell<Option<CmdContext>>> =
+    ReentrantMutex::new(SyncUnsafeCell(UnsafeCell::new(None)));
+
+/// Helper: acquire CMD_CTX and run a closure with `&mut CmdContext`.
+/// Uses a ReentrantMutex so nested calls (e.g. cmd_argc() from within
+/// a command handler invoked by cbuf_execute()) don't deadlock.
+fn with_cmd_ctx_mut<R>(f: impl FnOnce(&mut CmdContext) -> R) -> Option<R> {
+    let guard = CMD_CTX.lock();
+    // SAFETY: ReentrantMutex guarantees only one thread accesses this.
+    // Nested calls from the same thread are safe because the game engine
+    // is single-threaded and command handlers don't store references.
+    let ctx = unsafe { &mut *guard.0.get() };
+    ctx.as_mut().map(f)
+}
+
+fn with_cmd_ctx_ref<R>(f: impl FnOnce(&CmdContext) -> R) -> Option<R> {
+    let guard = CMD_CTX.lock();
+    // SAFETY: Same as with_cmd_ctx_mut.
+    let ctx = unsafe { &*guard.0.get() };
+    ctx.as_ref().map(f)
+}
 
 pub fn cmd_init() {
-    let mut g = CMD_CTX.lock().unwrap();
+    let guard = CMD_CTX.lock();
     let mut ctx = CmdContext::new();
     ctx.cmd_init();
-    *g = Some(ctx);
+    // SAFETY: We hold the reentrant mutex.
+    unsafe { *guard.0.get() = Some(ctx); }
 }
 
 pub fn cmd_shutdown() {
-    let mut g = CMD_CTX.lock().unwrap();
-    *g = None;
+    let guard = CMD_CTX.lock();
+    // SAFETY: We hold the reentrant mutex.
+    unsafe { *guard.0.get() = None; }
 }
 
 pub fn cmd_argc() -> usize {
-    CMD_CTX.lock().unwrap().as_ref().map_or(0, |c| c.cmd_argc())
+    with_cmd_ctx_ref(|c| c.cmd_argc()).unwrap_or(0)
 }
 
 pub fn cmd_argv(arg: usize) -> String {
-    CMD_CTX.lock().unwrap().as_ref().map_or(String::new(), |c| c.cmd_argv(arg).to_string())
+    with_cmd_ctx_ref(|c| c.cmd_argv(arg).to_string()).unwrap_or_default()
 }
 
 pub fn cmd_args() -> String {
-    CMD_CTX.lock().unwrap().as_ref().map_or(String::new(), |c| c.cmd_args().to_string())
+    with_cmd_ctx_ref(|c| c.cmd_args().to_string()).unwrap_or_default()
 }
 
 pub fn cmd_tokenize_string(text: &str, macro_expand: bool) {
-    if let Some(ref mut c) = *CMD_CTX.lock().unwrap() {
-        c.cmd_tokenize_string(text, macro_expand);
-    }
+    with_cmd_ctx_mut(|c| c.cmd_tokenize_string(text, macro_expand));
 }
 
 pub fn cmd_add_command(name: &str, function: Option<Box<dyn Fn(&mut CmdContext) + Send>>) {
-    if let Some(ref mut c) = *CMD_CTX.lock().unwrap() {
-        c.cmd_add_command(name, function);
-    }
+    with_cmd_ctx_mut(|c| c.cmd_add_command(name, function));
 }
 
 /// Convenience wrapper: register a simple `fn()` command (always `Some`).
@@ -967,45 +993,31 @@ pub fn cmd_add_command_optional(name: &str, func: Option<fn()>) {
 }
 
 pub fn cmd_remove_command(name: &str) {
-    if let Some(ref mut c) = *CMD_CTX.lock().unwrap() {
-        c.cmd_remove_command(name);
-    }
+    with_cmd_ctx_mut(|c| c.cmd_remove_command(name));
 }
 
 pub fn cbuf_add_text(text: &str) {
-    if let Some(ref mut c) = *CMD_CTX.lock().unwrap() {
-        c.cbuf_add_text(text);
-    }
+    with_cmd_ctx_mut(|c| c.cbuf_add_text(text));
 }
 
 pub fn cbuf_execute() {
-    if let Some(ref mut c) = *CMD_CTX.lock().unwrap() {
-        c.cbuf_execute();
-    }
+    with_cmd_ctx_mut(|c| c.cbuf_execute());
 }
 
 pub fn cmd_write_aliases(f: &mut dyn std::io::Write) {
-    if let Some(ref c) = *CMD_CTX.lock().unwrap() {
-        let _ = c.cmd_write_aliases(f);
-    }
+    with_cmd_ctx_ref(|c| { let _ = c.cmd_write_aliases(f); });
 }
 
 pub fn cmd_execute_string(text: &str) {
-    if let Some(ref mut c) = *CMD_CTX.lock().unwrap() {
-        c.cmd_execute_string(text);
-    }
+    with_cmd_ctx_mut(|c| c.cmd_execute_string(text));
 }
 
 pub fn cbuf_copy_to_defer() {
-    if let Some(ref mut c) = *CMD_CTX.lock().unwrap() {
-        c.cbuf_copy_to_defer();
-    }
+    with_cmd_ctx_mut(|c| c.cbuf_copy_to_defer());
 }
 
 pub fn cbuf_insert_from_defer() {
-    if let Some(ref mut c) = *CMD_CTX.lock().unwrap() {
-        c.cbuf_insert_from_defer();
-    }
+    with_cmd_ctx_mut(|c| c.cbuf_insert_from_defer());
 }
 
 /// Access the global CMD_CTX with a closure. Returns None if not initialized.
@@ -1013,8 +1025,7 @@ pub fn with_cmd_ctx<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut CmdContext) -> R,
 {
-    let mut g = CMD_CTX.lock().unwrap();
-    g.as_mut().map(f)
+    with_cmd_ctx_mut(f)
 }
 
 // ============================================================

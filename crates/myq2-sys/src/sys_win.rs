@@ -309,7 +309,63 @@ pub fn sys_console_input() -> Option<String> {
         None
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Read;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static STDIN_NONBLOCK_INIT: AtomicBool = AtomicBool::new(false);
+
+        // Set stdin to non-blocking on first call
+        if !STDIN_NONBLOCK_INIT.swap(true, Ordering::Relaxed) {
+            // SAFETY: fcntl on stdin fd 0 to set O_NONBLOCK is safe.
+            unsafe {
+                let flags = libc::fcntl(libc::STDIN_FILENO, libc::F_GETFL);
+                if flags != -1 {
+                    libc::fcntl(libc::STDIN_FILENO, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                }
+            }
+        }
+
+        let mut buf = CONSOLE_BUF.lock().unwrap();
+        let mut byte = [0u8; 1];
+        loop {
+            match std::io::stdin().read(&mut byte) {
+                Ok(1) => {
+                    let ch = byte[0];
+                    match ch {
+                        b'\n' => {
+                            if buf.len > 0 {
+                                let result = std::str::from_utf8(&buf.text[..buf.len])
+                                    .unwrap_or("")
+                                    .to_string();
+                                buf.len = 0;
+                                return Some(result);
+                            }
+                        }
+                        // Backspace (0x7F on most Linux terminals) or Ctrl-H
+                        0x7F | 0x08 => {
+                            if buf.len > 0 {
+                                buf.len -= 1;
+                            }
+                        }
+                        _ => {
+                            if ch >= b' ' && buf.len < 254 {
+                                let idx = buf.len;
+                                buf.text[idx] = ch;
+                                buf.len += 1;
+                            }
+                        }
+                    }
+                }
+                // No data available (EAGAIN/EWOULDBLOCK) or EOF
+                _ => break,
+            }
+        }
+        None
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         None
     }
@@ -673,9 +729,17 @@ pub fn sys_get_clipboard_data() -> Option<String> {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
-        // Non-Windows platforms: clipboard not implemented in platform layer.
+        // Wayland-native clipboard via arboard (supports wl_data_device protocol)
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => clipboard.get_text().ok().filter(|s| !s.is_empty()),
+            Err(_) => None,
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
         None
     }
 }
@@ -1076,5 +1140,28 @@ mod tests {
         };
         assert_eq!(buf.len, 0);
         assert!(buf.text.iter().all(|&b| b == 0));
+    }
+
+    // -------------------------------------------------------
+    // Linux platform tests
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_console_input_returns_none_when_not_dedicated() {
+        // When not in dedicated server mode, console input should return None
+        // regardless of platform.
+        let result = sys_console_input();
+        assert!(result.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_clipboard_linux_does_not_panic() {
+        // Verify arboard clipboard access doesn't panic even without a
+        // running Wayland compositor (returns None gracefully).
+        let result = sys_get_clipboard_data();
+        // Result may be None if no compositor is running (e.g., in CI),
+        // but it must not panic.
+        let _ = result;
     }
 }

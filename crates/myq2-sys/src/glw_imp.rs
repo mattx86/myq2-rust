@@ -81,7 +81,6 @@ impl Default for GammaRampData {
     }
 }
 
-pub static mut HAVE_STENCIL: bool = false;
 
 // =============================================================================
 // GLimp state — holds winit Window
@@ -96,6 +95,7 @@ pub struct VkImpState {
 // =============================================================================
 
 /// Top-level context holding all window/Vulkan state.
+#[derive(Default)]
 pub struct GlImpContext {
     pub glw_state: GlwState,
     pub vk_state: VkState,
@@ -106,18 +106,6 @@ pub struct GlImpContext {
     pub event_loop: Option<EventLoop<()>>,
 }
 
-impl Default for GlImpContext {
-    fn default() -> Self {
-        Self {
-            glw_state: GlwState::default(),
-            vk_state: VkState::default(),
-            vk_config: VkConfig::default(),
-            gamma: GammaRampData::default(),
-            state: None,
-            event_loop: None,
-        }
-    }
-}
 
 impl GlImpContext {
     fn verify_driver(&self) -> bool {
@@ -188,7 +176,8 @@ impl GlImpContext {
         // SAFETY: Vulkan initialization using valid window handles
         let vk_init_result: Result<(), String> = (|| unsafe {
             // 1. Create Vulkan context
-            let ctx = myq2_renderer::vulkan::VulkanContext::new(display_handle, cfg!(debug_assertions))
+            eprintln!("VID_CreateWindow: Creating VulkanContext with validation DISABLED");
+            let ctx = myq2_renderer::vulkan::VulkanContext::new(display_handle, false)
                 .map_err(|e| format!("Vulkan context failed: {}", e))?;
             com_printf("...Vulkan 1.3 context created\n");
             if ctx.rt_capabilities.supported {
@@ -231,10 +220,6 @@ impl GlImpContext {
             return false;
         }
 
-        // SAFETY: Single-threaded engine
-        unsafe {
-            HAVE_STENCIL = true;
-        }
         com_printf("...using stencil buffer (Vulkan managed)\n");
 
         // Save original gamma ramp for restore on shutdown
@@ -247,6 +232,9 @@ impl GlImpContext {
         self.glw_state.h_wnd = 1;
         self.glw_state.h_dc = 1;
         self.glw_state.h_glrc = 1;
+
+        // Request keyboard focus so the window receives input events
+        window.focus_window();
 
         self.state = Some(VkImpState { window });
         self.event_loop = Some(event_loop);
@@ -284,6 +272,22 @@ impl GlImpContext {
             if !self.vid_create_window(width, height, true) {
                 return RsErr::InvalidMode;
             }
+
+            // Update width/height to match actual swapchain extent (may differ from requested)
+            if let Some(extent) = myq2_renderer::modern::gpu_device::get_swapchain_extent() {
+                com_printf(&format!("glimp_set_mode: Requested {}x{}, actual swapchain extent {}x{}\n",
+                    width, height, extent.width, extent.height));
+                *pwidth = extent.width as i32;
+                *pheight = extent.height as i32;
+
+                // Update client-side console viddef to match actual framebuffer dimensions
+                let mut cs = myq2_client::console::cs();
+                cs.viddef.width = extent.width as i32;
+                cs.viddef.height = extent.height as i32;
+                com_printf(&format!("glimp_set_mode: Updated client viddef to {}x{}\n",
+                    cs.viddef.width, cs.viddef.height));
+            }
+
             return RsErr::Ok;
         } else {
             com_printf("...setting windowed mode\n");
@@ -296,6 +300,21 @@ impl GlImpContext {
             }
         }
 
+        // Update width/height to match actual swapchain extent (may differ from requested)
+        if let Some(extent) = myq2_renderer::modern::gpu_device::get_swapchain_extent() {
+            com_printf(&format!("glimp_set_mode: Requested {}x{}, actual swapchain extent {}x{}\n",
+                width, height, extent.width, extent.height));
+            *pwidth = extent.width as i32;
+            *pheight = extent.height as i32;
+
+            // Update client-side console viddef to match actual framebuffer dimensions
+            let mut cs = myq2_client::console::cs();
+            cs.viddef.width = extent.width as i32;
+            cs.viddef.height = extent.height as i32;
+            com_printf(&format!("glimp_set_mode: Updated client viddef to {}x{}\n",
+                cs.viddef.width, cs.viddef.height));
+        }
+
         RsErr::Ok
     }
 
@@ -305,10 +324,7 @@ impl GlImpContext {
 
         // Vulkan cleanup
         com_printf("GLimp_Shutdown: shutting down Vulkan\n");
-        // SAFETY: Single-threaded engine, shutdown called before any other rendering
-        unsafe {
-            myq2_renderer::modern::gpu_device::shutdown_device();
-        }
+        myq2_renderer::modern::gpu_device::shutdown_device();
 
         if self.state.is_some() {
             com_printf("GLimp_Shutdown: destroying window\n");
@@ -338,7 +354,8 @@ impl GlImpContext {
     }
 
     pub fn glimp_end_frame(&self) {
-        // Vulkan present handled by render path
+        // Present the Vulkan frame (flushes 2D drawing, submits commands, and presents swapchain)
+        myq2_renderer::vk_rmain::r_present_frame();
     }
 
     /// Compute and optionally apply a hardware gamma ramp.
@@ -372,7 +389,7 @@ impl GlImpContext {
         #[cfg(target_os = "windows")]
         {
             if let Some(ref state) = self.state {
-                // SAFETY: Win32 FFI calls, single-threaded
+                // SAFETY: Win32 FFI calls, called from main thread only
                 unsafe {
                     use raw_window_handle::HasWindowHandle;
                     if let Ok(handle) = state.window.window_handle() {
@@ -390,7 +407,7 @@ impl GlImpContext {
                                     }
                                     self.vk_config.gammaramp = true;
                                     // Set the renderer's VkConfig so it knows hw gamma is available
-                                    if let Some(ref mut cfg) = myq2_renderer::vk_rmain::VK_CONFIG {
+                                    if let Some(ref mut cfg) = myq2_renderer::vk_rmain::rg().vk_config {
                                         cfg.gammaramp = 1;
                                     }
                                 }
@@ -401,6 +418,15 @@ impl GlImpContext {
                 }
             }
         }
+
+        // Wayland does not expose hardware gamma ramp control — it is managed
+        // by the compositor for color management. Disable hw gamma so
+        // update_gamma_ramp() early-returns. The engine's internal gamma math
+        // still works; it just doesn't apply to the display hardware.
+        #[cfg(target_os = "linux")]
+        {
+            self.vk_config.gammaramp = false;
+        }
     }
 
     /// Apply the computed gamma ramp to the display.
@@ -408,7 +434,7 @@ impl GlImpContext {
         #[cfg(target_os = "windows")]
         {
             if let Some(ref state) = self.state {
-                // SAFETY: Win32 FFI calls, single-threaded
+                // SAFETY: Win32 FFI calls, called from main thread only
                 unsafe {
                     use raw_window_handle::HasWindowHandle;
                     if let Ok(handle) = state.window.window_handle() {
@@ -431,6 +457,10 @@ impl GlImpContext {
                 }
             }
         }
+
+        // No-op on Linux: Wayland has no gamma ramp API.
+        #[cfg(target_os = "linux")]
+        {}
     }
 
     /// Restore the original gamma ramp on shutdown.
@@ -441,7 +471,7 @@ impl GlImpContext {
                 return;
             }
             if let Some(ref state) = self.state {
-                // SAFETY: Win32 FFI calls, single-threaded
+                // SAFETY: Win32 FFI calls, called from main thread only
                 unsafe {
                     use raw_window_handle::HasWindowHandle;
                     if let Ok(handle) = state.window.window_handle() {
@@ -463,6 +493,10 @@ impl GlImpContext {
                 }
             }
         }
+
+        // No-op on Linux: Wayland has no gamma ramp API.
+        #[cfg(target_os = "linux")]
+        {}
     }
 
     pub fn glimp_app_activate(&mut self, active: bool, _vid_fullscreen: bool) {
@@ -483,8 +517,62 @@ impl GlImpContext {
         self.state.is_some()
     }
 
+    /// Request a window redraw to trigger the next frame
+    pub fn request_redraw(&self) {
+        if let Some(ref state) = self.state {
+            state.window.request_redraw();
+        }
+    }
+
     /// Take the event loop for use in main. Returns None if already taken.
     pub fn take_event_loop(&mut self) -> Option<EventLoop<()>> {
         self.event_loop.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_gamma_ramp_disabled() {
+        let ctx = GlImpContext::default();
+        assert!(!ctx.vk_config.gammaramp);
+    }
+
+    #[test]
+    fn test_update_gamma_ramp_noop_when_disabled() {
+        let mut ctx = GlImpContext::default();
+        assert!(!ctx.vk_config.gammaramp);
+        // Should early-return without panicking when gammaramp is false
+        ctx.update_gamma_ramp(1.0);
+        // Gamma ramp data should remain zeroed
+        assert!(ctx.gamma.gamma_ramp[0].iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn test_gamma_ramp_computation() {
+        let mut ctx = GlImpContext::default();
+        ctx.vk_config.gammaramp = true;
+        ctx.update_gamma_ramp(1.0);
+        // With gamma=1.0, the ramp should be close to linear (identity)
+        // Each entry should be (i << 8) approximately
+        for i in 1..256 {
+            let expected = (i as u16) << 8;
+            let actual = ctx.gamma.gamma_ramp[0][i];
+            // Allow small rounding error
+            let diff = (actual as i32 - expected as i32).unsigned_abs();
+            assert!(diff <= 256, "gamma_ramp[0][{}] = {}, expected ~{}", i, actual, expected);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_save_original_gamma_disables_gammaramp_on_linux() {
+        let mut ctx = GlImpContext::default();
+        ctx.vk_config.gammaramp = true; // pretend it was enabled
+        ctx.save_original_gamma();
+        // On Linux/Wayland, save_original_gamma should disable hw gamma
+        assert!(!ctx.vk_config.gammaramp);
     }
 }

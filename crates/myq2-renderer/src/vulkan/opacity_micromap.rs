@@ -204,7 +204,7 @@ impl TriangleOpacityData {
     pub fn pack(&self, format: MicromapFormat) -> Vec<u8> {
         let bits_per = format.bits_per_micro_triangle();
         let total_bits = self.opacity_states.len() as u32 * bits_per;
-        let byte_count = (total_bits + 7) / 8;
+        let byte_count = total_bits.div_ceil(8);
 
         let mut bytes = vec![0u8; byte_count as usize];
 
@@ -302,7 +302,7 @@ pub fn calculate_build_sizes(
 
     for tri in triangles {
         let bits = tri.opacity_states.len() as u32 * format.bits_per_micro_triangle();
-        total_data_size += ((bits + 7) / 8) as u64;
+        total_data_size += bits.div_ceil(8) as u64;
     }
 
     // Add alignment and headers (rough estimate)

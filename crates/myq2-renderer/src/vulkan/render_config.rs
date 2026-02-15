@@ -124,64 +124,56 @@ impl RenderConfig {
     }
 }
 
-/// Global render configuration.
-/// SAFETY: Single-threaded engine, accessed only from main thread.
-static mut RENDER_CONFIG: RenderConfig = RenderConfig {
+/// Global render configuration, protected by Mutex.
+static RENDER_CONFIG: std::sync::Mutex<RenderConfig> = std::sync::Mutex::new(RenderConfig {
     msaa_samples: vk::SampleCountFlags::TYPE_1,
     anisotropy_level: 1.0,
     max_anisotropy: 1.0,
     msaa_enabled: false,
     anisotropy_enabled: false,
-};
+});
 
 /// Initialize the global render configuration.
-///
-/// # Safety
-/// Must be called from the main thread after Vulkan context is initialized.
-pub unsafe fn init_render_config(ctx: &VulkanContext, r_msaa: i32, r_anisotropy: i32) {
-    RENDER_CONFIG = RenderConfig::new(ctx, r_msaa, r_anisotropy);
-
+pub fn init_render_config(ctx: &VulkanContext, r_msaa: i32, r_anisotropy: i32) {
+    let config = RenderConfig::new(ctx, r_msaa, r_anisotropy);
     println!(
         "Render config: MSAA={}x ({}), Anisotropy={:.0}x ({})",
-        RENDER_CONFIG.sample_count_as_int(),
-        if RENDER_CONFIG.msaa_enabled { "enabled" } else { "disabled" },
-        RENDER_CONFIG.anisotropy_level,
-        if RENDER_CONFIG.anisotropy_enabled { "enabled" } else { "disabled" },
+        config.sample_count_as_int(),
+        if config.msaa_enabled { "enabled" } else { "disabled" },
+        config.anisotropy_level,
+        if config.anisotropy_enabled { "enabled" } else { "disabled" },
     );
+    *RENDER_CONFIG.lock().unwrap() = config;
 }
 
 /// Update the global render configuration.
-///
-/// # Safety
-/// Must be called from the main thread.
-pub unsafe fn update_render_config(ctx: &VulkanContext, r_msaa: i32, r_anisotropy: i32) {
-    RENDER_CONFIG.update(ctx, r_msaa, r_anisotropy);
+pub fn update_render_config(ctx: &VulkanContext, r_msaa: i32, r_anisotropy: i32) {
+    RENDER_CONFIG.lock().unwrap().update(ctx, r_msaa, r_anisotropy);
 }
 
 /// Get the current render configuration.
 pub fn render_config() -> RenderConfig {
-    // SAFETY: Single-threaded engine.
-    unsafe { RENDER_CONFIG }
+    *RENDER_CONFIG.lock().unwrap()
 }
 
 /// Get the current MSAA sample count.
 pub fn msaa_samples() -> vk::SampleCountFlags {
-    unsafe { RENDER_CONFIG.msaa_samples }
+    RENDER_CONFIG.lock().unwrap().msaa_samples
 }
 
 /// Check if MSAA is enabled.
 pub fn is_msaa_enabled() -> bool {
-    unsafe { RENDER_CONFIG.msaa_enabled }
+    RENDER_CONFIG.lock().unwrap().msaa_enabled
 }
 
 /// Get the current anisotropy level.
 pub fn anisotropy_level() -> f32 {
-    unsafe { RENDER_CONFIG.anisotropy_level }
+    RENDER_CONFIG.lock().unwrap().anisotropy_level
 }
 
 /// Check if anisotropic filtering is enabled.
 pub fn is_anisotropy_enabled() -> bool {
-    unsafe { RENDER_CONFIG.anisotropy_enabled }
+    RENDER_CONFIG.lock().unwrap().anisotropy_enabled
 }
 
 #[cfg(test)]

@@ -10,5 +10,5 @@ pub mod pipeline;
 
 pub use program::ShaderProgram;
 pub use manager::{ShaderManager, ShaderType};
-pub use uniforms::{PerFrameUniforms, PerObjectUniforms, UniformBuffer};
+pub use uniforms::{PerFrameUniforms, PerObjectUniforms, PostProcessUniforms, UniformBuffer};
 pub use pipeline::{PipelineManager, PipelineVariant};

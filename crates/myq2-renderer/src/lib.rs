@@ -16,6 +16,7 @@
 pub mod vulkan;
 
 // Vulkan renderer modules (converted from legacy OpenGL code)
+pub mod texture_constants; // Minimal constants for texture filtering
 pub mod vk_bindings;
 pub mod vk_model_types;
 pub mod vk_local;

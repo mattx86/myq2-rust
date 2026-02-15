@@ -21,11 +21,16 @@ pub struct Cvar {
     pub value: f32,
 }
 
-/// Callback type for FS_SetGamedir.
-pub type FsSetGamedirFn = Box<dyn Fn(&str) + Send>;
-
-/// Callback type for FS_ExecAutoexec.
-pub type FsExecAutoexecFn = Box<dyn Fn() + Send>;
+/// Deferred actions that must be executed AFTER releasing the CVAR_CTX lock.
+/// This prevents CVAR_CTX → FS_CTX deadlocks from callbacks that call into
+/// the filesystem (fs_set_gamedir, fs_exec_autoexec).
+#[derive(Clone, Debug)]
+pub enum DeferredCvarAction {
+    /// Call fs_set_gamedir with the given directory name.
+    SetGamedir(String),
+    /// Call fs_exec_autoexec.
+    ExecAutoexec,
+}
 
 /// The full cvar system context.
 pub struct CvarContext {
@@ -33,10 +38,8 @@ pub struct CvarContext {
     /// O(1) cvar lookup by name -> index in cvar_vars
     cvar_index: HashMap<String, usize>,
     pub userinfo_modified: bool,
-    /// Callback to set the game directory (wired to FS_SetGamedir).
-    pub fs_set_gamedir: Option<FsSetGamedirFn>,
-    /// Callback to execute autoexec.cfg (wired to FS_ExecAutoexec).
-    pub fs_exec_autoexec: Option<FsExecAutoexecFn>,
+    /// Actions to execute after releasing the CVAR_CTX lock.
+    pub deferred_actions: Vec<DeferredCvarAction>,
 }
 
 impl CvarContext {
@@ -45,8 +48,7 @@ impl CvarContext {
             cvar_vars: Vec::new(),
             cvar_index: HashMap::new(),
             userinfo_modified: false,
-            fs_set_gamedir: None,
-            fs_exec_autoexec: None,
+            deferred_actions: Vec::new(),
         }
     }
 
@@ -202,12 +204,8 @@ impl CvarContext {
                     self.cvar_vars[idx].string = value.to_string();
                     self.cvar_vars[idx].value = value.parse::<f32>().unwrap_or(0.0);
                     if name == "game" {
-                        if let Some(ref fs_sgd) = self.fs_set_gamedir {
-                            fs_sgd(value);
-                        }
-                        if let Some(ref fs_ea) = self.fs_exec_autoexec {
-                            fs_ea();
-                        }
+                        self.deferred_actions.push(DeferredCvarAction::SetGamedir(value.to_string()));
+                        self.deferred_actions.push(DeferredCvarAction::ExecAutoexec);
                     }
                 }
                 return Some(idx);
@@ -284,12 +282,8 @@ impl CvarContext {
                 var.string = latched;
                 var.value = var.string.parse::<f32>().unwrap_or(0.0);
                 if var.name == "game" {
-                    if let Some(ref fs_sgd) = self.fs_set_gamedir {
-                        fs_sgd(&var.string);
-                    }
-                    if let Some(ref fs_ea) = self.fs_exec_autoexec {
-                        fs_ea();
-                    }
+                    self.deferred_actions.push(DeferredCvarAction::SetGamedir(var.string.clone()));
+                    self.deferred_actions.push(DeferredCvarAction::ExecAutoexec);
                 }
             }
         }
@@ -496,6 +490,26 @@ use std::sync::Mutex;
 
 static CVAR_CTX: Mutex<Option<CvarContext>> = Mutex::new(None);
 
+/// Execute deferred actions that were queued while CVAR_CTX was locked.
+/// Must be called AFTER releasing the CVAR_CTX lock.
+fn execute_deferred_cvar_actions(actions: Vec<DeferredCvarAction>) {
+    for action in actions {
+        match action {
+            DeferredCvarAction::SetGamedir(dir) => {
+                crate::files::fs_set_gamedir(&dir);
+            }
+            DeferredCvarAction::ExecAutoexec => {
+                crate::files::fs_exec_autoexec();
+            }
+        }
+    }
+}
+
+/// Helper: drain deferred actions from the context (call while lock is still held).
+fn take_deferred_actions(ctx: &mut CvarContext) -> Vec<DeferredCvarAction> {
+    std::mem::take(&mut ctx.deferred_actions)
+}
+
 pub fn cvar_init() {
     let mut g = CVAR_CTX.lock().unwrap();
     *g = Some(CvarContext::new());
@@ -511,21 +525,42 @@ pub fn cvar_get(name: &str, value: &str, flags: i32) -> Option<usize> {
 }
 
 pub fn cvar_set(name: &str, value: &str) {
-    if let Some(ref mut c) = *CVAR_CTX.lock().unwrap() {
-        c.set(name, value);
-    }
+    let actions = {
+        let mut g = CVAR_CTX.lock().unwrap();
+        if let Some(ref mut c) = *g {
+            c.set(name, value);
+            take_deferred_actions(c)
+        } else {
+            Vec::new()
+        }
+    };
+    execute_deferred_cvar_actions(actions);
 }
 
 pub fn cvar_set_value(name: &str, value: f32) {
-    if let Some(ref mut c) = *CVAR_CTX.lock().unwrap() {
-        c.set_value(name, value);
-    }
+    let actions = {
+        let mut g = CVAR_CTX.lock().unwrap();
+        if let Some(ref mut c) = *g {
+            c.set_value(name, value);
+            take_deferred_actions(c)
+        } else {
+            Vec::new()
+        }
+    };
+    execute_deferred_cvar_actions(actions);
 }
 
 pub fn cvar_force_set(name: &str, value: &str) {
-    if let Some(ref mut c) = *CVAR_CTX.lock().unwrap() {
-        c.force_set(name, value);
-    }
+    let actions = {
+        let mut g = CVAR_CTX.lock().unwrap();
+        if let Some(ref mut c) = *g {
+            c.force_set(name, value);
+            take_deferred_actions(c)
+        } else {
+            Vec::new()
+        }
+    };
+    execute_deferred_cvar_actions(actions);
 }
 
 pub fn cvar_variable_value(name: &str) -> f32 {
@@ -563,18 +598,37 @@ pub fn cvar_full_set(name: &str, value: &str, flags: i32) {
 }
 
 pub fn cvar_get_latched_vars() {
-    if let Some(ref mut c) = *CVAR_CTX.lock().unwrap() {
-        c.get_latched_vars();
-    }
+    let actions = {
+        let mut g = CVAR_CTX.lock().unwrap();
+        if let Some(ref mut c) = *g {
+            c.get_latched_vars();
+            take_deferred_actions(c)
+        } else {
+            Vec::new()
+        }
+    };
+    execute_deferred_cvar_actions(actions);
 }
 
 /// Access the global CVAR_CTX with a closure. Returns None if not initialized.
+/// Any deferred actions queued by the closure are executed after releasing the lock.
 pub fn with_cvar_ctx<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut CvarContext) -> R,
 {
-    let mut g = CVAR_CTX.lock().unwrap();
-    g.as_mut().map(f)
+    let (result, actions) = {
+        let mut g = CVAR_CTX.lock().unwrap();
+        match g.as_mut() {
+            Some(c) => {
+                let r = f(c);
+                let a = take_deferred_actions(c);
+                (Some(r), a)
+            }
+            None => (None, Vec::new()),
+        }
+    };
+    execute_deferred_cvar_actions(actions);
+    result
 }
 
 /// Get a cvar's float value by handle (index). Returns 0.0 if invalid.

@@ -32,6 +32,7 @@ pub enum LibraryPart {
 
 /// Pipeline library capabilities.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct PipelineLibraryCapabilities {
     /// Whether pipeline library is supported.
     pub supported: bool,
@@ -41,15 +42,6 @@ pub struct PipelineLibraryCapabilities {
     pub retain_link_time_optimization: bool,
 }
 
-impl Default for PipelineLibraryCapabilities {
-    fn default() -> Self {
-        Self {
-            supported: false,
-            graphics_pipeline_library: false,
-            retain_link_time_optimization: false,
-        }
-    }
-}
 
 /// A compiled pipeline library part.
 pub struct PipelineLibraryPart {

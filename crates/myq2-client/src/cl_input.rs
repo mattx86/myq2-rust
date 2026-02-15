@@ -1220,18 +1220,89 @@ pub fn cl_send_cmd(
     if cls.state == ConnState::Connected {
         // If there's pending data or it's been >1s since last send, transmit
         if cls.netchan.message.cursize > 0 || cls.realtime - cls.netchan.last_sent > 1000 {
-            // netchan_transmit(&mut cls.netchan, &[]);
+            let curtime = myq2_common::common::sys_milliseconds();
+            let qport = cls.netchan.qport;
+            myq2_common::net_chan::netchan_transmit(
+                &mut cls.netchan,
+                &[],
+                curtime,
+                qport,
+            );
         }
+        return;
     }
 
-    // send a userinfo update if needed
-    // (handled by caller checking userinfo_modified)
+    // --- Active state: build and send clc_move packet ---
 
-    // The full implementation would:
-    // 1. Write clc_move byte
-    // 2. Write checksum placeholder byte
-    // 3. Write last valid frame number (or -1 for no delta)
-    // 4. Write 3 delta-compressed usercmds (current and 2 previous)
-    // 5. Calculate and fill in the CRC checksum
-    // 6. Transmit via netchan
+    // send a userinfo update if needed
+    if *_userinfo_modified {
+        *_userinfo_modified = false;
+        myq2_common::common::msg_write_byte(
+            &mut cls.netchan.message,
+            myq2_common::qcommon::CLC_USERINFO as i32,
+        );
+        myq2_common::common::msg_write_string(
+            &mut cls.netchan.message,
+            &myq2_common::cvar::cvar_userinfo(),
+        );
+    }
+
+    // skip cinematic if buttons pressed
+    if cmd.buttons != 0 && cl.cinematictime > 0 && !cl.attractloop
+        && cls.realtime - cl.cinematictime > 1000
+    {
+        // cinematic skip handled elsewhere (SCR_FinishCinematic)
+    }
+
+    // build the move command packet into a local buffer
+    let mut buf = myq2_common::qcommon::SizeBuf::new(128);
+
+    // begin a client move command
+    myq2_common::common::msg_write_byte(&mut buf, myq2_common::qcommon::CLC_MOVE as i32);
+
+    // save the position for a checksum byte
+    let checksum_index = buf.cursize as usize;
+    myq2_common::common::msg_write_byte(&mut buf, 0); // placeholder
+
+    // let the server know what the last frame we got was,
+    // so the next message can be delta compressed
+    if cvars.cl_nodelta != 0.0 || !cl.frame.valid || cls.demo_waiting {
+        myq2_common::common::msg_write_long(&mut buf, -1); // no compression
+    } else {
+        myq2_common::common::msg_write_long(&mut buf, cl.frame.serverframe);
+    }
+
+    // send this and the previous cmds in the message, so
+    // if the last packet was dropped, it can be recovered
+    let nullcmd = UserCmd::default();
+
+    let i2 = (cls.netchan.outgoing_sequence.wrapping_sub(2) as usize) & (CMD_BACKUP - 1);
+    let cmd2 = cl.cmds[i2];
+    myq2_common::common::msg_write_delta_usercmd(&mut buf, &nullcmd, &cmd2);
+
+    let i1 = (cls.netchan.outgoing_sequence.wrapping_sub(1) as usize) & (CMD_BACKUP - 1);
+    let cmd1 = cl.cmds[i1];
+    myq2_common::common::msg_write_delta_usercmd(&mut buf, &cmd2, &cmd1);
+
+    let i0 = (cls.netchan.outgoing_sequence as usize) & (CMD_BACKUP - 1);
+    let cmd0 = cl.cmds[i0];
+    myq2_common::common::msg_write_delta_usercmd(&mut buf, &cmd1, &cmd0);
+
+    // calculate a checksum over the move commands
+    let crc_data = &buf.data[checksum_index + 1..buf.cursize as usize];
+    buf.data[checksum_index] = myq2_common::common::com_block_sequence_crc_byte(
+        crc_data,
+        cls.netchan.outgoing_sequence,
+    );
+
+    // deliver the message
+    let curtime = myq2_common::common::sys_milliseconds();
+    let qport = cls.netchan.qport;
+    let send_data = buf.data[..buf.cursize as usize].to_vec();
+    myq2_common::net_chan::netchan_transmit(
+        &mut cls.netchan,
+        &send_data,
+        curtime,
+        qport,
+    );
 }

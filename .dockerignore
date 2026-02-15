@@ -1,0 +1,10 @@
+target/
+myq2-original/
+.git/
+.claude/
+*.exe
+*.dll
+*.pdb
+*.ncb
+*.opt
+*.suo

@@ -266,7 +266,7 @@ Complete list of all configuration variables (cvars). Set from the console with 
 | `vk_lightmap` | `0` | — | Debug: render lightmaps only (no diffuse textures) |
 | `vk_lockpvs` | `0` | — | Lock the PVS to the current leaf (debug) |
 | `vk_log` | `0` | — | Enable Vulkan validation/debug logging |
-| `vk_mode` | `4` | ARCHIVE | Video mode index |
+| `vk_mode` | `4` | ARCHIVE | Video mode index (0=320x240, 1=400x300, 2=512x384, 3=640x480, **4=800x600**, 5=960x720, 6=1024x768, 7=1152x864, 8=1280x960, 9=1600x1200, 10=2048x1536). Sets windowed resolution; fullscreen uses desktop resolution. |
 | `vk_modulate` | `1.5` | ARCHIVE | Lightmap brightness multiplier |
 | `vk_monolightmap` | `0` | — | Force monochrome lightmaps |
 | `vk_picmip` | `0` | ARCHIVE | Texture quality reduction (0=best, higher=lower quality) |
@@ -288,9 +288,11 @@ Complete list of all configuration variables (cvars). Set from the console with 
 
 | Cvar | Default | Flags | Description |
 |------|---------|-------|-------------|
-| `vid_fullscreen` | `1` | ARCHIVE | Fullscreen mode (0=windowed, 1=fullscreen) |
+| `vid_fullscreen` | `1` | ARCHIVE | Fullscreen mode (0=windowed, 1=borderless fullscreen at desktop resolution) |
 | `vid_gamma` | `0.6` | ARCHIVE | Display gamma correction (lower=brighter) |
 | `vid_ref` | `gl` | ARCHIVE | Renderer reference (legacy, always Vulkan now) |
+| `vid_xpos` | `3` | ARCHIVE | Window X position (windowed mode only) |
+| `vid_ypos` | `22` | ARCHIVE | Window Y position (windowed mode only) |
 
 ## Server
 

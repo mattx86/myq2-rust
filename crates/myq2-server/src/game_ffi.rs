@@ -788,6 +788,7 @@ unsafe extern "C" fn gi_FreeTags(_tag: c_int) {
 
 // Static storage for surface pointers returned from gi_trace
 // This is needed because the C API expects stable pointers to CSurface
+#[allow(clippy::vec_box)] // Box needed for pointer stability - raw pointers returned to C
 struct SurfaceStorageWrapper(Vec<Box<CSurface>>);
 // SAFETY: CSurface is plain data, accessed only from the main thread during game callbacks
 unsafe impl Send for SurfaceStorageWrapper {}
@@ -801,6 +802,7 @@ pub fn clear_surface_storage() {
 // Static storage for cvar return values
 // This is needed because the C API returns pointers to cvar_t
 // We use a wrapper to implement Send for the raw pointers
+#[allow(clippy::vec_box)] // Box needed for pointer stability - raw pointers returned to C
 struct CvarStorageWrapper(Vec<Box<CvarStorage>>);
 // SAFETY: CvarStorage contains raw pointers, but they're only accessed
 // from the main thread during game callbacks

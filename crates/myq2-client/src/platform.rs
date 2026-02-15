@@ -41,6 +41,12 @@ pub type NetConfigFn = Box<dyn Fn(bool) + Send>;
 /// SV_Shutdown(msg, reconnect)
 pub type SvShutdownFn = Box<dyn Fn(&str, bool) + Send>;
 
+/// SV_StartMap(mapname)
+pub type SvStartMapFn = Box<dyn Fn(&str) + Send>;
+
+/// Con_Print(text: &str)
+pub type ConPrintFn = Box<dyn Fn(&str) + Send>;
+
 // ============================================================
 // Dispatch table
 // ============================================================
@@ -62,6 +68,8 @@ pub struct ClientPlatformDispatch {
 
     pub net_config: Option<NetConfigFn>,
     pub sv_shutdown: Option<SvShutdownFn>,
+    pub sv_start_map: Option<SvStartMapFn>,
+    pub con_print: Option<ConPrintFn>,
 }
 
 
@@ -148,4 +156,14 @@ pub fn net_config(multiplayer: bool) {
 pub fn sv_shutdown(msg: &str, reconnect: bool) {
     let d = dispatch().lock().unwrap();
     if let Some(ref f) = d.sv_shutdown { f(msg, reconnect); }
+}
+
+pub fn sv_start_map(mapname: &str) {
+    let d = dispatch().lock().unwrap();
+    if let Some(ref f) = d.sv_start_map { f(mapname); }
+}
+
+pub fn con_print(text: &str) {
+    let d = dispatch().lock().unwrap();
+    if let Some(ref f) = d.con_print { f(text); }
 }

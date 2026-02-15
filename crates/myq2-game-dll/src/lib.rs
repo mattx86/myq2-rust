@@ -399,10 +399,10 @@ fn setup_game_import_bridge() {
 
                     // Convert pointers to indices
                     let mut result = Vec::with_capacity(count as usize);
-                    for i in 0..count as usize {
-                        if !list[i].is_null() {
+                    for &item in list.iter().take(count as usize) {
+                        if !item.is_null() {
                             unsafe {
-                                let idx = game_api::num_for_edict(GAME_EXPORT.edicts, GAME_EXPORT.edict_size, list[i]);
+                                let idx = game_api::num_for_edict(GAME_EXPORT.edicts, GAME_EXPORT.edict_size, item);
                                 result.push(idx);
                             }
                         }

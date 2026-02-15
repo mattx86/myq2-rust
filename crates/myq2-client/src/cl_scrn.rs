@@ -478,11 +478,14 @@ pub fn scr_run_console(scr: &mut ScrState, cls: &ClientStatic) {
     }
 }
 
-pub fn scr_draw_console(scr: &ScrState, cls: &ClientStatic, cl: &ClientState, viddef: &VidDef) {
+pub fn scr_draw_console(scr: &ScrState, cls: &mut ClientStatic, cl: &ClientState, viddef: &VidDef) {
     con_check_resize();
 
     if cls.state == ConnState::Disconnected || cls.state == ConnState::Connecting {
-        // forced full screen console
+        // forced full screen console - also set key_dest so typing works
+        if cls.key_dest != KeyDest::Console {
+            cls.key_dest = KeyDest::Console;
+        }
         con_draw_console(1.0);
         return;
     }
@@ -506,9 +509,11 @@ pub fn scr_draw_console(scr: &ScrState, cls: &ClientStatic, cl: &ClientState, vi
 // ============================================================
 
 pub fn scr_begin_loading_plaque(scr: &mut ScrState, cls: &mut ClientStatic, cl: &mut ClientState) {
+    com_printf(&format!("scr_begin_loading_plaque: CALLED, disable_screen={}\n", cls.disable_screen));
     s_stop_all_sounds();
     cl.sound_prepped = false; // don't play ambients
     if cls.disable_screen != 0.0 {
+        com_printf("scr_begin_loading_plaque: early return, disable_screen already set\n");
         return;
     }
     if developer_value() != 0.0 {
@@ -531,6 +536,7 @@ pub fn scr_begin_loading_plaque(scr: &mut ScrState, cls: &mut ClientStatic, cl: 
 }
 
 pub fn scr_end_loading_plaque(cls: &mut ClientStatic, clear: bool) {
+    com_printf(&format!("scr_end_loading_plaque: clear={}, setting disable_screen=0.0\n", clear));
     cls.disable_screen = 0.0;
 
     // mattx86: a work-around for notify lines + console + not breaking this function

@@ -268,6 +268,7 @@ pub fn sv_begin_f(ctx: &mut ServerContext, client_idx: usize) {
     if let Some(ref mut ge) = ctx.ge {
         if let Some(begin_fn) = ge.client_begin {
             if let Some(ent) = ge.edicts.get_mut(edict_idx) {
+                ent.s.number = edict_idx as i32; // Ensure index is set for callback
                 begin_fn(ent);
             }
         }

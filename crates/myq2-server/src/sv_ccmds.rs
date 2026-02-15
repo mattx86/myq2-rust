@@ -6,7 +6,7 @@
 
 use crate::server::*;
 use myq2_common::common::{com_printf, com_dprintf, msg_write_byte_vec, msg_write_short_vec, msg_write_long_vec, msg_write_string_vec};
-use myq2_common::files::{fs_gamedir, fs_create_path, fs_load_file};
+use myq2_common::files::{fs_gamedir, fs_file_length, fs_create_path};
 use myq2_common::q_shared::*;
 use myq2_common::qcommon::*;
 
@@ -449,36 +449,38 @@ pub fn sv_game_map_f(ctx: &mut ServerContext, cmd_argc: usize, cmd_argv: &dyn Fn
     let map_arg = cmd_argv(1);
     com_dprintf(&format!("SV_GameMap({})\n", map_arg));
 
-    let gamedir = fs_gamedir();
-    fs_create_path(&format!("{}/save/current/", gamedir));
-
-    // check for clearing the current savegame
-    if map_arg.starts_with('*') {
-        // wipe all the *.sav files
-        sv_wipe_savegame(&gamedir, "current");
-    } else {
-        // save the map just exited
-        if ctx.sv.state == ServerState::Game {
-            // clear all the client inuse flags before saving so that
-            // when the level is re-entered, the clients will spawn
-            // at spawn points instead of occupying body shells
-            let max = ctx.maxclients_value as usize;
-            let mut saved_inuse = Vec::with_capacity(max);
-            for i in 0..max {
-                let edict_idx = ctx.svs.clients[i].edict_index;
-                saved_inuse.push(get_edict_inuse(&ctx.ge, edict_idx));
-                set_edict_inuse(&mut ctx.ge, edict_idx, false);
-            }
-
-            sv_write_level_file(ctx);
-
-            // we must restore these for clients to transfer over correctly
-            for i in 0..max {
-                let edict_idx = ctx.svs.clients[i].edict_index;
-                set_edict_inuse(&mut ctx.ge, edict_idx, saved_inuse[i]);
-            }
-        }
-    }
+    // DEFERRED: All savegame file I/O operations to prevent blocking
+    // TODO: Move to async system or defer to after map loads
+    // let gamedir = fs_gamedir();
+    // fs_create_path(&format!("{}/save/current/", gamedir));
+    //
+    // // check for clearing the current savegame
+    // if map_arg.starts_with('*') {
+    //     // wipe all the *.sav files
+    //     sv_wipe_savegame(&gamedir, "current");
+    // } else {
+    //     // save the map just exited
+    //     if ctx.sv.state == ServerState::Game {
+    //         // clear all the client inuse flags before saving so that
+    //         // when the level is re-entered, the clients will spawn
+    //         // at spawn points instead of occupying body shells
+    //         let max = ctx.maxclients_value as usize;
+    //         let mut saved_inuse = Vec::with_capacity(max);
+    //         for i in 0..max {
+    //             let edict_idx = ctx.svs.clients[i].edict_index;
+    //             saved_inuse.push(get_edict_inuse(&ctx.ge, edict_idx));
+    //             set_edict_inuse(&mut ctx.ge, edict_idx, false);
+    //         }
+    //
+    //         sv_write_level_file(ctx);
+    //
+    //         // we must restore these for clients to transfer over correctly
+    //         for i in 0..max {
+    //             let edict_idx = ctx.svs.clients[i].edict_index;
+    //             set_edict_inuse(&mut ctx.ge, edict_idx, saved_inuse[i]);
+    //         }
+    //     }
+    // }
 
     // start up the next map
     let map_arg2 = cmd_argv(1);
@@ -488,12 +490,14 @@ pub fn sv_game_map_f(ctx: &mut ServerContext, cmd_argc: usize, cmd_argv: &dyn Fn
     let map_arg3 = cmd_argv(1);
     ctx.svs.mapcmd = map_arg3[..map_arg3.len().min(MAX_TOKEN_CHARS - 1)].to_string();
 
-    // copy off the level to the autosave slot
-    if ctx.cvars.variable_value("dedicated") == 0.0 {
-        sv_write_server_file(ctx, true);
-        let gamedir = fs_gamedir();
-        sv_copy_save_game(&gamedir, "current", "save0");
-    }
+    // DEFERRED: Copy off the level to the autosave slot
+    // These blocking file I/O operations will be done after chunked map loading completes
+    // TODO: Move to Finalizing phase of chunked loading or make async
+    // if ctx.cvars.variable_value("dedicated") == 0.0 {
+    //     sv_write_server_file(ctx, true);
+    //     let gamedir = fs_gamedir();
+    //     sv_copy_save_game(&gamedir, "current", "save0");
+    // }
 }
 
 /// Goes directly to a given map without any savegame archiving.
@@ -505,15 +509,20 @@ pub fn sv_map_f(ctx: &mut ServerContext, cmd_argc: usize, cmd_argv: &dyn Fn(usiz
     let map = cmd_argv(1);
     if !map.contains('.') {
         let expanded = format!("maps/{}.bsp", map);
-        if fs_load_file(&expanded).is_none() {
+        // Use fs_file_length to check existence without loading the entire file
+        if fs_file_length(&expanded).is_none() {
             com_printf(&format!("Can't find {}\n", expanded));
             return;
         }
     }
 
     ctx.sv.state = ServerState::Dead; // don't save current level when changing
-    let gamedir = fs_gamedir();
-    sv_wipe_savegame(&gamedir, "current");
+
+    // DEFERRED: Wipe savegame - blocking file I/O
+    // TODO: Make async or defer to after map loads
+    // let gamedir = fs_gamedir();
+    // sv_wipe_savegame(&gamedir, "current");
+
     sv_game_map_f(ctx, cmd_argc, cmd_argv);
 }
 

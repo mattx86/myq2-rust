@@ -36,6 +36,7 @@ impl BindlessTextureHandle {
 
 /// Bindless texture capabilities.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct BindlessCapabilities {
     /// Whether bindless textures are supported.
     pub supported: bool,
@@ -51,18 +52,6 @@ pub struct BindlessCapabilities {
     pub runtime_descriptor_array: bool,
 }
 
-impl Default for BindlessCapabilities {
-    fn default() -> Self {
-        Self {
-            supported: false,
-            partially_bound: false,
-            update_after_bind: false,
-            max_sampled_images: 0,
-            max_samplers: 0,
-            runtime_descriptor_array: false,
-        }
-    }
-}
 
 /// Texture slot info for the bindless array.
 #[derive(Debug, Clone)]

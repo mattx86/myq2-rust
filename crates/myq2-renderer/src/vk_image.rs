@@ -2,7 +2,7 @@
 // Converted from: myq2-original/ref_gl/vk_image.c
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports, non_upper_case_globals,
-         clippy::too_many_arguments, unused_unsafe, static_mut_refs, clippy::manual_range_contains)]
+         clippy::too_many_arguments, unused_unsafe, clippy::manual_range_contains)]
 
 use crate::vk_local::*;
 use crate::vk_rmain::vid_printf;
@@ -10,37 +10,107 @@ use myq2_common::q_shared::{MAX_QPATH, PRINT_ALL, ERR_DROP, q_streq_nocase};
 use myq2_common::common::com_error;
 use rayon::prelude::*;
 
+use std::sync::{OnceLock, Mutex};
+
 // ============================================================
 // Module-level state (C globals)
 // ============================================================
 
-pub static mut d_8to24table: [u32; 256] = [0u32; 256];
-pub static mut r_rawpalette: [u32; 256] = [0u32; 256];
+/// Palette lookup table: maps 8-bit palette indices to 32-bit ARGB colors.
+/// Initialized once in draw_get_palette(), then read-only.
+static D_8TO24TABLE: OnceLock<[u32; 256]> = OnceLock::new();
 
-static mut intensitytable: [u8; 256] = [0u8; 256];
-static mut gammatable: [u8; 256] = [0u8; 256];
+/// Get the 8-to-24 palette table.
+pub fn d_8to24table() -> &'static [u32; 256] {
+    D_8TO24TABLE.get().expect("draw_get_palette() not called")
+}
 
-pub static mut vk_solid_format: i32 = 3;
-pub static mut vk_alpha_format: i32 = 4;
+/// Raw palette for sprite/cinematic rendering. Written per-frame by r_set_palette().
+static R_RAWPALETTE: Mutex<[u32; 256]> = Mutex::new([0u32; 256]);
 
-static mut vk_filter_min: i32 = VK_LINEAR_MIPMAP_LINEAR;
-static mut vk_filter_max: i32 = VK_LINEAR;
+/// Read the raw palette.
+pub fn with_rawpalette<R>(f: impl FnOnce(&[u32; 256]) -> R) -> R {
+    f(&R_RAWPALETTE.lock().unwrap())
+}
 
-static mut upload_width: i32 = 0;
-static mut upload_height: i32 = 0;
+/// Write the raw palette.
+pub fn set_rawpalette(palette: [u32; 256]) {
+    *R_RAWPALETTE.lock().unwrap() = palette;
+}
+
+/// Gamma and intensity lookup tables, initialized together in vk_init_images().
+struct GammaIntensityTables {
+    gamma: [u8; 256],
+    intensity: [u8; 256],
+}
+
+static GAMMA_INTENSITY: OnceLock<GammaIntensityTables> = OnceLock::new();
+
+fn gammatable() -> &'static [u8; 256] {
+    &GAMMA_INTENSITY.get().expect("vk_init_images() not called").gamma
+}
+
+fn intensitytable() -> &'static [u8; 256] {
+    &GAMMA_INTENSITY.get().expect("vk_init_images() not called").intensity
+}
 
 // ============================================================
-// Scrap allocation
+// Scrap allocation constants
 // ============================================================
 
 pub const MAX_SCRAPS: usize = 1;
 pub const BLOCK_WIDTH: usize = 256;
 pub const BLOCK_HEIGHT: usize = 256;
 
-pub static mut scrap_allocated: [[i32; BLOCK_WIDTH]; MAX_SCRAPS] = [[0i32; BLOCK_WIDTH]; MAX_SCRAPS];
-pub static mut scrap_texels: [[u8; BLOCK_WIDTH * BLOCK_HEIGHT]; MAX_SCRAPS] = [[0u8; BLOCK_WIDTH * BLOCK_HEIGHT]; MAX_SCRAPS];
-pub static mut scrap_dirty: i32 = 0; // qboolean
-pub static mut scrap_uploads: i32 = 0;
+// ============================================================
+// Image subsystem state
+// ============================================================
+
+use std::sync::LazyLock;
+
+pub struct ImageState {
+    pub vk_solid_format: i32,
+    pub vk_alpha_format: i32,
+    vk_filter_min: i32,
+    vk_filter_max: i32,
+    upload_width: i32,
+    upload_height: i32,
+    scrap_allocated: [[i32; BLOCK_WIDTH]; MAX_SCRAPS],
+    scrap_texels: [[u8; BLOCK_WIDTH * BLOCK_HEIGHT]; MAX_SCRAPS],
+    scrap_dirty: i32,
+    scrap_uploads: i32,
+    /// Resample scratch buffers (lazy-allocated).
+    p1: *mut u32,
+    p2: *mut u32,
+    /// Image registration sequence counter.
+    registration_sequence: i32,
+}
+
+// SAFETY: Raw pointers (p1, p2) are heap-allocated scratch buffers,
+// only accessed while Mutex is held.
+unsafe impl Send for ImageState {}
+
+static IMAGE_STATE: LazyLock<Mutex<ImageState>> = LazyLock::new(|| {
+    Mutex::new(ImageState {
+        vk_solid_format: 3,
+        vk_alpha_format: 4,
+        vk_filter_min: VK_LINEAR_MIPMAP_LINEAR,
+        vk_filter_max: VK_LINEAR,
+        upload_width: 0,
+        upload_height: 0,
+        scrap_allocated: [[0i32; BLOCK_WIDTH]; MAX_SCRAPS],
+        scrap_texels: [[0u8; BLOCK_WIDTH * BLOCK_HEIGHT]; MAX_SCRAPS],
+        scrap_dirty: 0,
+        scrap_uploads: 0,
+        p1: std::ptr::null_mut(),
+        p2: std::ptr::null_mut(),
+        registration_sequence: 0,
+    })
+});
+
+pub fn imgs() -> std::sync::MutexGuard<'static, ImageState> {
+    IMAGE_STATE.lock().unwrap()
+}
 
 // ============================================================
 // GL texture mode tables
@@ -127,11 +197,11 @@ pub unsafe fn vk_select_texture_impl(texture: u32) {
         1
     };
 
-    if tmu == vk_state.currenttmu {
+    if tmu == rfs().vk_state.currenttmu {
         return;
     }
 
-    vk_state.currenttmu = tmu;
+    rfs().vk_state.currenttmu = tmu;
 
     // In C: qglSelectTextureSGIS or qglActiveTextureARB
     qvk_active_texture_arb(texture);
@@ -142,12 +212,18 @@ pub unsafe fn vk_select_texture_impl(texture: u32) {
 // vk_tex_env
 // ============================================================
 
-static mut lastmodes: [i32; 4] = [-1, -1, -1, -1];
+use std::sync::atomic::{AtomicI32, Ordering};
+
+static LASTMODES: [AtomicI32; 4] = [
+    AtomicI32::new(-1), AtomicI32::new(-1),
+    AtomicI32::new(-1), AtomicI32::new(-1),
+];
 
 pub unsafe fn vk_tex_env_impl(mode: i32) {
-    if mode != lastmodes[vk_state.currenttmu as usize] {
+    let tmu = rfs().vk_state.currenttmu as usize;
+    if mode != LASTMODES[tmu].load(Ordering::Relaxed) {
         qvk_tex_envf(VK_TEXTURE_ENV, VK_TEXTURE_ENV_MODE, mode as f32);
-        lastmodes[vk_state.currenttmu as usize] = mode;
+        LASTMODES[tmu].store(mode, Ordering::Relaxed);
     }
 }
 
@@ -161,10 +237,10 @@ pub unsafe fn vk_bind_impl(texnum: i32) {
     }
     // performance evaluation option (vk_nobind) omitted for simplicity
 
-    if vk_state.currenttextures[vk_state.currenttmu as usize] == texnum {
+    if rfs().vk_state.currenttextures[rfs().vk_state.currenttmu as usize] == texnum {
         return;
     }
-    vk_state.currenttextures[vk_state.currenttmu as usize] = texnum;
+    rfs().vk_state.currenttextures[rfs().vk_state.currenttmu as usize] = texnum;
     qvk_bind_texture(VK_TEXTURE_2D, texnum);
 }
 
@@ -178,7 +254,7 @@ pub unsafe fn vk_mbind_impl(target: u32, texnum: i32) {
               else if target == VK_TEXTURE2 { 2 }
               else if target == VK_TEXTURE3 { 3 }
               else { 1 };
-    if vk_state.currenttextures[tmu] == texnum {
+    if rfs().vk_state.currenttextures[tmu] == texnum {
         return;
     }
     vk_bind(texnum);
@@ -205,16 +281,17 @@ pub unsafe fn vk_texture_mode(string: &str) {
         }
     };
 
-    vk_filter_min = MODES[idx].minimize;
-    vk_filter_max = MODES[idx].maximize;
+    let mut is = imgs();
+    is.vk_filter_min = MODES[idx].minimize;
+    is.vk_filter_max = MODES[idx].maximize;
 
     // change all the existing mipmap texture objects
-    for i in 0..numgltextures as usize {
-        let glt = &gltextures[i];
+    for i in 0..rfs().numgltextures as usize {
+        let glt = &rfs().gltextures[i];
         if glt.r#type != ImageType::Pic && glt.r#type != ImageType::Sky {
             vk_bind(glt.texnum);
-            qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MIN_FILTER, vk_filter_min as f32);
-            qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MAG_FILTER, vk_filter_max as f32);
+            qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MIN_FILTER, is.vk_filter_min as f32);
+            qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MAG_FILTER, is.vk_filter_max as f32);
         }
     }
 }
@@ -226,7 +303,7 @@ pub unsafe fn vk_texture_mode(string: &str) {
 pub unsafe fn vk_texture_alpha_mode(string: &str) {
     for mode in VK_ALPHA_MODES.iter() {
         if q_streq_nocase(mode.name, string) {
-            vk_tex_alpha_format_val = mode.mode;
+            rfs().vk_tex_alpha_format_val = mode.mode;
             return;
         }
     }
@@ -240,7 +317,7 @@ pub unsafe fn vk_texture_alpha_mode(string: &str) {
 pub unsafe fn vk_texture_solid_mode(string: &str) {
     for mode in VK_SOLID_MODES.iter() {
         if q_streq_nocase(mode.name, string) {
-            vk_tex_solid_format_val = mode.mode;
+            rfs().vk_tex_solid_format_val = mode.mode;
             return;
         }
     }
@@ -255,8 +332,8 @@ pub unsafe fn vk_image_list_f() {
     vid_printf(PRINT_ALL, "------------------\n");
     let mut texels: i32 = 0;
 
-    for i in 0..numgltextures as usize {
-        let image = &gltextures[i];
+    for i in 0..rfs().numgltextures as usize {
+        let image = &rfs().gltextures[i];
         if image.texnum <= 0 {
             continue;
         }
@@ -280,7 +357,7 @@ pub unsafe fn vk_image_list_f() {
 // Scrap_AllocBlock
 // ============================================================
 
-pub unsafe fn scrap_alloc_block(w: i32, h: i32, x: &mut i32, y: &mut i32) -> i32 {
+unsafe fn scrap_alloc_block(is: &mut ImageState, w: i32, h: i32, x: &mut i32, y: &mut i32) -> i32 {
     for texnum in 0..MAX_SCRAPS {
         let mut best = BLOCK_HEIGHT as i32;
 
@@ -288,11 +365,11 @@ pub unsafe fn scrap_alloc_block(w: i32, h: i32, x: &mut i32, y: &mut i32) -> i32
             let mut best2 = 0i32;
             let mut j = 0i32;
             while j < w {
-                if scrap_allocated[texnum][(i + j) as usize] >= best {
+                if is.scrap_allocated[texnum][(i + j) as usize] >= best {
                     break;
                 }
-                if scrap_allocated[texnum][(i + j) as usize] > best2 {
-                    best2 = scrap_allocated[texnum][(i + j) as usize];
+                if is.scrap_allocated[texnum][(i + j) as usize] > best2 {
+                    best2 = is.scrap_allocated[texnum][(i + j) as usize];
                 }
                 j += 1;
             }
@@ -308,7 +385,7 @@ pub unsafe fn scrap_alloc_block(w: i32, h: i32, x: &mut i32, y: &mut i32) -> i32
         }
 
         for i in 0..w {
-            scrap_allocated[texnum][(*x + i) as usize] = best + h;
+            is.scrap_allocated[texnum][(*x + i) as usize] = best + h;
         }
 
         return texnum as i32;
@@ -321,11 +398,23 @@ pub unsafe fn scrap_alloc_block(w: i32, h: i32, x: &mut i32, y: &mut i32) -> i32
 // Scrap_Upload
 // ============================================================
 
-pub unsafe fn scrap_upload() {
-    scrap_uploads += 1;
+unsafe fn scrap_upload(is: &mut ImageState) {
+    is.scrap_uploads += 1;
     vk_bind(TEXNUM_SCRAPS);
-    vk_upload8(scrap_texels[0].as_ptr(), BLOCK_WIDTH as i32, BLOCK_HEIGHT as i32, false, std::ptr::null_mut());
-    scrap_dirty = 0;
+    vk_upload8(is, is.scrap_texels[0].as_ptr(), BLOCK_WIDTH as i32, BLOCK_HEIGHT as i32, false, std::ptr::null_mut());
+    is.scrap_dirty = 0;
+}
+
+/// Upload the scrap atlas to the Vulkan TextureStore if it has been modified.
+/// Called from `flush_2d_internal()` before rendering 2D batches.
+///
+/// # Safety
+/// Accesses module-level statics. Must be called from the main thread only.
+pub unsafe fn scrap_upload_if_dirty() {
+    let mut is = imgs();
+    if is.scrap_dirty != 0 {
+        scrap_upload(&mut is);
+    }
 }
 
 // ============================================================
@@ -346,7 +435,7 @@ pub unsafe fn r_flood_fill_skin(skin: *mut u8, skinwidth: i32, skinheight: i32) 
     // attempt to find opaque black
     let mut filledcolor: u8 = 0;
     for i in 0..256 {
-        if d_8to24table[i] == 255 {
+        if d_8to24table()[i] == 255 {
             filledcolor = i as u8;
             break;
         }
@@ -393,10 +482,8 @@ pub unsafe fn r_flood_fill_skin(skin: *mut u8, skinwidth: i32, skinheight: i32) 
 // vk_resample_texture
 // ============================================================
 
-static mut p1: *mut u32 = std::ptr::null_mut();
-static mut p2: *mut u32 = std::ptr::null_mut();
-
 pub unsafe fn vk_resample_texture(
+    is: &mut ImageState,
     in_data: *const u32, inwidth: i32, inheight: i32,
     out_data: *mut u32, outwidth: i32, outheight: i32,
 ) {
@@ -404,23 +491,23 @@ pub unsafe fn vk_resample_texture(
     // max_tsize should match the maximum texture dimension supported.
     // 2048 matches the original C code's MAX_TEXTURE_SIZE assumption.
     let max_sz = 2048;
-    if p1.is_null() {
+    if is.p1.is_null() {
         let layout = std::alloc::Layout::from_size_align(max_sz * 4, 4).unwrap();
-        p1 = std::alloc::alloc_zeroed(layout) as *mut u32;
-        p2 = std::alloc::alloc_zeroed(layout) as *mut u32;
+        is.p1 = std::alloc::alloc_zeroed(layout) as *mut u32;
+        is.p2 = std::alloc::alloc_zeroed(layout) as *mut u32;
     }
 
     let fracstep = ((inwidth as u32).wrapping_mul(0x10000)) / outwidth as u32;
 
     let mut frac = fracstep >> 2;
     for i in 0..outwidth {
-        *p1.offset(i as isize) = 4 * (frac >> 16);
+        *is.p1.offset(i as isize) = 4 * (frac >> 16);
         frac = frac.wrapping_add(fracstep);
     }
 
     frac = 3 * (fracstep >> 2);
     for i in 0..outwidth {
-        *p2.offset(i as isize) = 4 * (frac >> 16);
+        *is.p2.offset(i as isize) = 4 * (frac >> 16);
         frac = frac.wrapping_add(fracstep);
     }
 
@@ -429,10 +516,10 @@ pub unsafe fn vk_resample_texture(
         let inrow = in_data.offset((inwidth as isize) * ((i as f32 + 0.25) * inheight as f32 / outheight as f32) as isize);
         let inrow2 = in_data.offset((inwidth as isize) * ((i as f32 + 0.75) * inheight as f32 / outheight as f32) as isize);
         for j in 0..outwidth {
-            let pix1 = (inrow as *const u8).offset(*p1.offset(j as isize) as isize);
-            let pix2 = (inrow as *const u8).offset(*p2.offset(j as isize) as isize);
-            let pix3 = (inrow2 as *const u8).offset(*p1.offset(j as isize) as isize);
-            let pix4 = (inrow2 as *const u8).offset(*p2.offset(j as isize) as isize);
+            let pix1 = (inrow as *const u8).offset(*is.p1.offset(j as isize) as isize);
+            let pix2 = (inrow as *const u8).offset(*is.p2.offset(j as isize) as isize);
+            let pix3 = (inrow2 as *const u8).offset(*is.p1.offset(j as isize) as isize);
+            let pix4 = (inrow2 as *const u8).offset(*is.p2.offset(j as isize) as isize);
 
             let outp = out.offset(j as isize) as *mut u8;
             *outp.offset(0) = ((*pix1.offset(0) as u32 + *pix2.offset(0) as u32 + *pix3.offset(0) as u32 + *pix4.offset(0) as u32) >> 2) as u8;
@@ -452,19 +539,21 @@ pub unsafe fn vk_light_scale_texture(in_data: *mut u8, inwidth: i32, inheight: i
     let inc: isize = if bpp == 24 { 3 } else { 4 };
     let c = (inwidth * inheight) as isize;
     let mut p = in_data;
+    let gt = gammatable();
+    let it = intensitytable();
 
     if only_gamma {
         for _ in 0..c {
-            *p.offset(0) = gammatable[*p.offset(0) as usize];
-            *p.offset(1) = gammatable[*p.offset(1) as usize];
-            *p.offset(2) = gammatable[*p.offset(2) as usize];
+            *p.offset(0) = gt[*p.offset(0) as usize];
+            *p.offset(1) = gt[*p.offset(1) as usize];
+            *p.offset(2) = gt[*p.offset(2) as usize];
             p = p.offset(inc);
         }
     } else {
         for _ in 0..c {
-            *p.offset(0) = gammatable[intensitytable[*p.offset(0) as usize] as usize];
-            *p.offset(1) = gammatable[intensitytable[*p.offset(1) as usize] as usize];
-            *p.offset(2) = gammatable[intensitytable[*p.offset(2) as usize] as usize];
+            *p.offset(0) = gt[it[*p.offset(0) as usize] as usize];
+            *p.offset(1) = gt[it[*p.offset(1) as usize] as usize];
+            *p.offset(2) = gt[it[*p.offset(2) as usize] as usize];
             p = p.offset(inc);
         }
     }
@@ -499,21 +588,22 @@ pub unsafe fn vk_mip_map(in_data: *mut u8, width: i32, height: i32) {
 // vk_upload32 — Returns has_alpha (qboolean as i32)
 // ============================================================
 
-pub unsafe fn vk_upload32(
+unsafe fn vk_upload32(
+    is: &mut ImageState,
     data: *const u32, width: i32, height: i32,
     mipmap: bool, bpp: i32, image: *mut Image,
 ) -> i32 {
     let mut scaled_width = 1i32;
     while scaled_width < width { scaled_width <<= 1; }
-    if crate::vk_rmain::VK_PICMIP.value != 0.0 && scaled_width > width && mipmap { scaled_width >>= 1; }
+    if crate::vk_rmain::rcvars().vk_picmip.value != 0.0 && scaled_width > width && mipmap { scaled_width >>= 1; }
 
     let mut scaled_height = 1i32;
     while scaled_height < height { scaled_height <<= 1; }
-    if crate::vk_rmain::VK_PICMIP.value != 0.0 && scaled_height > height && mipmap { scaled_height >>= 1; }
+    if crate::vk_rmain::rcvars().vk_picmip.value != 0.0 && scaled_height > height && mipmap { scaled_height >>= 1; }
 
     if mipmap {
-        scaled_width >>= crate::vk_rmain::VK_PICMIP.value as i32;
-        scaled_height >>= crate::vk_rmain::VK_PICMIP.value as i32;
+        scaled_width >>= crate::vk_rmain::rcvars().vk_picmip.value as i32;
+        scaled_height >>= crate::vk_rmain::rcvars().vk_picmip.value as i32;
     }
 
     // clamp
@@ -523,19 +613,19 @@ pub unsafe fn vk_upload32(
     if scaled_height < 1 { scaled_height = 1; }
 
     // scan for non-255 alpha
-    let mut samples = vk_solid_format;
+    let mut samples = is.vk_solid_format;
     if bpp != 24 {
         let c = (width * height) as usize;
         let scan = (data as *const u8).offset(3);
         for i in 0..c {
             if *scan.add(i * 4) != 255 {
-                samples = vk_alpha_format;
+                samples = is.vk_alpha_format;
                 break;
             }
         }
     }
 
-    let comp = if samples == vk_solid_format { vk_tex_solid_format_val } else { vk_tex_alpha_format_val };
+    let comp = if samples == is.vk_solid_format { rfs().vk_tex_solid_format_val } else { rfs().vk_tex_alpha_format_val };
 
     let mut scaled: *mut u32;
     let mut scaled_needs_free = false;
@@ -544,18 +634,23 @@ pub unsafe fn vk_upload32(
         if !mipmap {
             qvk_tex_image2d(VK_TEXTURE_2D, 0, comp, scaled_width, scaled_height, 0, VK_RGBA as u32, VK_UNSIGNED_BYTE, data as *const u8);
 
-            upload_width = scaled_width;
-            upload_height = scaled_height;
-            qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MIN_FILTER, vk_filter_max as f32);
-            qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MAG_FILTER, vk_filter_max as f32);
-            return if samples == vk_alpha_format { 1 } else { 0 };
+            // Capture pixel data for Vulkan TextureStore
+            // FIXME: Skip during initialization to avoid TEXTURE_STORE deadlock
+            // NOTE: Descriptor set creation deferred to avoid lock contention
+            // Will be created lazily on first draw via ensure_descriptor_set()
+
+            is.upload_width = scaled_width;
+            is.upload_height = scaled_height;
+            qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MIN_FILTER, is.vk_filter_max as f32);
+            qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MAG_FILTER, is.vk_filter_max as f32);
+            return if samples == is.vk_alpha_format { 1 } else { 0 };
         }
         scaled = data as *mut u32;
     } else {
         let layout = std::alloc::Layout::from_size_align((scaled_width * scaled_height * 4) as usize, 4).unwrap();
         scaled = std::alloc::alloc_zeroed(layout) as *mut u32;
         scaled_needs_free = true;
-        vk_resample_texture(data, width, height, scaled, scaled_width, scaled_height);
+        vk_resample_texture(is, data, width, height, scaled, scaled_width, scaled_height);
     }
 
     if !image.is_null() && (*image).r#type != ImageType::Pic {
@@ -569,9 +664,9 @@ pub unsafe fn vk_upload32(
         }
     }
 
-    if vk_config.sgismipmap != 0 {
+    if rfs().vk_config.sgismipmap != 0 {
         for mode in MODES.iter() {
-            if q_streq_nocase(mode.name, crate::vk_rmain::VK_SKYMIP.string) {
+            if q_streq_nocase(mode.name, crate::vk_rmain::rcvars().vk_skymip.string) {
                 qvk_tex_parameteri(VK_TEXTURE_2D, VK_TEXTURE_MIN_FILTER, mode.minimize);
                 break;
             }
@@ -579,17 +674,20 @@ pub unsafe fn vk_upload32(
         qvk_tex_parameteri(VK_TEXTURE_2D, VK_GENERATE_MIPMAP_SGIS, VK_TRUE);
     }
 
-    if vk_config.anisotropy != 0 {
+    if rfs().vk_config.anisotropy != 0 {
         // In C: vk_ext_texture_filter_anisotropic->value clamped to max_aniso
-        let aniso_val = crate::vk_rmain::VK_EXT_TEXTURE_FILTER_ANISOTROPIC.value;
-        let max_aniso = crate::vk_rmain::MAX_ANISO as f32;
+        let aniso_val = crate::vk_rmain::rcvars().vk_ext_texture_filter_anisotropic.value;
+        let max_aniso = crate::vk_rmain::rg().max_aniso as f32;
         let aniso = if aniso_val > max_aniso { max_aniso } else { aniso_val };
         qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MAX_ANISOTROPY_EXT, aniso);
     }
 
     qvk_tex_image2d(VK_TEXTURE_2D, 0, comp, scaled_width, scaled_height, 0, VK_RGBA as u32, VK_UNSIGNED_BYTE, scaled as *const u8);
 
-    if mipmap && vk_config.sgismipmap == 0 {
+    // NOTE: Descriptor set creation deferred to avoid lock contention
+    // Will be created lazily on first draw via ensure_descriptor_set()
+
+    if mipmap && rfs().vk_config.sgismipmap == 0 {
         let mut miplevel = 0i32;
         let mut sw = scaled_width;
         let mut sh = scaled_height;
@@ -604,25 +702,26 @@ pub unsafe fn vk_upload32(
         }
     }
 
-    upload_width = scaled_width;
-    upload_height = scaled_height;
+    is.upload_width = scaled_width;
+    is.upload_height = scaled_height;
 
-    qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MIN_FILTER, if mipmap { vk_filter_min as f32 } else { vk_filter_max as f32 });
-    qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MAG_FILTER, vk_filter_max as f32);
+    qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MIN_FILTER, if mipmap { is.vk_filter_min as f32 } else { is.vk_filter_max as f32 });
+    qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MAG_FILTER, is.vk_filter_max as f32);
 
     if scaled_needs_free {
         let layout = std::alloc::Layout::from_size_align((scaled_width * scaled_height * 4) as usize, 4).unwrap();
         std::alloc::dealloc(scaled as *mut u8, layout);
     }
 
-    if samples == vk_alpha_format { 1 } else { 0 }
+    if samples == is.vk_alpha_format { 1 } else { 0 }
 }
 
 // ============================================================
 // vk_upload8 — Returns has_alpha (qboolean as i32)
 // ============================================================
 
-pub unsafe fn vk_upload8(
+unsafe fn vk_upload8(
+    is: &mut ImageState,
     data: *const u8, width: i32, height: i32,
     mipmap: bool, image: *mut Image,
 ) -> i32 {
@@ -632,7 +731,8 @@ pub unsafe fn vk_upload8(
 
     for i in 0..s {
         let p = *data.add(i) as usize;
-        *trans.add(i) = d_8to24table[p];
+        let pal = d_8to24table();
+        *trans.add(i) = pal[p];
 
         if p == 255 {
             // transparent — scan around for another color to avoid alpha fringes
@@ -648,7 +748,7 @@ pub unsafe fn vk_upload8(
                 0
             };
             // copy rgb components
-            let src = &d_8to24table[replacement] as *const u32 as *const u8;
+            let src = &pal[replacement] as *const u32 as *const u8;
             let dst = trans.add(i) as *mut u8;
             *dst.offset(0) = *src.offset(0);
             *dst.offset(1) = *src.offset(1);
@@ -656,7 +756,7 @@ pub unsafe fn vk_upload8(
         }
     }
 
-    let result = vk_upload32(trans, width, height, mipmap, 8, image);
+    let result = vk_upload32(is, trans, width, height, mipmap, 8, image);
     std::alloc::dealloc(trans as *mut u8, layout);
     result
 }
@@ -685,27 +785,29 @@ pub unsafe fn vk_load_pic(
     width: i32, height: i32,
     img_type: ImageType, bits: i32,
 ) -> *mut Image {
+    let mut is = imgs();
+
     // find a free image_t
     let mut i = 0i32;
-    while i < numgltextures {
-        if gltextures[i as usize].texnum == 0 {
+    while i < rfs().numgltextures {
+        if rfs().gltextures[i as usize].texnum == 0 {
             break;
         }
         i += 1;
     }
-    if i == numgltextures {
-        if numgltextures as usize == MAX_GLTEXTURES {
+    if i == rfs().numgltextures {
+        if rfs().numgltextures as usize == MAX_GLTEXTURES {
             com_error(ERR_DROP, "MAX_GLTEXTURES");
         }
-        numgltextures += 1;
+        rfs().numgltextures += 1;
     }
-    let image = &mut gltextures[i as usize] as *mut Image;
+    let image = &mut rfs().gltextures[i as usize] as *mut Image;
 
     if name.len() >= MAX_QPATH {
         com_error(ERR_DROP, &format!("Draw_LoadPic: \"{}\" is too long", name));
     }
     set_image_name(image, name);
-    (*image).registration_sequence = registration_sequence();
+    (*image).registration_sequence = is.registration_sequence;
     (*image).width = width;
     (*image).height = height;
     (*image).r#type = img_type;
@@ -715,14 +817,14 @@ pub unsafe fn vk_load_pic(
         && bits == 8 {
             let mut x = 0i32;
             let mut y = 0i32;
-            let texnum = scrap_alloc_block((*image).width, (*image).height, &mut x, &mut y);
+            let texnum = scrap_alloc_block(&mut is, (*image).width, (*image).height, &mut x, &mut y);
             if texnum >= 0 {
-                scrap_dirty = 1;
+                is.scrap_dirty = 1;
 
                 let mut k = 0usize;
                 for iy in 0..(*image).height {
                     for jx in 0..(*image).width {
-                        scrap_texels[texnum as usize][(y + iy) as usize * BLOCK_WIDTH + (x + jx) as usize] = *pic.add(k);
+                        is.scrap_texels[texnum as usize][(y + iy) as usize * BLOCK_WIDTH + (x + jx) as usize] = *pic.add(k);
                         k += 1;
                     }
                 }
@@ -743,13 +845,13 @@ pub unsafe fn vk_load_pic(
     let mipmap = (*image).r#type != ImageType::Pic && (*image).r#type != ImageType::Sky;
 
     if bits == 8 {
-        (*image).has_alpha = vk_upload8(pic, width, height, mipmap, image);
+        (*image).has_alpha = vk_upload8(&mut is, pic, width, height, mipmap, image);
     } else {
-        (*image).has_alpha = vk_upload32(pic as *const u32, width, height, mipmap, bits, image);
+        (*image).has_alpha = vk_upload32(&mut is, pic as *const u32, width, height, mipmap, bits, image);
     }
 
-    (*image).upload_width = upload_width;
-    (*image).upload_height = upload_height;
+    (*image).upload_width = is.upload_width;
+    (*image).upload_height = is.upload_height;
     (*image).sl = 0.0;
     (*image).sh = 1.0;
     (*image).tl = 0.0;
@@ -807,14 +909,14 @@ unsafe fn vk_load_wal(name: &str) -> *mut Image {
         Some(d) => d,
         None => {
             vid_printf(PRINT_ALL, &format!("vk_find_image: can't load {}\n", name));
-            return r_notexture;
+            return rfs().r_notexture;
         }
     };
 
     // miptex_t header: 32 bytes name, 4 bytes width, 4 bytes height, 4*4 bytes offsets
     if data.len() < 32 + 4 + 4 + 16 {
         vid_printf(PRINT_ALL, &format!("vk_find_image: can't load {}\n", name));
-        return r_notexture;
+        return rfs().r_notexture;
     }
 
     let width = i32::from_le_bytes([data[32], data[33], data[34], data[35]]);
@@ -823,7 +925,7 @@ unsafe fn vk_load_wal(name: &str) -> *mut Image {
 
     if ofs + (width * height) as usize > data.len() {
         vid_printf(PRINT_ALL, &format!("vk_find_image: can't load {}\n", name));
-        return r_notexture;
+        return rfs().r_notexture;
     }
 
     vk_load_pic(name, data[ofs..].as_ptr(), width, height, ImageType::Wall, 8)
@@ -843,11 +945,11 @@ pub unsafe fn vk_find_image_impl(name: &str, img_type: ImageType) -> *mut Image 
     }
 
     // look for it
-    for i in 0..numgltextures as usize {
-        let img_name = get_image_name(&gltextures[i]);
+    for i in 0..rfs().numgltextures as usize {
+        let img_name = get_image_name(&rfs().gltextures[i]);
         if img_name == name {
-            gltextures[i].registration_sequence = registration_sequence();
-            return &mut gltextures[i] as *mut Image;
+            rfs().gltextures[i].registration_sequence = registration_sequence();
+            return &mut rfs().gltextures[i] as *mut Image;
         }
     }
 
@@ -903,12 +1005,48 @@ pub unsafe fn vk_find_image_impl(name: &str, img_type: ImageType) -> *mut Image 
 // draw_find_pic — finds or loads a 2D pic by name
 // ============================================================
 
+/// Cache mapping base pic names to their resolved full paths (with extension).
+/// Avoids re-trying failed extensions every frame (e.g., conback.pcx/tga when only .png exists).
+static PIC_RESOLVE_CACHE: OnceLock<Mutex<std::collections::HashMap<String, Option<String>>>> = OnceLock::new();
+
+/// Clear the pic resolution cache (call on vid_restart).
+pub fn clear_pic_cache() {
+    if let Some(cache) = PIC_RESOLVE_CACHE.get() {
+        cache.lock().unwrap().clear();
+    }
+}
+
 /// Find a 2D picture by name.
-/// If name doesn't start with '/' or '\', prepends "pics/" and appends ".pcx".
+/// If name doesn't start with '/' or '\', prepends "pics/" and tries multiple extensions.
+/// Tries extensions in order: .pcx, .tga, .png, .jpg
+/// Results are cached to avoid repeated filesystem lookups for failed extensions.
 pub unsafe fn draw_find_pic(name: &str) -> *mut Image {
+    let cache = PIC_RESOLVE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+
     if !name.starts_with('/') && !name.starts_with('\\') {
-        let fullname = format!("pics/{}.pcx", name);
-        vk_find_image(&fullname, ImageType::Pic)
+        // Check cache first
+        {
+            let map = cache.lock().unwrap();
+            if let Some(resolved) = map.get(name) {
+                return match resolved {
+                    Some(full_name) => vk_find_image(full_name, ImageType::Pic),
+                    None => std::ptr::null_mut(),
+                };
+            }
+        }
+
+        // Not cached — try multiple extensions in order: pcx, tga, png, jpg
+        let extensions = ["pcx", "tga", "png", "jpg"];
+        for ext in &extensions {
+            let fullname = format!("pics/{}.{}", name, ext);
+            let result = vk_find_image(&fullname, ImageType::Pic);
+            if !result.is_null() {
+                cache.lock().unwrap().insert(name.to_string(), Some(fullname));
+                return result;
+            }
+        }
+        cache.lock().unwrap().insert(name.to_string(), None);
+        std::ptr::null_mut()
     } else {
         vk_find_image(&name[1..], ImageType::Pic)
     }
@@ -930,23 +1068,23 @@ pub unsafe fn vk_free_unused_images_impl() {
     let reg_seq = registration_sequence();
 
     // never free r_notexture or particle textures
-    if !r_notexture.is_null() {
-        (*r_notexture).registration_sequence = reg_seq;
+    if !rfs().r_notexture.is_null() {
+        (*rfs().r_notexture).registration_sequence = reg_seq;
     }
 
-    for i in 0..numgltextures as usize {
-        if gltextures[i].registration_sequence == reg_seq {
+    for i in 0..rfs().numgltextures as usize {
+        if rfs().gltextures[i].registration_sequence == reg_seq {
             continue; // used this sequence
         }
-        if gltextures[i].registration_sequence == 0 {
+        if rfs().gltextures[i].registration_sequence == 0 {
             continue; // free image_t slot
         }
-        if gltextures[i].r#type == ImageType::Pic {
+        if rfs().gltextures[i].r#type == ImageType::Pic {
             continue; // don't free pics
         }
         // free it
-        qvk_delete_textures(1, &gltextures[i].texnum);
-        gltextures[i] = Image::default();
+        qvk_delete_textures(1, &rfs().gltextures[i].texnum);
+        rfs().gltextures[i] = Image::default();
     }
 }
 
@@ -954,30 +1092,32 @@ pub unsafe fn vk_free_unused_images_impl() {
 // Draw_GetPalette
 // ============================================================
 
-pub unsafe fn draw_get_palette() -> i32 {
-    // Load the palette from pics/colormap.pcx via the filesystem.
-    // The PCX file contains a 768-byte palette at the end (256 RGB triplets).
-    // Full PCX decoding is not yet implemented, but we can extract the palette
-    // from the raw file data: the last 769 bytes are 0x0C followed by 768 bytes of RGB.
-    if let Some(data) = myq2_common::files::fs_load_file("pics/colormap.pcx") {
-        if data.len() > 769 {
-            let pal_start = data.len() - 768;
-            // Verify the palette marker byte (0x0C) precedes the palette data
-            if data[pal_start - 1] == 0x0C {
-                let pal = &data[pal_start..];
-                for i in 0..256 {
-                    let r = pal[i * 3] as u32;
-                    let g = pal[i * 3 + 1] as u32;
-                    let b = pal[i * 3 + 2] as u32;
-                    d_8to24table[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+pub fn draw_get_palette() -> i32 {
+    D_8TO24TABLE.get_or_init(|| {
+        // Load the palette from pics/colormap.pcx via the filesystem.
+        // The PCX file contains a 768-byte palette at the end (256 RGB triplets).
+        if let Some(data) = myq2_common::files::fs_load_file("pics/colormap.pcx") {
+            if data.len() > 769 {
+                let pal_start = data.len() - 768;
+                // Verify the palette marker byte (0x0C) precedes the palette data
+                if data[pal_start - 1] == 0x0C {
+                    let pal = &data[pal_start..];
+                    let mut table = [0u32; 256];
+                    for i in 0..256 {
+                        let r = pal[i * 3] as u32;
+                        let g = pal[i * 3 + 1] as u32;
+                        let b = pal[i * 3 + 2] as u32;
+                        table[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+                    }
+                    // Entry 255 is transparent
+                    table[255] &= 0x00FFFFFF; // alpha = 0
+                    return table;
                 }
-                // Entry 255 is transparent
-                d_8to24table[255] &= 0x00FFFFFF; // alpha = 0
-                return 0;
             }
         }
-    }
-    vid_printf(PRINT_ALL, "Draw_GetPalette: couldn't load pics/colormap.pcx\n");
+        myq2_common::common::com_printf("Draw_GetPalette: couldn't load pics/colormap.pcx\n");
+        [0u32; 256] // fallback: all-black palette
+    });
     0
 }
 
@@ -990,29 +1130,39 @@ pub unsafe fn vk_init_images() {
 
     // init intensity conversions
     // In C: intensity = Cvar_Get("intensity", "2", 0); vk_state.inverse_intensity = 1.0 / intensity->value;
-    // Ensure the cvar exists with default "2", then read its current value.
-    let _ = myq2_common::cvar::cvar_get("intensity", "2", 0);
-    let intensity_val = myq2_common::cvar::cvar_variable_value("intensity");
-    vk_state.inverse_intensity = 1.0 / intensity_val;
+    // FIXME: During initialization, use default value to avoid CVAR_CTX deadlock
+    // The cvar will be properly registered and read later
+    let intensity_val = 2.0f32; // Default value
+    // TODO: Replace with proper cvar access after refactoring initialization
+    // let _ = myq2_common::cvar::cvar_get("intensity", "2", 0);
+    // let intensity_val = myq2_common::cvar::cvar_variable_value("intensity");
+    rfs().vk_state.inverse_intensity = 1.0 / intensity_val;
 
     draw_get_palette();
 
     // In C: vid_gamma->value
-    let g = crate::vk_rmain::VID_GAMMA.value;
+    let g = crate::vk_rmain::rcvars().vid_gamma.value;
 
-    for i in 0..256 {
-        // gammatable
-        if g == 1.0 {
-            gammatable[i] = i as u8;
-        } else {
-            let inf = (255.0 * ((i as f32 + 0.5) / 255.5f32).powf(g) + 0.5) as i32;
-            gammatable[i] = inf.clamp(0, 255) as u8;
+    GAMMA_INTENSITY.get_or_init(|| {
+        let mut tables = GammaIntensityTables {
+            gamma: [0u8; 256],
+            intensity: [0u8; 256],
+        };
+        for i in 0..256 {
+            // gammatable
+            if g == 1.0 {
+                tables.gamma[i] = i as u8;
+            } else {
+                let inf = (255.0 * ((i as f32 + 0.5) / 255.5f32).powf(g) + 0.5) as i32;
+                tables.gamma[i] = inf.clamp(0, 255) as u8;
+            }
+
+            // intensitytable
+            let j = (i as f32 * intensity_val) as i32;
+            tables.intensity[i] = j.min(255) as u8;
         }
-
-        // intensitytable
-        let j = (i as f32 * intensity_val) as i32;
-        intensitytable[i] = j.min(255) as u8;
-    }
+        tables
+    });
 }
 
 // ============================================================
@@ -1020,13 +1170,14 @@ pub unsafe fn vk_init_images() {
 // ============================================================
 
 pub unsafe fn vk_shutdown_images() {
-    for i in 0..numgltextures as usize {
-        if gltextures[i].registration_sequence == 0 {
+    clear_pic_cache();
+    for i in 0..rfs().numgltextures as usize {
+        if rfs().gltextures[i].registration_sequence == 0 {
             continue; // free image_t slot
         }
         // free it
-        qvk_delete_textures(1, &gltextures[i].texnum);
-        gltextures[i] = Image::default();
+        qvk_delete_textures(1, &rfs().gltextures[i].texnum);
+        rfs().gltextures[i] = Image::default();
     }
 }
 
@@ -1034,14 +1185,12 @@ pub unsafe fn vk_shutdown_images() {
 // Helper: registration_sequence accessor
 // ============================================================
 
-static mut REGISTRATION_SEQUENCE: i32 = 0;
-
-unsafe fn registration_sequence() -> i32 {
-    REGISTRATION_SEQUENCE
+fn registration_sequence() -> i32 {
+    imgs().registration_sequence
 }
 
-unsafe fn set_registration_sequence(val: i32) {
-    REGISTRATION_SEQUENCE = val;
+fn set_registration_sequence(val: i32) {
+    imgs().registration_sequence = val;
 }
 
 // ============================================================
@@ -1246,11 +1395,11 @@ pub unsafe fn vk_find_cached_image(name: &str) -> *mut Image {
         return std::ptr::null_mut();
     }
 
-    for i in 0..numgltextures as usize {
-        let img_name = get_image_name(&gltextures[i]);
+    for i in 0..rfs().numgltextures as usize {
+        let img_name = get_image_name(&rfs().gltextures[i]);
         if img_name == name {
-            gltextures[i].registration_sequence = registration_sequence();
-            return &mut gltextures[i] as *mut Image;
+            rfs().gltextures[i].registration_sequence = registration_sequence();
+            return &mut rfs().gltextures[i] as *mut Image;
         }
     }
 

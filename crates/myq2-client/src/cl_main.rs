@@ -185,6 +185,16 @@ pub fn cl_trigger_begin_map() {
     cl_execute_trigger_cmd(&CL_BEGINMAPCMD);
     // R1Q2/Q2Pro feature: auto-record when entering a map
     cl_check_autorecord();
+
+    // Close the console so the 3D world is visible.
+    // When the user typed "map xxx" in the console, key_dest is still Console.
+    // SCR_RunConsole will animate the console closed once key_dest is Game.
+    {
+        let mut cls = CLS.lock().unwrap();
+        if cls.key_dest == crate::client::KeyDest::Console {
+            cls.key_dest = crate::client::KeyDest::Game;
+        }
+    }
 }
 
 /// Called when the map is about to change.
@@ -352,10 +362,16 @@ pub fn cl_s_stop_all_sounds() {
 
 /// Public accessor for s_start_local_sound, usable from SYSTEM_FNS dispatch.
 pub fn cl_s_start_local_sound(name: &str) {
+    // Extract CL/CLS data first, then drop those locks before calling into
+    // the sound system.  Holding CL+CLS while the sound callback executes
+    // is fragile — any future callback that touches CL/CLS would deadlock.
+    let (playernum, realtime) = {
+        let cl = CL.lock().unwrap();
+        let cls = CLS.lock().unwrap();
+        (cl.playernum, cls.realtime as i32)
+    };
     let mut sound = SOUND_STATE.lock().unwrap();
-    let cl = CL.lock().unwrap();
-    let cls = CLS.lock().unwrap();
-    sound.s_start_local_sound(name, cl.playernum, cls.realtime as i32, &|path| {
+    sound.s_start_local_sound(name, playernum, realtime, &|path| {
         myq2_common::files::fs_load_file(path)
     });
 }
@@ -389,7 +405,11 @@ fn s_update(origin: &Vec3, forward: &Vec3, right: &Vec3, up: &Vec3) {
                     entnum,
                     &mut org,
                     &ent_state,
-                    None, // TODO: provide get_model_bounds callback when CM inline model lookup is available
+                    Some(&|model_idx: i32| {
+                        let name = format!("*{}", model_idx);
+                        let cm = myq2_common::cmodel::cm_inline_model(&name);
+                        Some((cm.mins, cm.maxs))
+                    }),
                 );
                 org
             },
@@ -412,15 +432,19 @@ fn scr_init() {
     crate::cl_scrn::scr_init(&mut scr);
 }
 fn scr_update_screen() {
-    let mut scr = SCR_STATE.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
-    let mut cl = CL.lock().unwrap();
-    crate::cl_scrn::scr_update_screen(&mut scr, &mut cls, &mut cl);
+    // Use console::scr_update_screen instead, which uses the same global state as key_event
+    crate::console::scr_update_screen();
 }
-fn scr_begin_loading_plaque() {
-    let mut scr = SCR_STATE.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
+pub fn scr_begin_loading_plaque() {
+    // Lock order: CL → CLS → SCR_STATE (canonical order, avoids deadlock
+    // with with_cl_cls and other code that locks CL before CLS).
+    // NOTE: This version must be used from server callbacks instead of
+    // console::scr_begin_loading_plaque(), because that version holds the
+    // CONSOLE_STATE lock, and com_printf → con_print also needs CONSOLE_STATE,
+    // causing a deadlock (std::sync::Mutex is not reentrant).
     let mut cl = CL.lock().unwrap();
+    let mut cls = CLS.lock().unwrap();
+    let mut scr = SCR_STATE.lock().unwrap();
     crate::cl_scrn::scr_begin_loading_plaque(&mut scr, &mut cls, &mut cl);
 }
 fn scr_end_loading_plaque(clear: bool) {
@@ -443,8 +467,9 @@ fn scr_finish_cinematic() {
     crate::cl_cin::scr_finish_cinematic(&mut cls, &cl);
 }
 fn scr_run_console() {
-    let mut scr = SCR_STATE.lock().unwrap();
+    // Lock order: CLS → SCR_STATE (consistent with canonical CL → CLS → SCR_STATE).
     let cls = CLS.lock().unwrap();
+    let mut scr = SCR_STATE.lock().unwrap();
     crate::cl_scrn::scr_run_console(&mut scr, &cls);
 }
 
@@ -460,8 +485,8 @@ fn sys_send_key_events() { crate::platform::sys_send_key_events(); }
 fn sys_app_activate() { crate::platform::sys_app_activate(); }
 
 // Wired to crate::menu
-fn m_add_to_server_list(_adr: &NetAdr, info: &str) {
-    crate::menu::m_add_to_server_list(info);
+fn m_add_to_server_list(adr: &NetAdr, info: &str) {
+    crate::menu::m_add_to_server_list(adr, info);
 }
 
 // Wired to crate::cl_view
@@ -498,7 +523,7 @@ fn cl_send_cmd() {
     let mut cvars = INPUT_CVARS.lock().unwrap();
     let mut timing = INPUT_TIMING.lock().unwrap();
     let sys_frame_time = sys_milliseconds() as u32;
-    let anykeydown = unsafe { crate::keys::ANYKEYDOWN != 0 };
+    let anykeydown = crate::keys::ks().anykeydown != 0;
     let cl_lightlevel = CL_LIGHTLEVEL.lock().unwrap().value;
     let mut userinfo_modified = USERINFO_MODIFIED.lock().unwrap();
 
@@ -575,35 +600,54 @@ fn cl_send_cmd() {
     cl.smoothing.weapon_prediction.cleanup(cls.realtime);
 }
 fn cl_parse_server_message() {
-    let mut cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
-    let mut con = PARSE_CON.lock().unwrap();
-    let mut net_message = NET_MESSAGE.lock().unwrap();
-    let mut cl_entities = CL_ENTITIES.lock().unwrap();
-    let cl_shownet_value = CL_SHOWNET.lock().unwrap().value;
-    let mut scr = SCR_STATE.lock().unwrap();
-    let mut fx = FX_STATE.lock().unwrap();
-    let mut tent = TENT_STATE.lock().unwrap();
-    let mut ent_state = ENT_STATE.lock().unwrap();
-    let mut sound = SOUND_STATE.lock().unwrap();
-    let mut proj = PROJ_STATE.lock().unwrap();
-    let mut ctx = crate::cl_parse::ParseContext {
-        scr: &mut scr,
-        fx: &mut fx,
-        tent: &mut tent,
-        ent_state: &mut ent_state,
-        sound: &mut sound,
-        proj_state: &mut proj,
-    };
-    crate::cl_parse::cl_parse_server_message(
-        &mut cl,
-        &mut cls,
-        &mut con,
-        &mut net_message,
-        &mut cl_entities,
-        cl_shownet_value,
-        &mut ctx,
-    );
+    // Collect deferred actions that must run after all locks are released.
+    // cbuf_execute() and trigger commands lock CL/CLS internally, so calling
+    // them while we hold these locks would deadlock.
+    let deferred_actions = {
+        let mut cl = CL.lock().unwrap();
+        let mut cls = CLS.lock().unwrap();
+        let mut con = PARSE_CON.lock().unwrap();
+        let mut net_message = NET_MESSAGE.lock().unwrap();
+        let mut cl_entities = CL_ENTITIES.lock().unwrap();
+        let cl_shownet_value = CL_SHOWNET.lock().unwrap().value;
+        let mut scr = SCR_STATE.lock().unwrap();
+        let mut fx = FX_STATE.lock().unwrap();
+        let mut tent = TENT_STATE.lock().unwrap();
+        let mut ent_state = ENT_STATE.lock().unwrap();
+        let mut sound = SOUND_STATE.lock().unwrap();
+        let mut proj = PROJ_STATE.lock().unwrap();
+        let mut ctx = crate::cl_parse::ParseContext {
+            scr: &mut scr,
+            fx: &mut fx,
+            tent: &mut tent,
+            ent_state: &mut ent_state,
+            sound: &mut sound,
+            proj_state: &mut proj,
+            deferred_actions: Vec::new(),
+        };
+        crate::cl_parse::cl_parse_server_message(
+            &mut cl,
+            &mut cls,
+            &mut con,
+            &mut net_message,
+            &mut cl_entities,
+            cl_shownet_value,
+            &mut ctx,
+        );
+        ctx.deferred_actions
+    }; // All lock guards dropped here
+
+    // Execute deferred actions now that no locks are held.
+    for action in deferred_actions {
+        match action {
+            crate::cl_parse::DeferredAction::CbufExecute => {
+                cbuf_execute();
+            }
+            crate::cl_parse::DeferredAction::TriggerChangeMap => {
+                cl_trigger_change_map();
+            }
+        }
+    }
 }
 fn cl_parse_clientinfo(player: i32) {
     let mut cl = CL.lock().unwrap();
@@ -623,19 +667,50 @@ fn cl_clear_tents() {
 }
 
 fn cl_register_sounds() {
-    let mut cl = CL.lock().unwrap();
-    let mut sound = SOUND_STATE.lock().unwrap();
-    let mut tent = TENT_STATE.lock().unwrap();
-    crate::cl_parse::cl_register_sounds(&mut cl, &mut sound, &mut tent);
+    // Phase 1: s_begin_registration + register tent sounds (uses global SOUND_STATE lock internally)
+    {
+        let mut sound = SOUND_STATE.lock().unwrap();
+        sound.s_begin_registration();
+    }
+    {
+        let mut tent = TENT_STATE.lock().unwrap();
+        // cl_register_tent_sounds_on calls s_register_sound via global lock path,
+        // so SOUND_STATE must NOT be held here.
+        crate::cl_tent::cl_register_tent_sounds_on(&mut tent);
+    }
+
+    // Phase 2: register configstring sounds (needs CL for configstrings, SOUND_STATE for registration)
+    {
+        let mut cl = CL.lock().unwrap();
+        let mut sound = SOUND_STATE.lock().unwrap();
+        let loader = crate::snd_dma::snd_load_file;
+        for i in 1..MAX_SOUNDS {
+            if cl.configstrings[CS_SOUNDS + i].is_empty() {
+                break;
+            }
+            cl.sound_precache[i] = sound.s_register_sound(
+                &cl.configstrings[CS_SOUNDS + i],
+                &loader,
+            ).unwrap_or(0) as i32;
+        }
+    }
+
+    // Phase 3: s_end_registration
+    {
+        let mut sound = SOUND_STATE.lock().unwrap();
+        sound.s_end_registration(crate::snd_dma::snd_load_file);
+    }
 }
 fn cl_prep_refresh() {
-    let mut view = VIEW_STATE.lock().unwrap();
-    let mut scr = SCR_STATE.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
+    // Lock order: CL → CLS → SCR_STATE → VIEW_STATE (canonical order to avoid deadlock)
     let mut cl = CL.lock().unwrap();
-    // SAFETY: VIDDEF is a static global only mutated during vid_init (single-threaded init)
-    let viddef = unsafe { &crate::console::VIDDEF };
-    crate::cl_view::cl_prep_refresh(&mut view, &mut scr, &mut cls, &mut cl, viddef);
+    let mut cls = CLS.lock().unwrap();
+    let mut scr = SCR_STATE.lock().unwrap();
+    let mut view = VIEW_STATE.lock().unwrap();
+    // Copy viddef from console state and drop the lock immediately to avoid deadlock:
+    // cl_prep_refresh → com_printf → con_print → cs() would re-lock CONSOLE_STATE.
+    let viddef = crate::console::cs().viddef;
+    crate::cl_view::cl_prep_refresh(&mut view, &mut scr, &mut cls, &mut cl, &viddef);
 }
 
 fn cl_predict_movement() {
@@ -1193,7 +1268,7 @@ pub(crate) static CL: LazyLock<Mutex<crate::client::ClientState>> = LazyLock::ne
 pub(crate) static CLS: LazyLock<Mutex<crate::client::ClientStatic>> = LazyLock::new(|| Mutex::new(crate::client::ClientStatic::default()));
 pub(crate) static CL_ENTITIES: LazyLock<Mutex<Vec<crate::client::CEntity>>> = LazyLock::new(|| Mutex::new(vec![crate::client::CEntity::default(); MAX_EDICTS]));
 static CL_PARSE_ENTITIES: LazyLock<Mutex<Vec<EntityState>>> = LazyLock::new(|| Mutex::new(vec![EntityState::default(); MAX_PARSE_ENTITIES]));
-static NET_MESSAGE: LazyLock<Mutex<SizeBuf>> = LazyLock::new(|| Mutex::new(SizeBuf::new(MAX_MSGLEN as i32)));
+pub(crate) static NET_MESSAGE: LazyLock<Mutex<SizeBuf>> = LazyLock::new(|| Mutex::new(SizeBuf::new(MAX_MSGLEN as i32)));
 static NET_FROM: LazyLock<Mutex<NetAdr>> = LazyLock::new(|| Mutex::new(NetAdr::default()));
 
 /// Global client timing state for decoupled frame processing (cl_async feature)
@@ -1345,7 +1420,7 @@ static GENDER: LazyLock<Mutex<CvarHandle>> = LazyLock::new(|| Mutex::new(CvarHan
 static GENDER_AUTO: LazyLock<Mutex<CvarHandle>> = LazyLock::new(|| Mutex::new(CvarHandle::default()));
 
 // Sub-system state globals
-static SCR_STATE: LazyLock<Mutex<ScrState>> = LazyLock::new(|| Mutex::new(ScrState::default()));
+pub(crate) static SCR_STATE: LazyLock<Mutex<ScrState>> = LazyLock::new(|| Mutex::new(ScrState::default()));
 pub(crate) static VIEW_STATE: LazyLock<Mutex<ViewState>> = LazyLock::new(|| Mutex::new(ViewState::default()));
 pub(crate) static FX_STATE: LazyLock<Mutex<ClFxState>> = LazyLock::new(|| Mutex::new(ClFxState::default()));
 pub(crate) static TENT_STATE: LazyLock<Mutex<TEntState>> = LazyLock::new(|| Mutex::new(TEntState::default()));
@@ -1419,7 +1494,7 @@ fn generate_demo_name() -> String {
     let mut remaining_days = days;
 
     loop {
-        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+        let days_in_year = if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) {
             366
         } else {
             365
@@ -1432,7 +1507,7 @@ fn generate_demo_name() -> String {
     }
 
     // Month/day calculation (simplified)
-    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let is_leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
     let days_in_months: [u64; 12] = if is_leap {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
@@ -1539,7 +1614,7 @@ pub fn cl_stop_f() {
 // Begins recording a demo from the current position
 // ============================================================
 
-pub fn cl_record_f() {
+pub fn cl_record_f(ctx: &mut myq2_common::cmd::CmdContext) {
     {
         let cls = CLS.lock().unwrap();
         if cls.demo_recording {
@@ -1552,19 +1627,17 @@ pub fn cl_record_f() {
         }
     }
 
-    let cl = CL.lock().unwrap();
-
     // R1Q2/Q2Pro feature: parse -z flag for compressed demo recording
     let mut compressed = false;
     let mut demo_name = String::new();
-    let argc = cmd_argc();
+    let argc = ctx.cmd_argc;
 
     for i in 1..argc {
-        let arg = cmd_argv(i);
+        let arg = ctx.cmd_argv(i);
         if arg == "-z" {
             compressed = true;
         } else if demo_name.is_empty() {
-            demo_name = arg;
+            demo_name = arg.to_string();
         }
     }
 
@@ -1596,6 +1669,8 @@ pub fn cl_record_f() {
         }
     };
 
+    // Lock order: CL → CLS (canonical order to avoid deadlock)
+    let cl = CL.lock().unwrap();
     let mut cls = CLS.lock().unwrap();
     *DEMO_FILE.lock().unwrap() = Some(BufWriter::new(file));
     cls.demo_recording = true;
@@ -1664,7 +1739,7 @@ pub fn cl_record_f() {
 // Begin recording while playing back a demo (re-recording)
 // ============================================================
 
-pub fn cl_record_from_demo_f() {
+pub fn cl_record_from_demo_f(ctx: &mut myq2_common::cmd::CmdContext) {
     {
         let cls = CLS.lock().unwrap();
         if cls.demo_recording {
@@ -1681,14 +1756,14 @@ pub fn cl_record_from_demo_f() {
     // R1Q2/Q2Pro feature: parse -z flag for compressed demo recording
     let mut compressed = false;
     let mut demo_name = String::new();
-    let argc = cmd_argc();
+    let argc = ctx.cmd_argc;
 
     for i in 1..argc {
-        let arg = cmd_argv(i);
+        let arg = ctx.cmd_argv(i);
         if arg == "-z" {
             compressed = true;
         } else if demo_name.is_empty() {
-            demo_name = arg;
+            demo_name = arg.to_string();
         }
     }
 
@@ -1699,8 +1774,6 @@ pub fn cl_record_from_demo_f() {
 
     // Set compression flag
     *DEMO_COMPRESSED.lock().unwrap() = compressed;
-
-    let cl = CL.lock().unwrap();
 
     // open the demo file
     // Use .dm2z extension for compressed demos (R1Q2/Q2Pro convention)
@@ -1722,6 +1795,8 @@ pub fn cl_record_from_demo_f() {
         }
     };
 
+    // Lock order: CL → CLS (canonical order to avoid deadlock)
+    let cl = CL.lock().unwrap();
     let mut cls = CLS.lock().unwrap();
     *DEMO_FILE.lock().unwrap() = Some(BufWriter::new(file));
     cls.demo_recording = true;
@@ -1977,23 +2052,25 @@ fn cl_process_chat_queue() {
 // CL_Setenv_f
 // ============================================================
 
-pub fn cl_setenv_f() {
-    let argc = cmd_argc();
+pub fn cl_setenv_f(ctx: &mut myq2_common::cmd::CmdContext) {
+    let argc = ctx.cmd_argc;
 
     if argc > 2 {
-        let mut buffer = cmd_argv(1);
+        let var_name = ctx.cmd_argv(1).to_string();
+        let mut buffer = var_name.clone();
         buffer.push('=');
 
         for i in 2..argc {
-            buffer.push_str(&cmd_argv(i));
+            buffer.push_str(ctx.cmd_argv(i));
             buffer.push(' ');
         }
 
-        std::env::set_var(cmd_argv(1).as_str(), &buffer[cmd_argv(1).len() + 1..]);
+        std::env::set_var(&var_name, &buffer[var_name.len() + 1..]);
     } else if argc == 2 {
-        match std::env::var(cmd_argv(1).as_str()) {
-            Ok(val) => com_printf(&format!("{}={}\n", cmd_argv(1), val)),
-            Err(_) => com_printf(&format!("{} undefined\n", cmd_argv(1))),
+        let var_name = ctx.cmd_argv(1);
+        match std::env::var(var_name) {
+            Ok(val) => com_printf(&format!("{}={}\n", var_name, val)),
+            Err(_) => com_printf(&format!("{} undefined\n", var_name)),
         }
     }
 }
@@ -2002,19 +2079,68 @@ pub fn cl_setenv_f() {
 // CL_ForwardToServer_f
 // ============================================================
 
-pub fn cl_forward_to_server_f() {
+pub fn cl_forward_to_server_f(ctx: &mut myq2_common::cmd::CmdContext) {
     let mut cls = CLS.lock().unwrap();
 
     if cls.state != crate::client::ConnState::Connected && cls.state != crate::client::ConnState::Active {
-        com_printf(&format!("Can't \"{}\", not connected\n", cmd_argv(0)));
+        com_printf(&format!("Can't \"{}\", not connected\n", ctx.cmd_argv(0)));
         return;
     }
 
     // don't forward the first argument
-    if cmd_argc() > 1 {
+    if ctx.cmd_argc > 1 {
         msg_write_byte(&mut cls.netchan.message, CLC_STRINGCMD.into());
-        cls.netchan.message.print(&cmd_args());
+        cls.netchan.message.print(ctx.cmd_args());
     }
+}
+
+// ============================================================
+// CL_Map_f
+//
+// Client-side handler for the "map" command.
+// Starts a local server if needed, then forwards the command.
+// ============================================================
+
+pub fn cl_map_f(ctx: &mut myq2_common::cmd::CmdContext) {
+    // Check if we have a map name argument
+    if ctx.cmd_argc < 2 {
+        com_printf("usage: map <mapname>\n");
+        return;
+    }
+
+    let mapname = ctx.cmd_argv(1).to_string(); // Clone to avoid borrow conflicts
+
+    // Check if we're already connecting/connected - prevent infinite loop
+    {
+        let cls = CLS.lock().unwrap();
+        if cls.state == crate::client::ConnState::Connecting || cls.state == crate::client::ConnState::Connected {
+            // We're already connected or connecting, just forward the command to the server
+            drop(cls);
+            cl_forward_to_server_f(ctx);
+            return;
+        }
+    }
+
+    // Disconnect from any current server
+    cl_disconnect();
+
+    com_printf(&format!("Starting local server with map: {}\n", mapname));
+
+    // Check if map file exists before starting load
+    let bsp_path = format!("maps/{}.bsp", mapname);
+    if myq2_common::files::fs_file_length(&bsp_path).is_none() {
+        com_printf(&format!("Can't find {}\n", bsp_path));
+        return;
+    }
+
+    // Call server map loading via platform dispatch (prevents infinite loop from re-parsing command)
+    crate::platform::sv_start_map(&mapname);
+
+    // Defer remaining commands in the buffer so they don't execute during map loading.
+    // This is called here (not in sv_map) because we already hold CMD_CTX lock
+    // via cbuf_execute → cmd_execute_string, and the global cbuf_copy_to_defer()
+    // would deadlock trying to re-acquire it.
+    ctx.cbuf_copy_to_defer();
 }
 
 // ============================================================
@@ -2131,12 +2257,18 @@ pub fn cl_check_for_resend() {
         (cls.state, cls.realtime, cls.connect_time, cls.servername.clone())
     };
 
+    let server_state = com_server_state();
+
     // if the local server is running and we aren't then connect
-    if state == crate::client::ConnState::Disconnected && com_server_state() != 0 {
+    // Check for server_state >= 2 (Game) instead of != 0, because chunked
+    // map loading sets state to Loading (1) during SpawningEntities phase
+    // before the server is ready to accept connections.
+    if state == crate::client::ConnState::Disconnected && server_state >= 2 {
         {
             let mut cls = CLS.lock().unwrap();
             cls.state = crate::client::ConnState::Connecting;
             cls.servername = "localhost".to_string();
+            cls.connect_time = cls.realtime as f32; // set connect_time for resend tracking
         }
         // we don't need a challenge on the localhost
         cl_send_connect_packet();
@@ -2175,8 +2307,8 @@ pub fn cl_check_for_resend() {
 // CL_Connect_f
 // ============================================================
 
-pub fn cl_connect_f() {
-    if cmd_argc() != 2 {
+pub fn cl_connect_f(ctx: &mut myq2_common::cmd::CmdContext) {
+    if ctx.cmd_argc != 2 {
         com_printf("usage: connect <server>\n");
         return;
     }
@@ -2188,7 +2320,7 @@ pub fn cl_connect_f() {
         cl_disconnect();
     }
 
-    let server = cmd_argv(1);
+    let server = ctx.cmd_argv(1).to_string();
 
     net_config(true); // allow remote
 
@@ -2208,7 +2340,7 @@ pub fn cl_connect_f() {
 // Send the rest of the command line over as an unconnected command.
 // ============================================================
 
-pub fn cl_rcon_f() {
+pub fn cl_rcon_f(ctx: &mut myq2_common::cmd::CmdContext) {
     let rcon_password = RCON_CLIENT_PASSWORD.lock().unwrap().string.clone();
 
     if rcon_password.is_empty() {
@@ -2224,8 +2356,8 @@ pub fn cl_rcon_f() {
     message.extend_from_slice(rcon_password.as_bytes());
     message.push(b' ');
 
-    for i in 1..cmd_argc() {
-        message.extend_from_slice(cmd_argv(i).as_bytes());
+    for i in 1..ctx.cmd_argc {
+        message.extend_from_slice(ctx.cmd_argv(i).as_bytes());
         message.push(b' ');
     }
     message.push(0); // null terminator
@@ -2526,8 +2658,8 @@ static AUTO_RECONNECT_STATE: LazyLock<Mutex<AutoReconnectState>> =
 // Contents allows \n escape character
 // ============================================================
 
-pub fn cl_packet_f() {
-    if cmd_argc() != 3 {
+pub fn cl_packet_f(ctx: &mut myq2_common::cmd::CmdContext) {
+    if ctx.cmd_argc != 3 {
         com_printf("packet <destination> <contents>\n");
         return;
     }
@@ -2535,7 +2667,8 @@ pub fn cl_packet_f() {
     net_config(true); // allow remote
 
     let mut adr = NetAdr::default();
-    if !net_string_to_adr(&cmd_argv(1), &mut adr) {
+    let dest = ctx.cmd_argv(1);
+    if !net_string_to_adr(dest, &mut adr) {
         com_printf("Bad address\n");
         return;
     }
@@ -2543,7 +2676,7 @@ pub fn cl_packet_f() {
         adr.port = PORT_SERVER.to_be();
     }
 
-    let input = cmd_argv(2);
+    let input = ctx.cmd_argv(2);
     let mut send: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0xFF];
 
     let bytes = input.as_bytes();
@@ -2657,7 +2790,7 @@ pub fn cl_ping_servers_f() {
     if noudp.value == 0.0 {
         adr.adr_type = NetAdrType::Broadcast;
         adr.port = PORT_SERVER.to_be();
-        netchan_out_of_band_print(NS_CLIENT, adr.clone(), &format!("info {}", PROTOCOL_VERSION));
+        netchan_out_of_band_print(NS_CLIENT, adr, &format!("info {}", PROTOCOL_VERSION));
     }
 
     // send a packet to each address book entry
@@ -2675,7 +2808,7 @@ pub fn cl_ping_servers_f() {
         if adr.port == 0 {
             adr.port = PORT_SERVER.to_be();
         }
-        netchan_out_of_band_print(NS_CLIENT, adr.clone(), &format!("info {}", PROTOCOL_VERSION));
+        netchan_out_of_band_print(NS_CLIENT, adr, &format!("info {}", PROTOCOL_VERSION));
     }
 }
 
@@ -2738,8 +2871,9 @@ pub fn cl_connectionless_packet() {
             return;
         }
         let net_from = NET_FROM.lock().unwrap();
-        let qport = cls.quake_port;
-        netchan_setup(NS_CLIENT, &mut cls.netchan, net_from.clone(), qport);
+        let qport = cvar_variable_value("qport") as i32;
+        cls.quake_port = qport;
+        netchan_setup(NS_CLIENT, &mut cls.netchan, *net_from, qport);
         msg_write_char(&mut cls.netchan.message, CLC_STRINGCMD.into());
         msg_write_string(&mut cls.netchan.message, "new");
         cls.state = crate::client::ConnState::Connected;
@@ -2784,7 +2918,7 @@ pub fn cl_connectionless_packet() {
     // ping from somewhere
     if c == "ping" {
         let net_from = NET_FROM.lock().unwrap();
-        netchan_out_of_band_print(NS_CLIENT, net_from.clone(), "ack");
+        netchan_out_of_band_print(NS_CLIENT, *net_from, "ack");
         return;
     }
 
@@ -2813,7 +2947,7 @@ pub fn cl_connectionless_packet() {
     // echo request from server
     if c == "echo" {
         let net_from = NET_FROM.lock().unwrap();
-        netchan_out_of_band_print(NS_CLIENT, net_from.clone(), &cmd_argv(1));
+        netchan_out_of_band_print(NS_CLIENT, *net_from, &cmd_argv(1));
         return;
     }
 
@@ -3058,6 +3192,16 @@ pub fn cl_request_next_download() {
         }
     }
 
+    // Skip downloads entirely on listen servers — all files are already local.
+    // Without this, the client sends download requests to itself which never
+    // complete because the server can't process them while the client blocks.
+    if myq2_common::common::com_server_state() != 0 {
+        let mut precache_check = PRECACHE_CHECK.lock().unwrap();
+        // Jump past all download sections to the final registration phase
+        *precache_check = (TEXTURE_CNT + 999) as i32;
+        drop(precache_check);
+    }
+
     let mut precache_check = PRECACHE_CHECK.lock().unwrap();
 
     if !allow_download_value() && *precache_check < ENV_CNT as i32 {
@@ -3292,15 +3436,18 @@ pub fn cl_request_next_download() {
 
         let mut map_checksum: u32 = 0;
         let cl = CL.lock().unwrap();
-        cm_load_map(&cl.configstrings[CS_MODELS + 1], true, &mut map_checksum);
+        let map_name = cl.configstrings[CS_MODELS + 1].clone();
+        let expected_str = cl.configstrings[CS_MAPCHECKSUM].clone();
+        drop(cl); // release CL lock before cm_load_map
+        cm_load_map(&map_name, true, &mut map_checksum);
 
-        let expected: u32 = cl.configstrings[CS_MAPCHECKSUM].parse().unwrap_or(0);
+        let expected: u32 = expected_str.parse().unwrap_or(0);
         if map_checksum != expected {
             com_error(
                 ERR_DROP,
                 &format!(
                     "Local map version differs from server: {} != '{}'\n",
-                    map_checksum, cl.configstrings[CS_MAPCHECKSUM]
+                    map_checksum, expected_str
                 ),
             );
         }
@@ -3366,9 +3513,9 @@ pub fn cl_request_next_download() {
 // The server will send this command right before allowing the client into the server
 // ============================================================
 
-pub fn cl_precache_f() {
+pub fn cl_precache_f(ctx: &mut myq2_common::cmd::CmdContext) {
     // Yet another hack to let old demos work -- the old precache sequence
-    if cmd_argc() < 2 {
+    if ctx.cmd_argc < 2 {
         let mut map_checksum: u32 = 0;
         let cl = CL.lock().unwrap();
         cm_load_map(&cl.configstrings[CS_MODELS + 1], true, &mut map_checksum);
@@ -3378,7 +3525,7 @@ pub fn cl_precache_f() {
     }
 
     *PRECACHE_CHECK.lock().unwrap() = CS_MODELS as i32;
-    *PRECACHE_SPAWNCOUNT.lock().unwrap() = cmd_argv(1).parse().unwrap_or(0);
+    *PRECACHE_SPAWNCOUNT.lock().unwrap() = ctx.cmd_argv(1).parse().unwrap_or(0);
     *PRECACHE_MODEL.lock().unwrap() = None;
     *PRECACHE_MODEL_SKIN.lock().unwrap() = 0;
 
@@ -3392,7 +3539,7 @@ pub fn cl_precache_f() {
 // mattx86 -- updated and added as a console command.
 // ============================================================
 
-pub fn cl_write_configuration_f() {
+fn cl_write_configuration_internal(filename: Option<&str>) {
     {
         let cls = CLS.lock().unwrap();
         if cls.state == crate::client::ConnState::Uninitialized {
@@ -3400,11 +3547,7 @@ pub fn cl_write_configuration_f() {
         }
     }
 
-    let mut file_name = if cmd_argc() == 2 {
-        cmd_argv(1)
-    } else {
-        "config".to_string()
-    };
+    let mut file_name = filename.unwrap_or("config").to_string();
 
     if !wildcardfit("*.cfg", &file_name) {
         file_name.push_str(".cfg");
@@ -3456,15 +3599,30 @@ pub fn cl_write_configuration_f() {
     );
 }
 
+pub fn cl_write_configuration_f(ctx: &mut myq2_common::cmd::CmdContext) {
+    let filename = if ctx.cmd_argc == 2 {
+        Some(ctx.cmd_argv(1))
+    } else {
+        None
+    };
+    cl_write_configuration_internal(filename);
+}
+
 // ============================================================
 // CL_InitLocal
 // ============================================================
 
 pub fn cl_init_local() {
+    // Initialize both CLS instances (CLS_PTR used by console/UI, CLS Mutex used by connection code)
+    let now = sys_milliseconds();
+    unsafe {
+        (*crate::console::CLS_PTR).state = crate::client::ConnState::Disconnected;
+        (*crate::console::CLS_PTR).realtime = now;
+    }
     {
         let mut cls = CLS.lock().unwrap();
         cls.state = crate::client::ConnState::Disconnected;
-        cls.realtime = sys_milliseconds();
+        cls.realtime = now;
     }
 
     cl_init_input(INPUT_BUTTONS.clone());
@@ -3598,7 +3756,7 @@ pub fn cl_init_local() {
     *CL_ADAPTIVE_INTERP.lock().unwrap() = cvar_get("cl_adaptive_interp", "1", CVAR_ARCHIVE);
 
     // register our commands
-    cmd_add_command("cmd", Some(cl_forward_to_server_f));
+    myq2_common::cmd::cmd_add_command("cmd", Some(Box::new(cl_forward_to_server_f)));
     cmd_add_command("pause", Some(cl_pause_f));
     cmd_add_command("pingservers", Some(cl_ping_servers_f));
     cmd_add_command("skins", Some(cl_skins_f));
@@ -3608,8 +3766,8 @@ pub fn cl_init_local() {
 
     cmd_add_command("changing", Some(cl_changing_f));
     cmd_add_command("disconnect", Some(cl_disconnect_f));
-    cmd_add_command("record", Some(cl_record_f));
-    cmd_add_command("record_from_demo", Some(cl_record_from_demo_f)); // R1Q2/Q2Pro feature
+    myq2_common::cmd::cmd_add_command("record", Some(Box::new(cl_record_f)));
+    myq2_common::cmd::cmd_add_command("record_from_demo", Some(Box::new(cl_record_from_demo_f))); // R1Q2/Q2Pro feature
     cmd_add_command("stop", Some(cl_stop_f));
 
     cmd_add_command("quit", Some(cl_quit_f));
@@ -3618,24 +3776,29 @@ pub fn cl_init_local() {
     cmd_add_command("cl_netstats", Some(cl_netstats_f));
     cmd_add_command("cl_smooth", Some(cl_smooth_f));
 
-    cmd_add_command("connect", Some(cl_connect_f));
+    myq2_common::cmd::cmd_add_command("connect", Some(Box::new(cl_connect_f)));
     cmd_add_command("reconnect", Some(cl_reconnect_f));
 
-    cmd_add_command("savecfg", Some(cl_write_configuration_f));
+    myq2_common::cmd::cmd_add_command("savecfg", Some(Box::new(cl_write_configuration_f)));
 
-    cmd_add_command("rcon", Some(cl_rcon_f));
+    myq2_common::cmd::cmd_add_command("rcon", Some(Box::new(cl_rcon_f)));
 
     // Cmd_AddCommand ("packet", CL_Packet_f); // this is dangerous to leave in
 
-    cmd_add_command("setenv", Some(cl_setenv_f));
+    myq2_common::cmd::cmd_add_command("setenv", Some(Box::new(cl_setenv_f)));
 
-    cmd_add_command("precache", Some(cl_precache_f));
+    myq2_common::cmd::cmd_add_command("precache", Some(Box::new(cl_precache_f)));
 
     cmd_add_command("download", Some(cl_download_f));
 
     // forward to server commands
     // the only thing this does is allow command completion to work
     // all unknown commands are automatically forwarded to the server
+
+    // Register client-side "map" command handler to auto-start local server
+    myq2_common::cmd::cmd_remove_command("map"); // Remove server's forward-only registration
+    myq2_common::cmd::cmd_add_command("map", Some(Box::new(cl_map_f)));
+
     cmd_add_command("wave", None);
     cmd_add_command("inven", None);
     cmd_add_command("kill", None);
@@ -3892,7 +4055,6 @@ pub fn cl_frame(_msec: i32) {
         }
         cl_send_command();
     }
-
     // ============================================================
     // PHYSICS: Run at cl_maxfps rate
     // ============================================================
@@ -3969,10 +4131,12 @@ pub fn cl_frame(_msec: i32) {
         }
 
         // Update audio before rendering
-        {
+        // Get sound data from CL, then drop lock before calling s_update to avoid deadlock
+        let (vieworg, v_forward, v_right, v_up) = {
             let cl = CL.lock().unwrap();
-            s_update(&cl.refdef.vieworg, &cl.v_forward, &cl.v_right, &cl.v_up);
-        }
+            (cl.refdef.vieworg, cl.v_forward, cl.v_right, cl.v_up)
+        };
+        s_update(&vieworg, &v_forward, &v_right, &v_up);
 
         // Check for renderer changes
         vid_check_changes();
@@ -3990,10 +4154,12 @@ pub fn cl_frame(_msec: i32) {
         scr_update_screen();
 
         // Update audio after rendering
-        {
+        // Get sound data from CL, then drop lock before calling s_update to avoid deadlock
+        let (vieworg, v_forward, v_right, v_up) = {
             let cl = CL.lock().unwrap();
-            s_update(&cl.refdef.vieworg, &cl.v_forward, &cl.v_right, &cl.v_up);
-        }
+            (cl.refdef.vieworg, cl.v_forward, cl.v_right, cl.v_up)
+        };
+        s_update(&vieworg, &v_forward, &v_right, &v_up);
 
         // Advance local effects
         cl_run_dlights();
@@ -4031,15 +4197,22 @@ pub fn cl_frame(_msec: i32) {
 // ============================================================
 
 pub fn cl_init() {
+    com_printf("CL_Init: ENTERED\n");
     if dedicated_value() {
+        com_printf("CL_Init: Dedicated server, skipping client init\n");
         return; // nothing running on the client
     }
 
     // all archived variables will now be loaded
 
     // mattx86: console_init
+    com_printf("CL_Init: Calling con_init\n");
     con_init();
 
+    com_printf("CL_Init: Calling key_init\n");
+    crate::keys::key_init();
+
+    com_printf("CL_Init: Calling vid_init\n");
     vid_init();
     s_init(); // sound must be initialized after window is created
 
@@ -4059,6 +4232,17 @@ pub fn cl_init() {
 
     let _ = myq2_common::files::fs_exec_autoexec();
     cbuf_execute();
+
+    // Enable screen drawing now that initialization is complete
+    com_printf("cl_init: enabling screen (disable_screen=0.0)\n");
+    CLS.lock().unwrap().disable_screen = 0.0;
+
+    // Register console print callback NOW that all subsystems are initialized
+    // This routes future Com_Printf calls to the console display
+    myq2_common::common::register_con_print(|msg| {
+        crate::console::con_print(msg);
+    });
+    com_printf("cl_init: console print callback registered\n");
 }
 
 // ============================================================
@@ -4078,7 +4262,7 @@ pub fn cl_shutdown() {
     *isdown = true;
     drop(isdown);
 
-    cl_write_configuration_f();
+    cl_write_configuration_internal(None);
 
     s_shutdown();
     in_shutdown();

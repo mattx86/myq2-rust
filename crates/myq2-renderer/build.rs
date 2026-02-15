@@ -174,26 +174,39 @@ fn find_glslc() -> Option<PathBuf> {
     }
 
     // Common Windows install paths
-    let common_paths = [
-        r"C:\VulkanSDK",
-    ];
-    for base in &common_paths {
-        let base_path = Path::new(base);
-        if base_path.exists() {
-            // Find newest SDK version directory
-            if let Ok(entries) = fs::read_dir(base_path) {
-                let mut versions: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                    .collect();
-                versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    #[cfg(target_os = "windows")]
+    {
+        let common_paths = [
+            r"C:\VulkanSDK",
+        ];
+        for base in &common_paths {
+            let base_path = Path::new(base);
+            if base_path.exists() {
+                // Find newest SDK version directory
+                if let Ok(entries) = fs::read_dir(base_path) {
+                    let mut versions: Vec<_> = entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                        .collect();
+                    versions.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
 
-                for entry in versions {
-                    let glslc_path = entry.path().join("Bin").join("glslc.exe");
-                    if glslc_path.exists() {
-                        return Some(glslc_path);
+                    for entry in versions {
+                        let glslc_path = entry.path().join("Bin").join("glslc.exe");
+                        if glslc_path.exists() {
+                            return Some(glslc_path);
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    // Common Linux system paths
+    #[cfg(target_os = "linux")]
+    {
+        for path in ["/usr/bin/glslc", "/usr/local/bin/glslc"] {
+            if Path::new(path).exists() {
+                return Some(PathBuf::from(path));
             }
         }
     }

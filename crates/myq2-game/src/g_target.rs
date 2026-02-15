@@ -1137,8 +1137,6 @@ pub const THINK_TARGET_EARTHQUAKE: usize = crate::dispatch::THINK_TARGET_EARTHQU
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::g_local::*;
-    use crate::game::Solid;
 
     fn init_test_gi() {
         crate::game_import::set_gi(Box::new(crate::game_import::StubGameImport));

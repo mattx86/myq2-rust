@@ -2618,7 +2618,7 @@ impl FootstepPrediction {
 
         // Check if we've traveled enough for a footstep
         if state.distance_accumulator >= self.step_distance {
-            state.distance_accumulator = state.distance_accumulator % self.step_distance;
+            state.distance_accumulator %= self.step_distance;
             state.last_footstep_time = current_time;
             state.pending_prediction = true;
             state.pending_time = current_time;

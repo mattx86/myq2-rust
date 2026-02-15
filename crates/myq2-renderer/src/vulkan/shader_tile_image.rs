@@ -416,8 +416,8 @@ impl ShaderTileImageManager {
 
     /// Calculate number of tiles for resolution.
     pub fn calculate_tile_count(&self, width: u32, height: u32) -> (u32, u32) {
-        let tiles_x = (width + self.tile_properties.tile_width - 1) / self.tile_properties.tile_width;
-        let tiles_y = (height + self.tile_properties.tile_height - 1) / self.tile_properties.tile_height;
+        let tiles_x = width.div_ceil(self.tile_properties.tile_width);
+        let tiles_y = height.div_ceil(self.tile_properties.tile_height);
         (tiles_x, tiles_y)
     }
 
@@ -445,9 +445,9 @@ impl ShaderTileImageManager {
 
         // With tile image, reads stay on-chip instead of going to memory
         let pixels = width as u64 * height as u64;
-        let saved_reads = pixels * reads_per_pixel as u64 * bytes_per_pixel as u64;
+        
 
-        saved_reads
+        pixels * reads_per_pixel as u64 * bytes_per_pixel as u64
     }
 }
 

@@ -2,13 +2,17 @@
 
 layout(location = 0) in vec3 a_Position;
 
-layout(std140, set = 3, binding = 0) uniform DlightUniforms {
-    mat4 u_ModelViewProjection;
-};
+layout(push_constant) uniform PushConstants {
+    mat4 u_ModelViewProjection;  // 64 bytes
+    vec3 u_LightOrigin;          // 12 bytes
+    float u_LightRadius;         // 4 bytes
+    vec3 u_LightColor;           // 12 bytes
+    float _pad;                  // 4 bytes
+} pc;                            // Total: 96 bytes
 
 layout(location = 0) out vec3 v_Position;
 
 void main() {
-    gl_Position = u_ModelViewProjection * vec4(a_Position, 1.0);
+    gl_Position = pc.u_ModelViewProjection * vec4(a_Position, 1.0);
     v_Position = a_Position;
 }

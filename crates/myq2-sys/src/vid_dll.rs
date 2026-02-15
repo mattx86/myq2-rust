@@ -137,19 +137,20 @@ impl VidState {
 // Win32 helper stubs
 // ============================================================
 
-/// WIN_DisableAltTab — stub.
+/// WIN_DisableAltTab — no-op on modern Windows.
+/// The original Win95/NT RegisterHotKey approach is obsolete; modern games use
+/// borderless fullscreen or the OS's built-in game mode instead.
 pub fn win_disable_alt_tab(vid: &mut VidState) {
     if vid.s_alttab_disabled {
         return;
     }
-    // Stub: RegisterHotKey / SystemParametersInfo
     vid.s_alttab_disabled = true;
 }
 
-/// WIN_EnableAltTab — stub.
+/// WIN_EnableAltTab — no-op on modern Windows.
+/// See win_disable_alt_tab for rationale.
 pub fn win_enable_alt_tab(vid: &mut VidState) {
     if vid.s_alttab_disabled {
-        // Stub: UnregisterHotKey / SystemParametersInfo
         vid.s_alttab_disabled = false;
     }
 }
@@ -277,10 +278,15 @@ pub fn vid_restart_f(vid: &mut VidState) {
     vid.vid_ref_modified = true;
 }
 
-/// VID_Front_f — stub (SetWindowLong / SetForegroundWindow).
+/// VID_Front_f — bring game window to foreground.
 pub fn vid_front_f() {
-    // Stub: SetWindowLong(cl_hwnd, GWL_EXSTYLE, WS_EX_TOPMOST)
-    // Stub: SetForegroundWindow(cl_hwnd)
+    if let Ok(guard) = crate::platform_register::PLATFORM_STATE.lock() {
+        if let Some(ref state) = *guard {
+            if let Some(window) = state.vk_imp.window() {
+                window.focus_window();
+            }
+        }
+    }
 }
 
 /// VID_GetModeInfo — retrieve width/height for a given video mode.
@@ -292,11 +298,30 @@ pub fn vid_get_mode_info(mode: i32) -> Option<(i32, i32)> {
     Some((m.width, m.height))
 }
 
-/// VID_UpdateWindowPosAndSize — stub (MoveWindow).
-pub fn vid_update_window_pos_and_size(vid: &VidState, _x: f32, _y: f32) {
-    // Stub: GetWindowLong, AdjustWindowRect, MoveWindow
-    let _w = vid.viddef.width;
-    let _h = vid.viddef.height;
+/// VID_UpdateWindowPosAndSize — reposition window via winit.
+pub fn vid_update_window_pos_and_size(_vid: &VidState, x: f32, y: f32) {
+    // NOTE: This function may be called while PLATFORM_STATE is already locked
+    // (from vid_check_changes callback). Use try_lock to avoid deadlock,
+    // and if already locked, access the window through the VidState's vk_imp reference.
+    if let Ok(guard) = crate::platform_register::PLATFORM_STATE.try_lock() {
+        if let Some(ref state) = *guard {
+            if let Some(window) = state.vk_imp.window() {
+                use winit::dpi::PhysicalPosition;
+                window.set_outer_position(PhysicalPosition::new(x as i32, y as i32));
+            }
+        }
+    }
+    // If try_lock fails, we're called from within with_platform() which already has access.
+    // The caller (vid_check_changes) should pass the window or vk_imp reference directly.
+}
+
+/// VID_UpdateWindowPosAndSize — called when already holding PLATFORM_STATE lock.
+/// Accepts a GlImpContext reference to avoid re-locking.
+pub fn vid_update_window_pos_direct(vk_imp: &crate::glw_imp::GlImpContext, x: f32, y: f32) {
+    if let Some(window) = vk_imp.window() {
+        use winit::dpi::PhysicalPosition;
+        window.set_outer_position(PhysicalPosition::new(x as i32, y as i32));
+    }
 }
 
 /// VID_NewWindow
@@ -314,28 +339,36 @@ pub fn vid_free_reflib(vid: &mut VidState) {
 
 /// VID_LoadRefresh — load/initialize the OpenGL renderer.
 pub fn vid_load_refresh(vid: &mut VidState, hinstance: usize, hwnd: usize) -> bool {
+    com_printf("VID_LoadRefresh: Starting\n");
+    com_printf(&format!("VID_LoadRefresh: reflib_active = {}\n", vid.reflib_active));
     if vid.reflib_active {
+        com_printf("VID_LoadRefresh: Calling vid_free_reflib\n");
         vid_free_reflib(vid);
+        com_printf("VID_LoadRefresh: vid_free_reflib done\n");
     }
 
-    vid_printf(PRINT_INFO, "-------- Loading OpenGL Ref --------\n");
+    com_printf("-------- Loading OpenGL Ref --------\n");
 
     // Stub: Swap_Init()
+    com_printf("VID_LoadRefresh: Calling r_init\n");
     let result = r_init(hinstance, hwnd);
+    com_printf(&format!("VID_LoadRefresh: r_init returned {}\n", result));
     if result == 0 {
-        vid_printf(PRINT_INFO, "Failed to initialize OpenGL renderer\n");
+        com_printf("Failed to initialize OpenGL renderer\n");
         return false;
     }
 
-    vid_printf(PRINT_INFO, "------------------------------------\n");
+    com_printf("------------------------------------\n");
     vid.reflib_active = true;
 
+    com_printf("VID_LoadRefresh: Success\n");
     true
 }
 
 /// VID_CheckChanges — called once per frame before drawing to check for video
 /// mode parameter changes.
-pub fn vid_check_changes(vid: &mut VidState, cvars: &mut CvarContext, cls_disable_screen: &mut bool, force_refdef: &mut bool, refresh_prepped: &mut bool, hinstance: usize, hwnd: usize, key_dest: i32) {
+/// `vk_imp` is passed when called from within with_platform() to avoid re-locking PLATFORM_STATE.
+pub fn vid_check_changes(vid: &mut VidState, cvars: &mut CvarContext, cls_disable_screen: &mut bool, force_refdef: &mut bool, refresh_prepped: &mut bool, hinstance: usize, hwnd: usize, key_dest: i32, vk_imp: Option<&crate::glw_imp::GlImpContext>) {
     // Check win_noalttab
     if let Some(idx) = vid.win_noalttab {
         if let Some(cv) = cvars.cvar_vars.get(idx) {
@@ -401,7 +434,11 @@ pub fn vid_check_changes(vid: &mut VidState, cvars: &mut CvarContext, cls_disabl
                 .and_then(|idx| cvars.cvar_vars.get(idx))
                 .map(|cv| cv.value)
                 .unwrap_or(0.0);
-            vid_update_window_pos_and_size(vid, xpos, ypos);
+            if let Some(imp) = vk_imp {
+                vid_update_window_pos_direct(imp, xpos, ypos);
+            } else {
+                vid_update_window_pos_and_size(vid, xpos, ypos);
+            }
         }
 
         if let Some(idx) = vid.vid_xpos {
@@ -414,6 +451,51 @@ pub fn vid_check_changes(vid: &mut VidState, cvars: &mut CvarContext, cls_disabl
                 cv.modified = false;
             }
         }
+    }
+}
+
+/// VID_Init wrapper that splits initialization to avoid CVAR_CTX deadlock.
+/// Phase 1: Register cvars (needs CVAR_CTX lock)
+/// Phase 2: Initialize renderer (must NOT hold CVAR_CTX lock because r_register will acquire it)
+pub fn vid_init_wrapper(vid: &mut VidState, hinstance: usize, hwnd: usize) {
+    // Phase 1: Register cvars while holding CVAR_CTX
+    myq2_common::cvar::with_cvar_ctx(|cvars| {
+        vid.vid_ref = Some(cvars.get_or_create("vid_ref", "gl", CVAR_ARCHIVE));
+        vid.vid_xpos = Some(cvars.get_or_create("vid_xpos", "3", CVAR_ARCHIVE));
+        vid.vid_ypos = Some(cvars.get_or_create("vid_ypos", "22", CVAR_ARCHIVE));
+        vid.vid_fullscreen = Some(cvars.get_or_create("vid_fullscreen", "1", CVAR_ARCHIVE));
+        vid.vid_gamma = Some(cvars.get_or_create("vid_gamma", "0.6", CVAR_ARCHIVE));
+        vid.win_noalttab = Some(cvars.get_or_create("win_noalttab", "0", CVAR_ARCHIVE));
+    });
+
+    // Register console commands (doesn't need cvar lock)
+    cmd_add_command("vid_restart", Some(Box::new(|_ctx| {
+        with_vid_state(vid_restart_f);
+    })));
+    cmd_add_command("vid_front", Some(Box::new(|_ctx| {
+        vid_front_f();
+    })));
+
+    // Disable 3Dfx splash screen
+    std::env::set_var("FX_GLIDE_NO_SPLASH", "0");
+
+    // Trigger renderer initialization on first startup
+    vid.vid_ref_modified = true;
+
+    // Phase 2: Start the graphics mode WITHOUT holding CVAR_CTX
+    // This allows r_init→r_register→cvar_get to acquire CVAR_CTX without deadlock
+    // TEMP: Call vid_check_changes_no_cvars which will be a simplified version
+    let mut disable_screen = false;
+    let mut force_refdef = false;
+    let mut refresh_prepped = false;
+    let key_dest = 0;
+
+    // WORKAROUND: Just call vid_load_refresh directly for initialization
+    // This skips the cvar checks in vid_check_changes
+    vid.vid_ref_modified = false; // Clear the flag
+    myq2_common::common::com_printf("vid_init_wrapper: Calling vid_load_refresh directly\n");
+    if !vid_load_refresh(vid, hinstance, hwnd) {
+        myq2_common::common::com_printf("vid_init_wrapper: vid_load_refresh failed\n");
     }
 }
 
@@ -437,12 +519,15 @@ pub fn vid_init(vid: &mut VidState, cvars: &mut CvarContext, hinstance: usize, h
     // Disable 3Dfx splash screen
     std::env::set_var("FX_GLIDE_NO_SPLASH", "0");
 
+    // Trigger renderer initialization on first startup
+    vid.vid_ref_modified = true;
+
     // Start the graphics mode
     let mut disable_screen = false;
     let mut force_refdef = false;
     let mut refresh_prepped = false;
     let key_dest = 0; // Stub: will be passed from caller in full integration
-    vid_check_changes(vid, cvars, &mut disable_screen, &mut force_refdef, &mut refresh_prepped, hinstance, hwnd, key_dest);
+    vid_check_changes(vid, cvars, &mut disable_screen, &mut force_refdef, &mut refresh_prepped, hinstance, hwnd, key_dest, None);
 }
 
 /// VID_Shutdown

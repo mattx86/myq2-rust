@@ -368,6 +368,9 @@ pub struct ServerContext {
 
     /// Lag compensation system for fair hit detection on high-ping clients
     pub lag_compensation: LagCompensation,
+
+    /// Chunked map loading progress (prevents "Not Responding" freeze)
+    pub map_load_progress: crate::sv_init::MapLoadPhase,
 }
 
 impl Default for ServerContext {
@@ -397,6 +400,13 @@ impl Default for ServerContext {
             time_before_game: 0,
             time_after_game: 0,
             lag_compensation: LagCompensation::new(),
+            map_load_progress: crate::sv_init::MapLoadPhase::Idle,
         }
     }
 }
+
+// SAFETY: ServerContext contains sub-structs (Edict, GameModule) with raw pointers
+// from the game module / DLL interface. These pointers are only dereferenced while
+// the Mutex<ServerContext> lock is held, so they are never concurrently accessed.
+// Send is required so Mutex<Option<ServerContext>> can be Sync (stored in a static).
+unsafe impl Send for ServerContext {}

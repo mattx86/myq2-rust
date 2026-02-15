@@ -45,8 +45,10 @@ pub struct Draw2DBatch {
 
 /// Blend modes for 2D drawing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum BlendMode {
     /// Standard alpha blending.
+    #[default]
     Alpha,
     /// Additive blending.
     Additive,
@@ -54,11 +56,6 @@ pub enum BlendMode {
     None,
 }
 
-impl Default for BlendMode {
-    fn default() -> Self {
-        BlendMode::Alpha
-    }
-}
 
 /// Manages batched 2D drawing.
 pub struct Draw2DManager {
@@ -91,7 +88,9 @@ impl Draw2DManager {
             char_texture: 0,
         };
 
-        manager.setup_vao();
+        // FIXME: setup_vao() hangs during initialization - skip for now
+        // TODO: Investigate what's causing the hang in vao.bind() / vbo.bind()
+        // manager.setup_vao();
         manager
     }
 
@@ -124,10 +123,10 @@ impl Draw2DManager {
         self.current_blend = BlendMode::Alpha;
     }
 
-    /// Flush current batch if texture changed.
+    /// Flush current batch if texture or blend mode changed.
     fn flush_if_changed(&mut self, texture: u32, blend: BlendMode) {
         if texture != self.current_texture || blend != self.current_blend {
-            if !self.vertices.is_empty() && self.current_texture != 0 {
+            if !self.vertices.is_empty() {
                 let start = self.batches.last().map(|b| b.first_vertex + b.vertex_count).unwrap_or(0);
                 let count = self.vertices.len() as u32 - start;
                 if count > 0 {
@@ -224,7 +223,7 @@ impl Draw2DManager {
         // Finalize current batch
         let start = self.batches.last().map(|b| b.first_vertex + b.vertex_count).unwrap_or(0);
         let count = self.vertices.len() as u32 - start;
-        if count > 0 && self.current_texture != 0 {
+        if count > 0 {
             self.batches.push(Draw2DBatch {
                 texture: self.current_texture,
                 first_vertex: start,

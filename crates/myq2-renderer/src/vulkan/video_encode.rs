@@ -86,6 +86,7 @@ impl Default for EncodeConfig {
 
 /// Encoder capabilities.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct EncodeCapabilities {
     /// Whether H.264 encode is supported.
     pub h264_supported: bool,
@@ -101,18 +102,6 @@ pub struct EncodeCapabilities {
     pub quality_levels: u32,
 }
 
-impl Default for EncodeCapabilities {
-    fn default() -> Self {
-        Self {
-            h264_supported: false,
-            h265_supported: false,
-            max_width: 0,
-            max_height: 0,
-            max_level: 0,
-            quality_levels: 0,
-        }
-    }
-}
 
 /// Encoded packet ready for muxing.
 #[derive(Debug, Clone)]
@@ -310,7 +299,7 @@ impl VideoEncoder {
         }
 
         let pts_us = (self.frame_number as u64 * 1_000_000) / self.config.fps as u64;
-        let is_keyframe = force_keyframe || (self.frame_number % self.config.gop_size as u64) == 0;
+        let is_keyframe = force_keyframe || self.frame_number.is_multiple_of(self.config.gop_size as u64);
 
         // In production, this would:
         // 1. Transition input image to VIDEO_ENCODE_SRC_KHR

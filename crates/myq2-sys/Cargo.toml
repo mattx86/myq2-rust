@@ -24,3 +24,12 @@ raw-window-handle = { workspace = true }
 # Vulkan surface creation
 ash = { workspace = true }
 ash-window = { workspace = true }
+
+# Windows platform dependencies
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+
+# Linux platform dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"       # Non-blocking stdin for dedicated server console
+arboard = "3"      # Wayland-native clipboard access

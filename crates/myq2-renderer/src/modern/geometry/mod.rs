@@ -9,7 +9,7 @@ mod particles;
 mod draw2d;
 
 pub use vbo::{VertexBuffer, IndexBuffer, IndexFormat, VertexArray};
-pub use bsp::{BspGeometryManager, BspVertex, SurfaceDrawInfo};
+pub use bsp::{BspGeometryManager, BspVertex, SurfaceDrawInfo, SURF_TRANS33, SURF_TRANS66};
 pub use alias::{AliasModelManager, AliasModelBuffers, AliasInstance, InstancedAliasBatch, InstancedAliasRenderer};
 pub use particles::ParticleManager;
 pub use draw2d::{Draw2DManager, BlendMode};

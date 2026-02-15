@@ -140,8 +140,13 @@ impl CommandManager {
             .command_buffers(&command_buffers)
             .signal_semaphores(&signal_semaphores);
 
-        ctx.device.queue_submit(ctx.graphics_queue, &[submit_info], fence)
-            .map_err(|e| format!("Failed to submit command buffer: {:?}", e))
+        let result = ctx.device.queue_submit(ctx.graphics_queue, &[submit_info], fence);
+        if let Err(ref e) = result {
+            eprintln!("submit_frame: queue_submit FAILED with error: {:?}", e);
+            eprintln!("submit_frame: fence={:?}, wait_sem={:?}, signal_sem={:?}",
+                fence, wait_semaphore, signal_semaphore);
+        }
+        result.map_err(|e| format!("Failed to submit command buffer: {:?}", e))
     }
 
     /// Get the primary command buffer for a frame.

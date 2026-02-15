@@ -980,7 +980,6 @@ pub fn sv_frame(ctx: &mut ServerContext, msec: i32) {
         net_sleep(ctx.sv.time as i32 - ctx.svs.realtime);
         return;
     }
-
     // update ping based on the last known frame from all clients
     sv_calc_pings(ctx);
 

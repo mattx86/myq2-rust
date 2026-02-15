@@ -104,13 +104,17 @@ pub struct GraphicsPipeline {
 /// Pipelines are created at initialization time and looked up at draw time.
 pub struct PipelineManager {
     pipelines: HashMap<PipelineKey, GraphicsPipeline>,
-    /// Shared descriptor set layout for per-frame uniforms.
+    /// Shared descriptor set layout for per-frame uniforms (set 0).
     descriptor_set_layout: Option<vk::DescriptorSetLayout>,
+    /// UI texture descriptor set layout (set 1, binding 0 = COMBINED_IMAGE_SAMPLER).
+    ui_texture_set_layout: Option<vk::DescriptorSetLayout>,
     /// Shared pipeline layout.
     pipeline_layout: Option<vk::PipelineLayout>,
     initialized: bool,
     color_format: vk::Format,
     depth_format: vk::Format,
+    /// Scene FBO color format (R8G8B8A8_UNORM) for 3D pipelines.
+    scene_color_format: vk::Format,
     /// Whether EDS3 polygon mode is supported (enables vk_showtris wireframe).
     dynamic_polygon_mode: bool,
 }
@@ -127,10 +131,12 @@ impl PipelineManager {
         let mut manager = Self {
             pipelines: HashMap::new(),
             descriptor_set_layout: None,
+            ui_texture_set_layout: None,
             pipeline_layout: None,
             initialized: false,
             color_format,
             depth_format,
+            scene_color_format: color_format, // default to swapchain format until set
             dynamic_polygon_mode,
         };
 
@@ -179,10 +185,38 @@ impl PipelineManager {
 
                 self.descriptor_set_layout = Some(desc_layout);
 
-                // Create pipeline layout
-                let layouts = [desc_layout];
+                // Create UI texture descriptor set layout (set 1):
+                // binding 0 = COMBINED_IMAGE_SAMPLER for 2D texture sampling
+                let ui_texture_binding = [
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                ];
+                let ui_tex_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+                    .bindings(&ui_texture_binding);
+                let ui_tex_layout = ctx.device
+                    .create_descriptor_set_layout(&ui_tex_layout_info, None)
+                    .map_err(|e| format!("Failed to create UI texture set layout: {:?}", e))?;
+                self.ui_texture_set_layout = Some(ui_tex_layout);
+
+                // Create pipeline layout with push constant range covering both
+                // vertex and fragment stages. 128 bytes is the Vulkan guaranteed minimum.
+                // - UI shader: bytes 0-63 = mat4 projection (vertex stage)
+                // - PostProcess shader: bytes 0-31 = polyblend/gamma (fragment stage)
+                let push_constant_range = vk::PushConstantRange {
+                    stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    offset: 0,
+                    size: 128,
+                };
+                let push_constant_ranges = [push_constant_range];
+
+                // Set 0 = per-frame/per-object uniforms, Set 1 = UI texture
+                let layouts = [desc_layout, ui_tex_layout];
                 let layout_info = vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&layouts);
+                    .set_layouts(&layouts)
+                    .push_constant_ranges(&push_constant_ranges);
 
                 let pipeline_layout = ctx.device
                     .create_pipeline_layout(&layout_info, None)
@@ -237,6 +271,188 @@ impl PipelineManager {
         }
     }
 
+    /// Get vertex input descriptions for a shader type.
+    fn vertex_input_for_shader(shader: ShaderType) -> (
+        Vec<vk::VertexInputBindingDescription>,
+        Vec<vk::VertexInputAttributeDescription>,
+    ) {
+        match shader {
+            ShaderType::Ui => {
+                // Draw2DVertex: pos2 + tex2 + color4 = 32 bytes
+                let binding = vec![vk::VertexInputBindingDescription::default()
+                    .binding(0)
+                    .stride(32)
+                    .input_rate(vk::VertexInputRate::VERTEX)];
+                let attrs = vec![
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(0)
+                        .format(vk::Format::R32G32_SFLOAT)
+                        .offset(0),     // pos2
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(1)
+                        .format(vk::Format::R32G32_SFLOAT)
+                        .offset(8),     // tex2
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(2)
+                        .format(vk::Format::R32G32B32A32_SFLOAT)
+                        .offset(16),    // color4
+                ];
+                (binding, attrs)
+            }
+            ShaderType::World | ShaderType::WorldFlowing | ShaderType::Sky => {
+                // BspVertex: pos3 + tex2 + lm2 = 28 bytes
+                let binding = vec![vk::VertexInputBindingDescription::default()
+                    .binding(0)
+                    .stride(28)
+                    .input_rate(vk::VertexInputRate::VERTEX)];
+                let attrs = vec![
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(0)
+                        .format(vk::Format::R32G32B32_SFLOAT)
+                        .offset(0),     // position
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(1)
+                        .format(vk::Format::R32G32_SFLOAT)
+                        .offset(12),    // tex_coord
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(2)
+                        .format(vk::Format::R32G32_SFLOAT)
+                        .offset(20),    // lm_coord
+                ];
+                (binding, attrs)
+            }
+            ShaderType::Particle => {
+                // Two bindings: quad VBO (per-vertex) + instance VBO (per-instance)
+                let bindings = vec![
+                    // Binding 0: quad offset (vec2) — 8 bytes per vertex
+                    vk::VertexInputBindingDescription::default()
+                        .binding(0)
+                        .stride(8)
+                        .input_rate(vk::VertexInputRate::VERTEX),
+                    // Binding 1: ParticleInstance — 32 bytes per instance
+                    vk::VertexInputBindingDescription::default()
+                        .binding(1)
+                        .stride(32)
+                        .input_rate(vk::VertexInputRate::INSTANCE),
+                ];
+                let attrs = vec![
+                    // location 0: quad offset (vec2) from binding 0
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(0)
+                        .format(vk::Format::R32G32_SFLOAT)
+                        .offset(0),
+                    // location 1: origin (vec3) from binding 1
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(1)
+                        .location(1)
+                        .format(vk::Format::R32G32B32_SFLOAT)
+                        .offset(0),
+                    // location 2: color (vec4) from binding 1
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(1)
+                        .location(2)
+                        .format(vk::Format::R32G32B32A32_SFLOAT)
+                        .offset(12),
+                    // location 3: size (float) from binding 1
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(1)
+                        .location(3)
+                        .format(vk::Format::R32_SFLOAT)
+                        .offset(28),
+                ];
+                (bindings, attrs)
+            }
+            ShaderType::PostProcess | ShaderType::Fxaa | ShaderType::Ssao
+            | ShaderType::SsaoBlur | ShaderType::BloomExtract | ShaderType::BloomBlur
+            | ShaderType::BloomComposite | ShaderType::FsrEasu | ShaderType::FsrRcas
+            | ShaderType::Fsr2Temporal => {
+                // Fullscreen triangle generated from gl_VertexIndex — no vertex input
+                (vec![], vec![])
+            }
+            ShaderType::Alias | ShaderType::AliasCel => {
+                // AliasVertex: pos3 + oldpos3 + tex2 + normal_index(u8) + pad(3) = 40 bytes
+                let binding = vec![vk::VertexInputBindingDescription::default()
+                    .binding(0)
+                    .stride(40)
+                    .input_rate(vk::VertexInputRate::VERTEX)];
+                let attrs = vec![
+                    // location 0: position (vec3)
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(0)
+                        .format(vk::Format::R32G32B32_SFLOAT)
+                        .offset(0),
+                    // location 1: old_position (vec3)
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(1)
+                        .format(vk::Format::R32G32B32_SFLOAT)
+                        .offset(12),
+                    // location 2: tex_coord (vec2)
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(2)
+                        .format(vk::Format::R32G32_SFLOAT)
+                        .offset(24),
+                    // location 3: normal_index (uint8 as R8_UINT)
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(3)
+                        .format(vk::Format::R8_UINT)
+                        .offset(32),
+                ];
+                (binding, attrs)
+            }
+            ShaderType::DynamicLight => {
+                // DlightVertex: pos3 = 12 bytes
+                let binding = vec![vk::VertexInputBindingDescription::default()
+                    .binding(0)
+                    .stride(12)
+                    .input_rate(vk::VertexInputRate::VERTEX)];
+                let attrs = vec![
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(0)
+                        .format(vk::Format::R32G32B32_SFLOAT)
+                        .offset(0),
+                ];
+                (binding, attrs)
+            }
+            _ => {
+                // Default: pos3 + tex2 + norm3 = 32 bytes
+                let binding = vec![vk::VertexInputBindingDescription::default()
+                    .binding(0)
+                    .stride(32)
+                    .input_rate(vk::VertexInputRate::VERTEX)];
+                let attrs = vec![
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(0)
+                        .format(vk::Format::R32G32B32_SFLOAT)
+                        .offset(0),
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(1)
+                        .format(vk::Format::R32G32_SFLOAT)
+                        .offset(12),
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(2)
+                        .format(vk::Format::R32G32B32_SFLOAT)
+                        .offset(20),
+                ];
+                (binding, attrs)
+            }
+        }
+    }
+
     /// Create a graphics pipeline for a shader type and variant.
     pub fn create_pipeline(
         &mut self,
@@ -275,32 +491,11 @@ impl PipelineManager {
                         .name(&entry_name),
                 ];
 
-                // Vertex input (position, texcoord, normal)
-                let binding_desc = [vk::VertexInputBindingDescription::default()
-                    .binding(0)
-                    .stride(32) // 3 pos + 2 tex + 3 norm = 8 floats
-                    .input_rate(vk::VertexInputRate::VERTEX)];
-
-                let attr_descs = [
-                    vk::VertexInputAttributeDescription::default()
-                        .binding(0)
-                        .location(0)
-                        .format(vk::Format::R32G32B32_SFLOAT)
-                        .offset(0),
-                    vk::VertexInputAttributeDescription::default()
-                        .binding(0)
-                        .location(1)
-                        .format(vk::Format::R32G32_SFLOAT)
-                        .offset(12),
-                    vk::VertexInputAttributeDescription::default()
-                        .binding(0)
-                        .location(2)
-                        .format(vk::Format::R32G32B32_SFLOAT)
-                        .offset(20),
-                ];
+                // Vertex input varies per shader type
+                let (binding_descs, attr_descs) = Self::vertex_input_for_shader(shader);
 
                 let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-                    .vertex_binding_descriptions(&binding_desc)
+                    .vertex_binding_descriptions(&binding_descs)
                     .vertex_attribute_descriptions(&attr_descs);
 
                 let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
@@ -320,8 +515,9 @@ impl PipelineManager {
                     .scissor_count(1);
 
                 // Rasterization state based on variant
+                // TODO: Re-enable back-face culling once winding order is verified
                 let (cull_mode, depth_bias_enable) = match variant {
-                    PipelineVariant::Opaque => (vk::CullModeFlags::BACK, false),
+                    PipelineVariant::Opaque => (vk::CullModeFlags::NONE, false),
                     PipelineVariant::AlphaBlend | PipelineVariant::Additive => {
                         (vk::CullModeFlags::NONE, false)
                     }
@@ -336,7 +532,9 @@ impl PipelineManager {
                     .polygon_mode(vk::PolygonMode::FILL)
                     .line_width(1.0)
                     .cull_mode(cull_mode)
-                    .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+                    // CLOCKWISE because 3D viewports use negative height (Y flip),
+                    // which reverses the apparent winding order in framebuffer space.
+                    .front_face(vk::FrontFace::CLOCKWISE)
                     .depth_bias_enable(depth_bias_enable);
 
                 let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
@@ -394,10 +592,22 @@ impl PipelineManager {
                     .attachments(&color_blend_attachments);
 
                 // Dynamic rendering info (Vulkan 1.3)
-                let color_formats = [self.color_format];
+                // 3D variants (Opaque, AlphaBlend, Additive) render to scene_fbo
+                // UI and PostProcess render to swapchain
+                let color_fmt = match variant {
+                    PipelineVariant::Opaque | PipelineVariant::AlphaBlend | PipelineVariant::Additive => {
+                        self.scene_color_format
+                    }
+                    _ => self.color_format,
+                };
+                let color_formats = [color_fmt];
+                let depth_fmt = match variant {
+                    PipelineVariant::Ui | PipelineVariant::PostProcess => vk::Format::UNDEFINED,
+                    _ => self.depth_format,
+                };
                 let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
                     .color_attachment_formats(&color_formats)
-                    .depth_attachment_format(self.depth_format);
+                    .depth_attachment_format(depth_fmt);
 
                 // Create pipeline
                 let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
@@ -449,6 +659,16 @@ impl PipelineManager {
         self.descriptor_set_layout
     }
 
+    /// Get the UI texture descriptor set layout (set 1) for TextureStore.
+    pub fn ui_texture_set_layout(&self) -> Option<vk::DescriptorSetLayout> {
+        self.ui_texture_set_layout
+    }
+
+    /// Set the scene FBO color format for 3D pipelines.
+    pub fn set_scene_format(&mut self, fmt: vk::Format) {
+        self.scene_color_format = fmt;
+    }
+
     /// Check if the pipeline manager is initialized.
     pub fn is_initialized(&self) -> bool {
         self.initialized
@@ -469,7 +689,10 @@ impl PipelineManager {
                     ctx.device.destroy_pipeline_layout(layout, None);
                 }
 
-                // Destroy descriptor set layout
+                // Destroy descriptor set layouts
+                if let Some(layout) = self.ui_texture_set_layout.take() {
+                    ctx.device.destroy_descriptor_set_layout(layout, None);
+                }
                 if let Some(layout) = self.descriptor_set_layout.take() {
                     ctx.device.destroy_descriptor_set_layout(layout, None);
                 }
@@ -484,10 +707,12 @@ impl Default for PipelineManager {
         Self {
             pipelines: HashMap::new(),
             descriptor_set_layout: None,
+            ui_texture_set_layout: None,
             pipeline_layout: None,
             initialized: false,
             color_format: vk::Format::R8G8B8A8_UNORM,
             depth_format: vk::Format::D32_SFLOAT,
+            scene_color_format: vk::Format::R8G8B8A8_UNORM,
             dynamic_polygon_mode: false,
         }
     }

@@ -1,12 +1,11 @@
 // platform_register.rs — Register myq2-sys platform callbacks with myq2-renderer
 //
-// Stores GlImpContext and QglState in a global Mutex so the callback
+// Stores GlImpContext and VidState in a global Mutex so the callback
 // closures registered with myq2_renderer::platform can access them.
 
 use std::sync::Mutex;
 
 use crate::glw_imp::GlImpContext;
-use crate::qvk_win::QglState;
 use crate::in_win::INPUT_STATE;
 use crate::vid_dll::VidState;
 use myq2_renderer::platform::{self, PlatformDispatch};
@@ -14,13 +13,12 @@ use myq2_renderer::platform::{self, PlatformDispatch};
 /// Shared platform state accessible from dispatch callbacks.
 pub struct SharedPlatformState {
     pub vk_imp: GlImpContext,
-    pub qvk: QglState,
     pub vid: VidState,
 }
 
-// SAFETY: The Quake 2 engine is single-threaded. winit objects (Window, etc.)
-// are not Send, but we only ever access them from the main thread. The Mutex is
-// used for interior mutability, not cross-thread synchronization.
+// SAFETY: winit objects (Window, etc.) are not Send, but they are only accessed
+// from the main thread. The Mutex provides interior mutability, not cross-thread
+// synchronization.
 unsafe impl Send for SharedPlatformState {}
 
 pub static PLATFORM_STATE: Mutex<Option<SharedPlatformState>> = Mutex::new(None);
@@ -35,13 +33,30 @@ where
     f(state)
 }
 
+/// Direct access to glimp_init when already holding PLATFORM_STATE lock.
+/// Used to avoid nested mutex deadlock during initialization.
+pub fn glimp_init_direct(vk_imp: &mut GlImpContext, hinstance: usize, hwnd: usize) -> bool {
+    vk_imp.glimp_init(hinstance, hwnd)
+}
+
+/// Direct access to glimp_set_mode when already holding PLATFORM_STATE lock.
+/// Used to avoid nested mutex deadlock during initialization.
+pub fn glimp_set_mode_direct(vk_imp: &mut GlImpContext, width: &mut i32, height: &mut i32, mode: i32, fullscreen: bool) -> i32 {
+    let result = vk_imp.glimp_set_mode(width, height, mode, fullscreen);
+    match result {
+        crate::glw_imp::RsErr::Ok => 0,
+        crate::glw_imp::RsErr::InvalidFullscreen => 1,
+        crate::glw_imp::RsErr::InvalidMode => 2,
+        crate::glw_imp::RsErr::Unknown => 3,
+    }
+}
+
 /// Initialize the shared platform state and register all dispatch callbacks
 /// with the renderer crate.
 pub fn platform_init() {
     // Store initial state
     *PLATFORM_STATE.lock().unwrap() = Some(SharedPlatformState {
         vk_imp: GlImpContext::default(),
-        qvk: QglState::default(),
         vid: VidState::default(),
     });
 
@@ -71,12 +86,6 @@ pub fn platform_init() {
                 crate::glw_imp::RsErr::Unknown => 3,
             }
         })),
-        qvk_init: Some(Box::new(|driver: &str| {
-            with_platform(|s| s.qvk.qvk_init(driver))
-        })),
-        qvk_shutdown: Some(Box::new(|| {
-            with_platform(|s| s.qvk.qvk_shutdown())
-        })),
         vid_menu_init: Some(Box::new(|| {
             // vid_menu_init requires CvarContext and VidDef — for now just log
             myq2_common::common::com_printf("VID_MenuInit (platform dispatch)\n");
@@ -92,11 +101,38 @@ pub fn platform_init() {
 
     client_platform_register(ClientPlatformDispatch {
         vid_init: Some(Box::new(|| {
-            myq2_common::cvar::with_cvar_ctx(|cvars| {
-                with_platform(|s| {
-                    crate::vid_dll::vid_init(&mut s.vid, cvars, 0, 0);
-                });
+            // Temporarily extract platform callbacks to avoid holding PLATFORM_STATE during initialization
+            // This prevents nested mutex deadlocks when vid_init→r_init→r_set_mode calls glimp_* functions
+            myq2_common::common::com_printf("vid_init: Starting\n");
+
+            // Phase 1: Call glimp_init while holding PLATFORM_STATE lock
+            with_platform(|s| {
+                myq2_common::common::com_printf("vid_init: Calling glimp_init_direct\n");
+                glimp_init_direct(&mut s.vk_imp, 0, 0);
+                myq2_common::common::com_printf("vid_init: glimp_init_direct completed\n");
             });
+
+            // Phase 2: Extract vid_state first without holding any locks
+            let mut vid_state = {
+                let mut guard = PLATFORM_STATE.lock().unwrap();
+                let s = guard.as_mut().expect("platform not initialized");
+                std::mem::take(&mut s.vid)
+            };
+
+            // Phase 3: Call vid_dll::vid_init_wrapper WITHOUT holding CVAR_CTX
+            // CRITICAL: vid_init→vid_check_changes→vid_load_refresh→r_init→r_register
+            // will internally call cvar_get which acquires CVAR_CTX, so we must NOT
+            // hold it here or we'll deadlock
+            crate::vid_dll::vid_init_wrapper(&mut vid_state, 0, 0);
+
+            // Phase 4: Put vid_state back
+            {
+                let mut guard = PLATFORM_STATE.lock().unwrap();
+                let s = guard.as_mut().expect("platform not initialized");
+                s.vid = vid_state;
+            }
+
+            myq2_common::common::com_printf("vid_init: Completed\n");
         })),
         vid_shutdown: Some(Box::new(|| {
             with_platform(|s| {
@@ -113,6 +149,7 @@ pub fn platform_init() {
                         &mut s.vid, cvars,
                         &mut disable_screen, &mut force_refdef, &mut refresh_prepped,
                         0, 0, 0,
+                        Some(&s.vk_imp),
                     );
                 });
             });
@@ -139,10 +176,13 @@ pub fn platform_init() {
         })),
         in_frame: Some(Box::new(|| {
             myq2_common::cvar::with_cvar_ctx(|cvars| {
+                // Get vid_fullscreen from cvars BEFORE locking PLATFORM_STATE
+                // to avoid nested lock attempts
+                let vid_fullscreen = cvars.variable_value("vid_fullscreen");
+
                 with_platform(|s| {
                     let mut input = INPUT_STATE.lock().unwrap();
                     let window = s.vk_imp.window();
-                    let vid_fullscreen = myq2_common::cvar::cvar_variable_value("vid_fullscreen") as f32;
                     crate::in_win::in_frame(
                         &mut input, cvars, window,
                         true, false, vid_fullscreen,
@@ -151,8 +191,22 @@ pub fn platform_init() {
             });
         })),
         sys_send_key_events: Some(Box::new(|| {
-            // With winit, events are processed in the main event loop callback
-            // This is now a no-op as event processing happens in main.rs
+            // Pump the Win32 message queue so the window stays responsive
+            // during long synchronous operations (e.g., cl_prep_refresh asset loading).
+            // This matches the original C Sys_SendKeyEvents which calls PeekMessage/DispatchMessage.
+            #[cfg(target_os = "windows")]
+            {
+                use windows_sys::Win32::UI::WindowsAndMessaging::*;
+                // SAFETY: We're on the main thread (same thread that owns the window).
+                // PeekMessage/TranslateMessage/DispatchMessage are safe to call here.
+                unsafe {
+                    let mut msg = std::mem::zeroed::<MSG>();
+                    while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+            }
         })),
         sys_app_activate: Some(Box::new(|| {
             // App activation handled by winit event pump
@@ -162,6 +216,35 @@ pub fn platform_init() {
         })),
         sv_shutdown: Some(Box::new(|msg: &str, _reconnect: bool| {
             myq2_common::common::com_printf(&format!("SV_Shutdown: {}\n", msg));
+        })),
+        sv_start_map: Some(Box::new(|mapname: &str| {
+            // Check if already loading a map
+            let already_loading = myq2_server::sv_init::with_server_context(|server_ctx| {
+                !matches!(server_ctx.map_load_progress,
+                    myq2_server::sv_init::MapLoadPhase::Idle |
+                    myq2_server::sv_init::MapLoadPhase::Complete)
+            }).unwrap_or(false);
+
+            if already_loading {
+                myq2_common::common::com_printf("Map load already in progress\n");
+                return;
+            }
+
+            // Directly call the server's map loading function
+            myq2_server::sv_init::with_server_context(|ctx| {
+                // Create a cmd_argv closure that returns our map name
+                let cmd_argv = |idx: usize| -> String {
+                    match idx {
+                        0 => "map".to_string(),
+                        1 => mapname.to_string(),
+                        _ => String::new(),
+                    }
+                };
+                myq2_server::sv_ccmds::sv_map_f(ctx, 2, &cmd_argv);
+            });
+        })),
+        con_print: Some(Box::new(|text: &str| {
+            myq2_client::console::con_print(text);
         })),
     });
 }

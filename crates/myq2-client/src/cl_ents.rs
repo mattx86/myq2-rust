@@ -30,7 +30,7 @@ use myq2_common::common::{
 // =========================================================================
 
 /// Protocol profiling bit counts
-pub static mut BITCOUNTS: [i32; 32] = [0; 32];
+static BITCOUNTS: std::sync::Mutex<[i32; 32]> = std::sync::Mutex::new([0; 32]);
 
 // The actual cl_entities and cl_parse_entities arrays live in the client
 // module's global state. They are passed in by reference to the functions
@@ -124,11 +124,11 @@ pub fn cl_parse_entity_bits(net_message: &mut SizeBuf, bits: &mut i32) -> i32 {
     }
 
     // count the bits for net profiling
-    // SAFETY: single-threaded access to static profiling counters
-    unsafe {
+    {
+        let mut counts = BITCOUNTS.lock().unwrap();
         for i in 0..32 {
             if total & (1 << i) != 0 {
-                BITCOUNTS[i] += 1;
+                counts[i] += 1;
             }
         }
     }
@@ -872,7 +872,19 @@ pub fn cl_parse_frame(
 
         // fire entity events
         cl_fire_entity_events(&cl.frame, ent_state, callbacks);
-        callbacks.cl_check_prediction_error();
+
+        // Check prediction error directly (not via callback) to avoid deadlock.
+        // The callback wrapper holds CL/CLS locks, so re-acquiring them would deadlock.
+        {
+            let cl_predict = myq2_common::cvar::cvar_variable_value("cl_predict");
+            let cl_showmiss = myq2_common::cvar::cvar_variable_value("cl_showmiss");
+            crate::cl_pred::cl_check_prediction_error(
+                cl,
+                cls.netchan.incoming_acknowledged,
+                cl_predict,
+                cl_showmiss,
+            );
+        }
     } else {
         // Invalid frame - increment packet loss counter
         cl.packet_loss_frames += 1;
@@ -2062,9 +2074,8 @@ pub fn cl_add_entities(
                 // Adjust cl.time based on snapshot interpolation
                 // This smooths out the rendering by accounting for packet jitter
                 let interp_time = before.server_time + ((after.server_time - before.server_time) as f32 * lerp) as i32;
-                Some((interp_time, lerp))
+                (interp_time, lerp)
             })
-            .flatten()
     } else {
         None
     };
@@ -2145,7 +2156,6 @@ pub fn cl_add_entities(
     // is complete. Wire it here gated by the projectile predict cvar which
     // controls whether the subsystem is active.
     cl_add_projectiles(proj_state, cl, callbacks);
-
     callbacks.cl_add_tents();
     callbacks.cl_add_particles();
     callbacks.cl_add_dlights();

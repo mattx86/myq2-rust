@@ -388,22 +388,28 @@ fn s_register_sound(name: &str) -> i32 {
 fn r_register_model(name: &str) -> i32 { crate::console::r_register_model(name) }
 fn draw_find_pic(name: &str) -> i32 { crate::console::draw_find_pic(name) }
 
-fn s_start_sound(origin: Option<&Vec3>, entnum: i32, channel: i32, sfx: i32, volume: f32, attenuation: f32, timeofs: f32) {
-    crate::cl_main::cl_s_start_sound(origin, entnum, channel, sfx, volume, attenuation, timeofs);
+/// Play a sound using an already-borrowed SoundState (avoids re-locking from parse wrapper).
+fn s_start_sound(sound: &mut crate::snd_dma::SoundState, origin: Option<&Vec3>, entnum: i32, channel: i32, sfx: i32, volume: f32, attenuation: f32, timeofs: f32, cl_time: i32) {
+    if sfx > 0 {
+        sound.s_start_sound(origin.copied(), entnum, channel, sfx as usize, volume, attenuation, timeofs, cl_time);
+    }
+}
+
+/// Register a sound using an already-borrowed SoundState (avoids re-locking from parse wrapper).
+fn s_register_sound_direct(sound: &mut crate::snd_dma::SoundState, name: &str) -> i32 {
+    let loader = |n: &str| myq2_common::files::fs_load_file(n);
+    sound.s_register_sound(name, &loader).map(|i| i as i32).unwrap_or(0)
 }
 fn add_stain(pos: &Vec3, intensity: i32, r: i32, g: i32, b: i32, alpha: i32, mode: i32) {
-    // SAFETY: single-threaded engine, RENDERER_FNS set at startup
-    unsafe {
-        (crate::console::RENDERER_FNS.r_add_stain)(
-            pos,
-            intensity as f32,
-            r as f32,
-            g as f32,
-            b as f32,
-            alpha as f32,
-            mode,
-        );
-    }
+    (crate::console::renderer_fns().r_add_stain)(
+        pos,
+        intensity as f32,
+        r as f32,
+        g as f32,
+        b as f32,
+        alpha as f32,
+        mode,
+    );
 }
 
 const STAIN_MODULATE: i32 = 0;
@@ -813,7 +819,7 @@ pub fn cl_parse_nuke(ts: &mut TEntState, cl: &ClientState, net_message: &mut Siz
 static SPLASH_COLOR: [u8; 7] = [0x00, 0xe0, 0xb0, 0x50, 0xd0, 0xe0, 0xe8];
 
 /// Parse a temp entity message from the server.
-pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, net_message: &mut SizeBuf) {
+pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, net_message: &mut SizeBuf, sound: &mut crate::snd_dma::SoundState) {
     let te_type = msg_read_byte(net_message);
     let mut pos: Vec3 = [0.0; 3];
     let mut pos2: Vec3 = [0.0; 3];
@@ -842,9 +848,9 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             if te_type != TempEvent::Sparks as i32 {
                 cl_smoke_and_flash(ts, cl, &pos);
                 let cnt = rand_val() & 15;
-                if cnt == 1 { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_ric1, 1.0, ATTN_NORM, 0.0); }
-                else if cnt == 2 { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_ric2, 1.0, ATTN_NORM, 0.0); }
-                else if cnt == 3 { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_ric3, 1.0, ATTN_NORM, 0.0); }
+                if cnt == 1 { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_ric1, 1.0, ATTN_NORM, 0.0, cl.time); }
+                else if cnt == 2 { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_ric2, 1.0, ATTN_NORM, 0.0, cl.time); }
+                else if cnt == 3 { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_ric3, 1.0, ATTN_NORM, 0.0, cl.time); }
             }
         }
 
@@ -853,7 +859,7 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             msg_read_dir(net_message, &mut dir);
             if te_type == TempEvent::ScreenSparks as i32 { fx.cl_particle_effect(&pos, &dir, 0xd0, 40, cl.time as f32); }
             else { fx.cl_particle_effect(&pos, &dir, 0xb0, 40, cl.time as f32); }
-            s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::Shotgun as i32 => {
@@ -874,9 +880,9 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             fx.cl_particle_effect(&pos, &dir, color, cnt, cl.time as f32);
             if r == SPLASH_SPARKS {
                 let r2 = rand_val() & 3;
-                if r2 == 0 { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_spark5, 1.0, ATTN_STATIC, 0.0); }
-                else if r2 == 1 { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_spark6, 1.0, ATTN_STATIC, 0.0); }
-                else { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_spark7, 1.0, ATTN_STATIC, 0.0); }
+                if r2 == 0 { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_spark5, 1.0, ATTN_STATIC, 0.0, cl.time); }
+                else if r2 == 1 { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_spark6, 1.0, ATTN_STATIC, 0.0, cl.time); }
+                else { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_spark7, 1.0, ATTN_STATIC, 0.0, cl.time); }
             }
         }
 
@@ -915,14 +921,14 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             ex.lightcolor[0] = 1.0; ex.lightcolor[1] = 1.0;
             ex.ent.model = ts.cl_mod_explode;
             ex.frames = 4;
-            s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::Railtrail as i32 => {
             msg_read_pos(net_message, &mut pos);
             msg_read_pos(net_message, &mut pos2);
             fx.cl_rail_trail(&pos, &pos2, cl.time as f32, false);
-            s_start_sound(Some(&pos2), 0, 0, ts.cl_sfx_railg, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, Some(&pos2), 0, 0, ts.cl_sfx_railg, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::Explosion2 as i32 || x == TempEvent::GrenadeExplosion as i32 || x == TempEvent::GrenadeExplosionWater as i32 => {
@@ -937,8 +943,8 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             ex.ent.model = ts.cl_mod_explo4; ex.frames = 19; ex.baseframe = 30;
             ex.ent.angles[1] = (rand_val() % 360) as f32;
             fx.cl_explosion_particles(&pos, cl.time as f32);
-            if te_type == TempEvent::GrenadeExplosionWater as i32 { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_watrexp, 1.0, ATTN_NORM, 0.0); }
-            else { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_grenexp, 1.0, ATTN_NORM, 0.0); }
+            if te_type == TempEvent::GrenadeExplosionWater as i32 { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_watrexp, 1.0, ATTN_NORM, 0.0, cl.time); }
+            else { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_grenexp, 1.0, ATTN_NORM, 0.0, cl.time); }
         }
 
         x if x == TempEvent::PlasmaExplosion as i32 => {
@@ -953,7 +959,7 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             if frand() < 0.5 { ex.baseframe = 15; }
             ex.frames = 15;
             fx.cl_explosion_particles(&pos, cl.time as f32);
-            s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_rockexp, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_rockexp, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::Explosion1 as i32 || x == TempEvent::Explosion1Big as i32
@@ -974,8 +980,8 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             if frand() < 0.5 { ex.baseframe = 15; }
             ex.frames = 15;
             if te_type != TempEvent::Explosion1Big as i32 && te_type != TempEvent::Explosion1Np as i32 { fx.cl_explosion_particles(&pos, cl.time as f32); }
-            if te_type == TempEvent::RocketExplosionWater as i32 { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_watrexp, 1.0, ATTN_NORM, 0.0); }
-            else { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_rockexp, 1.0, ATTN_NORM, 0.0); }
+            if te_type == TempEvent::RocketExplosionWater as i32 { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_watrexp, 1.0, ATTN_NORM, 0.0, cl.time); }
+            else { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_rockexp, 1.0, ATTN_NORM, 0.0, cl.time); }
         }
 
         x if x == TempEvent::BfgExplosion as i32 => {
@@ -1011,7 +1017,8 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
         x if x == TempEvent::Bosstport as i32 => {
             msg_read_pos(net_message, &mut pos);
             fx.cl_big_teleport_particles(&pos, cl.time as f32);
-            s_start_sound(Some(&pos), 0, 0, s_register_sound("misc/bigtele.wav"), 1.0, ATTN_NONE, 0.0);
+            let sfx = s_register_sound_direct(sound, "misc/bigtele.wav");
+            s_start_sound(sound, Some(&pos), 0, 0, sfx, 1.0, ATTN_NONE, 0.0, cl.time);
         }
 
         x if x == TempEvent::GrappleCable as i32 => {
@@ -1068,12 +1075,12 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             if te_type == TempEvent::Blaster2 as i32 { ex.lightcolor[1] = 1.0; }
             else { ex.lightcolor = [0.19, 0.41, 0.75]; }
             ex.ent.model = ts.cl_mod_explode; ex.frames = 4;
-            s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::Lightning as i32 => {
             let ent = cl_parse_lightning(ts, cl, ts.cl_mod_lightning, net_message);
-            s_start_sound(None, ent, CHAN_WEAPON, ts.cl_sfx_lightning, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, None, ent, CHAN_WEAPON, ts.cl_sfx_lightning, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::Debugtrail as i32 => {
@@ -1096,8 +1103,8 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             if frand() < 0.5 { ex.baseframe = 15; }
             ex.frames = 15;
             // Note: original checks TE_ROCKET_EXPLOSION_WATER here (bug in original)
-            if te_type == TempEvent::RocketExplosionWater as i32 { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_watrexp, 1.0, ATTN_NORM, 0.0); }
-            else { s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_rockexp, 1.0, ATTN_NORM, 0.0); }
+            if te_type == TempEvent::RocketExplosionWater as i32 { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_watrexp, 1.0, ATTN_NORM, 0.0, cl.time); }
+            else { s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_rockexp, 1.0, ATTN_NORM, 0.0, cl.time); }
         }
 
         x if x == TempEvent::Flashlight as i32 => {
@@ -1120,14 +1127,14 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             msg_read_pos(net_message, &mut pos);
             msg_read_dir(net_message, &mut dir);
             fx.cl_particle_steam_effect(&pos, &dir, 8, 50, 60, cl.time as f32);
-            s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::HeatbeamSteam as i32 => {
             msg_read_pos(net_message, &mut pos);
             msg_read_dir(net_message, &mut dir);
             fx.cl_particle_steam_effect(&pos, &dir, 0xe0, 20, 60, cl.time as f32);
-            s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::Steam as i32 => { cl_parse_steam(ts, fx, cl, net_message); }
@@ -1136,7 +1143,7 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             msg_read_pos(net_message, &mut pos);
             msg_read_pos(net_message, &mut pos2);
             fx.cl_bubble_trail2(&pos, &pos2, 8, cl.time as f32);
-            s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::Moreblood as i32 => {
@@ -1157,14 +1164,14 @@ pub fn cl_parse_tent(ts: &mut TEntState, fx: &mut ClFxState, cl: &ClientState, n
             msg_read_pos(net_message, &mut pos);
             msg_read_dir(net_message, &mut dir);
             fx.cl_particle_effect(&pos, &dir, 0x75, 40, cl.time as f32);
-            s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_lashit, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::TrackerExplosion as i32 => {
             msg_read_pos(net_message, &mut pos);
             fx.cl_color_flash(&pos, 0, 150.0, -1.0, -1.0, -1.0, cl.time as f32);
             fx.cl_color_explosion_particles(&pos, 0, 1, cl.time as f32);
-            s_start_sound(Some(&pos), 0, 0, ts.cl_sfx_disrexp, 1.0, ATTN_NORM, 0.0);
+            s_start_sound(sound, Some(&pos), 0, 0, ts.cl_sfx_disrexp, 1.0, ATTN_NORM, 0.0, cl.time);
         }
 
         x if x == TempEvent::TeleportEffect as i32 || x == TempEvent::DballGoal as i32 => {

@@ -374,11 +374,7 @@ impl FramePacer {
         }
 
         let elapsed = current_time_ns.saturating_sub(self.last_present_time_ns);
-        if elapsed < self.target_frame_time_ns {
-            self.target_frame_time_ns - elapsed
-        } else {
-            0
-        }
+        self.target_frame_time_ns.saturating_sub(elapsed)
     }
 
     /// Check if frame is late.

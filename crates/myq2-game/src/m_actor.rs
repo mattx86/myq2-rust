@@ -1109,13 +1109,12 @@ pub fn sp_misc_actor(
     edicts[self_idx].pain_fn = Some(crate::dispatch::PAIN_ACTOR);
     edicts[self_idx].die_fn = Some(crate::dispatch::DIE_ACTOR);
 
-    // self->monsterinfo.stand = actor_stand;
-    // self->monsterinfo.walk = actor_walk;
-    // self->monsterinfo.run = actor_run;
-    // self->monsterinfo.attack = actor_attack;
-    // self->monsterinfo.melee = NULL;
-    // self->monsterinfo.sight = NULL;
-    // These would be set as callback indices in a dispatch table.
+    edicts[self_idx].monsterinfo.stand_fn = Some(crate::dispatch::MSTAND_ACTOR);
+    edicts[self_idx].monsterinfo.walk_fn = Some(crate::dispatch::MWALK_ACTOR);
+    edicts[self_idx].monsterinfo.run_fn = Some(crate::dispatch::MRUN_ACTOR);
+    edicts[self_idx].monsterinfo.attack_fn = Some(crate::dispatch::MATTACK_ACTOR);
+    edicts[self_idx].monsterinfo.melee_fn = None;  // actor has no melee
+    edicts[self_idx].monsterinfo.sight_fn = None;   // actor has no sight reaction
 
     edicts[self_idx].monsterinfo.aiflags |= AI_GOOD_GUY;
 
@@ -1127,7 +1126,7 @@ pub fn sp_misc_actor(
     walkmonster_start(&mut edicts[self_idx]);
 
     // actors always start in a dormant state, they *must* be used to get going
-    // self->use = actor_use; — would be set as callback index
+    edicts[self_idx].use_fn = Some(crate::dispatch::USE_ACTOR);
 }
 
 /// target_actor_touch — C: void target_actor_touch(edict_t *self, edict_t *other, cplane_t *plane, csurface_t *surf)
@@ -1238,7 +1237,7 @@ pub fn sp_target_actor(
     }
 
     edicts[self_idx].solid = Solid::Trigger;
-    // self->touch = target_actor_touch — would be set as callback index
+    edicts[self_idx].touch_fn = Some(crate::dispatch::TOUCH_TARGET_ACTOR);
     edicts[self_idx].mins = [-8.0, -8.0, -8.0];
     edicts[self_idx].maxs = [8.0, 8.0, 8.0];
     edicts[self_idx].svflags = SVF_NOCLIENT;

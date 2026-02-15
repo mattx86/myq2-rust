@@ -407,10 +407,11 @@ pub fn cl_http_init(base_url: &str) {
 
 /// Shutdown HTTP downloads (called on disconnect).
 pub fn cl_http_shutdown() {
-    if let Some(manager) = global_async_manager().lock().as_ref() {
+    let mut guard = global_async_manager().lock();
+    if let Some(ref manager) = *guard {
         manager.cancel_all();
     }
-    *global_async_manager().lock() = None;
+    *guard = None;
 }
 
 /// Check if HTTP downloads are available.

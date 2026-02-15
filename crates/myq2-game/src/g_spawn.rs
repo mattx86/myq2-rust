@@ -1100,6 +1100,9 @@ pub fn ed_parse_edict(ctx: &mut GameContext, data: &str, ent_idx: usize) -> Opti
         // parse key
         let (com_token, rest) = com_parse(remaining);
         if com_token == "}" {
+            // Advance past the closing brace before returning
+            // (matches C: COM_Parse(&data) advances data in-place)
+            remaining = rest.unwrap_or("");
             break;
         }
         let rest = rest.unwrap_or_else(|| {
@@ -1167,9 +1170,7 @@ pub fn ed_call_spawn(ctx: &mut GameContext, ent_idx: usize) {
             continue;
         }
         if ctx.items[i].classname == classname {
-            // found it — call SpawnItem
-            // SpawnItem deferred: requires full item spawn integration
-            gi_dprintf(&format!("SpawnItem(ent={}, item={}) deferred\n", ent_idx, i));
+            crate::g_items::spawn_item(ctx, ent_idx, i);
             return;
         }
     }
@@ -1277,7 +1278,7 @@ pub fn spawn_entities(ctx: &mut GameContext, mapname: &str, entities: &str, spaw
         ctx.skill = skill_level;
     }
 
-    // SaveClientData deferred: p_client::GameContext differs from g_spawn::GameCtx
+    crate::p_client::save_client_data(ctx);
 
     gi_free_tags(TAG_LEVEL);
 
@@ -1383,6 +1384,9 @@ pub fn spawn_entities(ctx: &mut GameContext, mapname: &str, entities: &str, spaw
 
     g_find_teams(ctx);
 
+    // Send item names as configstrings and cache armor/powerup indices
+    crate::g_items::set_item_names(ctx);
+
     // Build O(1) entity lookup indices now that all entities are spawned
     ctx.build_entity_indices();
 
@@ -1408,10 +1412,9 @@ pub fn sp_worldspawn(ctx: &mut GameContext, ent_idx: usize) {
     //---------------
 
     // reserve some spots for dead player bodies for coop / deathmatch
-    // InitBodyQue deferred: p_client::GameContext differs from g_spawn::GameContext
+    crate::p_client::init_body_que(ctx);
 
-    // set configstrings for items
-    // SetItemNames deferred: g_items::GameContext differs from g_spawn::GameContext
+    // set_item_names is called from spawn_entities after all entities are parsed
 
     if !ctx.st.nextmap.is_empty() {
         ctx.level.nextmap = ctx.st.nextmap.clone();
@@ -1463,7 +1466,10 @@ pub fn sp_worldspawn(ctx: &mut GameContext, ent_idx: usize) {
 
     ctx.snd_fry = gi_soundindex("player/fry.wav");
 
-    // PrecacheItem deferred: g_items::GameContext differs from g_spawn::GameContext
+    // Precache the blaster (player's starting weapon)
+    if let Some(blaster_idx) = crate::g_items::find_item("Blaster") {
+        crate::g_items::precache_item(ctx, blaster_idx);
+    }
 
     // All the precached sounds
     let sounds = [

@@ -7,6 +7,7 @@ use ash::vk;
 use crate::modern::gpu_device;
 
 /// A render target with color and optional depth attachments.
+#[derive(Default)]
 pub struct RenderTarget {
     /// Color image.
     color: Option<vk::Image>,
@@ -383,23 +384,6 @@ impl RenderTarget {
     }
 }
 
-impl Default for RenderTarget {
-    fn default() -> Self {
-        Self {
-            color: None,
-            color_view: None,
-            color_memory: None,
-            depth: None,
-            depth_view: None,
-            depth_memory: None,
-            sampler: None,
-            width: 0,
-            height: 0,
-            has_depth: false,
-            depth_sampleable: false,
-        }
-    }
-}
 
 impl Drop for RenderTarget {
     fn drop(&mut self) {

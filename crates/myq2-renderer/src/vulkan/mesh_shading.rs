@@ -82,6 +82,7 @@ pub struct MeshletBounds {
 }
 
 /// Mesh shader pipeline manager.
+#[derive(Default)]
 pub struct MeshShaderManager {
     /// Device capabilities.
     capabilities: MeshShaderCapabilities,
@@ -269,15 +270,6 @@ impl MeshShaderManager {
     }
 }
 
-impl Default for MeshShaderManager {
-    fn default() -> Self {
-        Self {
-            capabilities: MeshShaderCapabilities::default(),
-            mesh_loader: None,
-            enabled: false,
-        }
-    }
-}
 
 /// Generate meshlets from a triangle mesh.
 ///

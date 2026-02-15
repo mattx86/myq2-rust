@@ -50,7 +50,7 @@ pub struct LightmapArray {
 impl LightmapArray {
     /// Create a new lightmap array with GPU texture and sampler.
     pub fn new() -> Self {
-        let mut array = Self {
+        let array = Self {
             texture: None,
             image_view: None,
             sampler: None,
@@ -59,7 +59,10 @@ impl LightmapArray {
             allocated: vec![[0; BLOCK_WIDTH as usize]; MAX_LIGHTMAPS as usize],
             initialized: false,
         };
-        array.create_gpu_resources();
+        // FIXME: Defer GPU resource creation to avoid deadlock during initialization
+        // GPU resources will be created on first use or during init() phase
+        // TODO: Call create_gpu_resources() after full initialization completes
+        // array.create_gpu_resources();
         array
     }
 

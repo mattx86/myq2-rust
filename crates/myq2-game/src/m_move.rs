@@ -653,7 +653,7 @@ use myq2_common::common::rand_i32;
 mod tests {
     use super::*;
     use crate::g_local::{Edict, EntityFlags, AiFlags};
-    use myq2_common::q_shared::{anglemod, CONTENTS_SOLID};
+    use myq2_common::q_shared::anglemod;
 
     fn init_test_gi() {
         crate::game_import::set_gi(Box::new(crate::game_import::StubGameImport));

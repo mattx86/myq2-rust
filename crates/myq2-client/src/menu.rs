@@ -8,8 +8,8 @@ use std::io::Read;
 
 use crate::client::KeyDest;
 use crate::console::{
-    cmd_add_command, cvar_set, cvar_variable_value, draw_char, draw_get_pic_size,
-    draw_pic, scr_dirty_screen, CLS, VIDDEF,
+    cmd_add_command, cs, cvar_set, cvar_variable_value, draw_char, draw_get_pic_size,
+    draw_pic, get_viddef, scr_dirty_screen, CLS,
 };
 use crate::keys::{
     key_clear_states, K_AUX1, K_AUX10, K_AUX11, K_AUX12,
@@ -63,19 +63,101 @@ struct MenuLayer {
     key: Option<MenuKeyFn>,
 }
 
-static mut M_LAYERS: [MenuLayer; MAX_MENU_DEPTH] = {
-    const EMPTY: MenuLayer = MenuLayer {
-        draw: None,
-        key: None,
-    };
-    [EMPTY; MAX_MENU_DEPTH]
-};
+struct MenuState {
+    m_layers: [MenuLayer; MAX_MENU_DEPTH],
+    m_menudepth: usize,
+    m_drawfunc: Option<MenuDrawFn>,
+    m_keyfunc: Option<MenuKeyFn>,
+    m_entersound: bool,
+    m_main_cursor: i32,
+    menu_items: Vec<MenuItem>,
+    m_num_servers: usize,
+    local_server_names: [[u8; 80]; MAX_LOCAL_SERVERS],
+    local_server_netadr: [myq2_common::qcommon::NetAdr; MAX_LOCAL_SERVERS],
+    s_game_menu: MenuFramework,
+    s_multiplayer_menu: MenuFramework,
+    s_options_menu: MenuFramework,
+    s_keys_menu: MenuFramework,
+    bind_grab: bool,
+    credits_start_time: i32,
+    credits: &'static [&'static str],
+    m_savestrings: [[u8; 32]; MAX_SAVEGAMES],
+    m_savevalid: [bool; MAX_SAVEGAMES],
+    s_loadgame_menu: MenuFramework,
+    s_savegame_menu: MenuFramework,
+    s_joinserver_menu: MenuFramework,
+    s_startserver_menu: MenuFramework,
+    startserver_mapnames: Vec<String>,
+    s_dmoptions_menu: MenuFramework,
+    s_downloadoptions_menu: MenuFramework,
+    s_addressbook_menu: MenuFramework,
+    s_player_config_menu: MenuFramework,
+}
 
-static mut M_MENUDEPTH: usize = 0;
-static mut M_DRAWFUNC: Option<MenuDrawFn> = None;
-static mut M_KEYFUNC: Option<MenuKeyFn> = None;
-static mut M_ENTERSOUND: bool = false;
-static mut M_MAIN_CURSOR: i32 = 0;
+// SAFETY: MenuState contains Vec and Box<dyn Fn> which are Send but the struct
+// also has function pointers in MenuLayer. All menu access is from the main thread.
+unsafe impl Send for MenuState {}
+unsafe impl Sync for MenuState {}
+
+impl MenuState {
+    fn new() -> Self {
+        const EMPTY_LAYER: MenuLayer = MenuLayer { draw: None, key: None };
+        let mf = || MenuFramework {
+            x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
+            items: Vec::new(), statusbar: None, cursordraw: None,
+        };
+        MenuState {
+            m_layers: [EMPTY_LAYER; MAX_MENU_DEPTH],
+            m_menudepth: 0,
+            m_drawfunc: None,
+            m_keyfunc: None,
+            m_entersound: false,
+            m_main_cursor: 0,
+            menu_items: Vec::new(),
+            m_num_servers: 0,
+            local_server_names: [[0u8; 80]; MAX_LOCAL_SERVERS],
+            local_server_netadr: [myq2_common::qcommon::NetAdr::default(); MAX_LOCAL_SERVERS],
+            s_game_menu: mf(),
+            s_multiplayer_menu: mf(),
+            s_options_menu: mf(),
+            s_keys_menu: mf(),
+            bind_grab: false,
+            credits_start_time: 0,
+            credits: ID_CREDITS,
+            m_savestrings: [[0u8; 32]; MAX_SAVEGAMES],
+            m_savevalid: [false; MAX_SAVEGAMES],
+            s_loadgame_menu: mf(),
+            s_savegame_menu: mf(),
+            s_joinserver_menu: mf(),
+            s_startserver_menu: mf(),
+            startserver_mapnames: Vec::new(),
+            s_dmoptions_menu: mf(),
+            s_downloadoptions_menu: mf(),
+            s_addressbook_menu: mf(),
+            s_player_config_menu: mf(),
+        }
+    }
+}
+
+struct MenuStateCell(std::cell::UnsafeCell<MenuState>);
+unsafe impl Sync for MenuStateCell {}
+
+static MENU_STATE: std::sync::LazyLock<MenuStateCell> =
+    std::sync::LazyLock::new(|| MenuStateCell(std::cell::UnsafeCell::new(MenuState::new())));
+
+/// Access the global menu state.
+///
+/// # Safety
+/// Menu state is only accessed from the main thread. The UnsafeCell provides
+/// interior mutability for the re-entrant callback patterns in the menu system
+/// (menu item callbacks invoke m_push_menu/m_force_menu_off which modify menu
+/// navigation state). This centralizes the safety invariant in one location
+/// instead of 100+ individual unsafe blocks.
+fn ms() -> &'static mut MenuState {
+    // SAFETY: Menu state is only accessed from the main thread. The UnsafeCell
+    // provides interior mutability for re-entrant callback patterns.
+    unsafe { &mut *MENU_STATE.0.get() }
+}
 
 // ============================================================
 // Sound paths
@@ -91,8 +173,7 @@ const MENU_OUT_SOUND: &str = "misc/menu3.wav";
 
 /// S_StartLocalSound — wired through console module's system function pointer table.
 fn s_start_local_sound(sound: &str) {
-    // SAFETY: single-threaded engine
-    unsafe { (crate::console::SYSTEM_FNS.s_start_local_sound)(sound) }
+    (crate::console::system_fns().s_start_local_sound)(sound)
 }
 
 use myq2_common::common::com_server_state;
@@ -105,8 +186,7 @@ fn draw_fill(x: i32, y: i32, w: i32, h: i32, c: i32, a: f32) {
 
 /// Draw_FadeScreen — wired through console module's renderer function pointer table.
 fn draw_fade_screen() {
-    // SAFETY: single-threaded engine
-    unsafe { (crate::console::RENDERER_FNS.draw_fade_screen)() }
+    (crate::console::renderer_fns().draw_fade_screen)()
 }
 
 /// GLimp_EndFrame — wired through console module's renderer function pointer table.
@@ -131,20 +211,17 @@ fn cl_snd_restart_f() {
 
 /// VID_MenuInit — dispatches through platform video menu function pointer table.
 fn vid_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe { (crate::console::VID_MENU_FNS.vid_menu_init)() }
+    (crate::console::vid_menu_fns().vid_menu_init)()
 }
 
 /// VID_MenuDraw — dispatches through platform video menu function pointer table.
 fn vid_menu_draw() {
-    // SAFETY: single-threaded engine
-    unsafe { (crate::console::VID_MENU_FNS.vid_menu_draw)() }
+    (crate::console::vid_menu_fns().vid_menu_draw)()
 }
 
 /// VID_MenuKey — dispatches through platform video menu function pointer table.
 fn vid_menu_key(key: i32) -> Option<&'static str> {
-    // SAFETY: single-threaded engine
-    unsafe { (crate::console::VID_MENU_FNS.vid_menu_key)(key) }
+    (crate::console::vid_menu_fns().vid_menu_key)(key)
 }
 
 /// FS_LoadFile — wired to myq2_common
@@ -212,8 +289,6 @@ fn make_menu_common(
 // Each framework-based menu stores items here via MENU_ITEMS.
 // ============================================================
 
-static mut MENU_ITEMS: Vec<MenuItem> = Vec::new();
-
 /// Adapter: wraps the console-based renderer functions into a MenuRenderer impl
 /// so that qmenu drawing routines can be called from menu.rs.
 struct ConsoleMenuRenderer;
@@ -229,20 +304,17 @@ impl crate::qmenu::MenuRenderer for ConsoleMenuRenderer {
         crate::console::sys_milliseconds()
     }
     fn vid_width(&self) -> i32 {
-        // SAFETY: single-threaded engine
-        unsafe { VIDDEF.width }
+        cs().viddef.width
     }
     fn vid_height(&self) -> i32 {
-        // SAFETY: single-threaded engine
-        unsafe { VIDDEF.height }
+        cs().viddef.height
     }
     fn sys_get_clipboard_data(&self) -> Option<String> {
-        None // clipboard not wired yet
+        (crate::console::system_fns().sys_get_clipboard_data)()
     }
     fn keydown(&self, key: i32) -> bool {
-        // SAFETY: single-threaded engine
         if key >= 0 && key < 256 {
-            unsafe { crate::keys::KEYDOWN[key as usize] }
+            crate::keys::ks().keydown[key as usize]
         } else {
             false
         }
@@ -250,80 +322,65 @@ impl crate::qmenu::MenuRenderer for ConsoleMenuRenderer {
 }
 
 /// Menu_AddItem — wraps a MenuCommon into the appropriate MenuItem variant
-/// and adds it to the global MENU_ITEMS storage via qmenu::menu_add_item.
+/// and adds it to the global menu_items storage via qmenu::menu_add_item.
 fn menu_add_item_common(menu: &mut MenuFramework, item: MenuCommon) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        let qm_item = match item.item_type {
-            MTYPE_SLIDER => MenuItem::Slider(MenuSlider {
-                generic: item,
-                ..Default::default()
-            }),
-            MTYPE_FIELD => MenuItem::Field(MenuField {
-                generic: item,
-                ..Default::default()
-            }),
-            MTYPE_SEPARATOR => MenuItem::Separator(MenuSeparator {
-                generic: item,
-            }),
-            MTYPE_SPINCONTROL => MenuItem::SpinControl(MenuList {
-                generic: item,
-                ..Default::default()
-            }),
-            MTYPE_LIST => MenuItem::List(MenuList {
-                generic: item,
-                ..Default::default()
-            }),
-            _ => MenuItem::Action(MenuAction {
-                generic: item,
-            }),
-        };
-        crate::qmenu::menu_add_item(menu, &mut MENU_ITEMS, qm_item);
-    }
+    let qm_item = match item.item_type {
+        MTYPE_SLIDER => MenuItem::Slider(MenuSlider {
+            generic: item,
+            ..Default::default()
+        }),
+        MTYPE_FIELD => MenuItem::Field(MenuField {
+            generic: item,
+            ..Default::default()
+        }),
+        MTYPE_SEPARATOR => MenuItem::Separator(MenuSeparator {
+            generic: item,
+        }),
+        MTYPE_SPINCONTROL => MenuItem::SpinControl(MenuList {
+            generic: item,
+            ..Default::default()
+        }),
+        MTYPE_LIST => MenuItem::List(MenuList {
+            generic: item,
+            ..Default::default()
+        }),
+        _ => MenuItem::Action(MenuAction {
+            generic: item,
+        }),
+    };
+    crate::qmenu::menu_add_item(menu, &mut ms().menu_items, qm_item);
 }
 
-/// Menu_AdjustCursor — delegates to qmenu using global MENU_ITEMS storage.
+/// Menu_AdjustCursor — delegates to qmenu using global menu_items storage.
 fn menu_adjust_cursor(menu: &mut MenuFramework, dir: i32) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        crate::qmenu::menu_adjust_cursor(menu, &MENU_ITEMS, dir);
-    }
+    crate::qmenu::menu_adjust_cursor(menu, &ms().menu_items, dir);
 }
 
-/// Menu_Center — delegates to qmenu using global MENU_ITEMS storage.
+/// Menu_Center — delegates to qmenu using global menu_items storage.
 fn menu_center(menu: &mut MenuFramework) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        crate::qmenu::menu_center(menu, &MENU_ITEMS, VIDDEF.height);
-    }
+    let viddef_height = cs().viddef.height;
+    crate::qmenu::menu_center(menu, &ms().menu_items, viddef_height);
 }
 
-/// Menu_Draw — delegates to qmenu using global MENU_ITEMS storage and ConsoleMenuRenderer.
+/// Menu_Draw — delegates to qmenu using global menu_items storage and ConsoleMenuRenderer.
 fn menu_draw(menu: &MenuFramework) {
-    // SAFETY: single-threaded engine
-    unsafe {
+    {
         let mut renderer = ConsoleMenuRenderer;
-        crate::qmenu::menu_draw(&mut renderer, menu, &mut MENU_ITEMS);
+        crate::qmenu::menu_draw(&mut renderer, menu, &mut ms().menu_items);
     }
 }
 
-/// Menu_ItemAtCursor — delegates to qmenu using global MENU_ITEMS storage.
+/// Menu_ItemAtCursor — delegates to qmenu using global menu_items storage.
 fn menu_item_at_cursor(menu: &MenuFramework) -> Option<usize> {
-    // SAFETY: single-threaded engine
-    unsafe {
-        crate::qmenu::menu_item_at_cursor(menu, &MENU_ITEMS)
-            .map(|_item| {
-                menu.cursor as usize
-            })
-    }
+    crate::qmenu::menu_item_at_cursor(menu, &ms().menu_items)
+        .map(|_item| {
+            menu.cursor as usize
+        })
 }
 
-/// Menu_SelectItem — delegates to qmenu using global MENU_ITEMS storage.
+/// Menu_SelectItem — delegates to qmenu using global menu_items storage.
 fn menu_select_item(menu: &mut MenuFramework) -> bool {
-    // SAFETY: single-threaded engine
-    unsafe {
-        crate::qmenu::menu_select_item(menu, &MENU_ITEMS)
-    }
+    crate::qmenu::menu_select_item(menu, &ms().menu_items)
 }
 
 /// Menu_SetStatusBar — sets the statusbar text on the framework.
@@ -331,12 +388,9 @@ fn menu_set_status_bar(menu: &mut MenuFramework, text: Option<&'static str>) {
     menu.statusbar = text.map(|s| s.to_string());
 }
 
-/// Menu_SlideItem — delegates to qmenu using global MENU_ITEMS storage.
+/// Menu_SlideItem — delegates to qmenu using global menu_items storage.
 fn menu_slide_item(menu: &mut MenuFramework, dir: i32) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        crate::qmenu::menu_slide_item(menu, &mut MENU_ITEMS, dir);
-    }
+    crate::qmenu::menu_slide_item(menu, &mut ms().menu_items, dir);
 }
 
 /// Menu_DrawString — draws a string using the ConsoleMenuRenderer.
@@ -347,14 +401,11 @@ fn menu_draw_string(x: i32, y: i32, s: &str) {
 
 /// Field_Key — delegates to qmenu field_key with ConsoleMenuRenderer.
 fn field_key(field_idx: usize, key: i32) -> bool {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(MenuItem::Field(ref mut field)) = MENU_ITEMS.get_mut(field_idx) {
-            let renderer = ConsoleMenuRenderer;
-            crate::qmenu::field_key(field, key, &renderer)
-        } else {
-            false
-        }
+    if let Some(MenuItem::Field(ref mut field)) = ms().menu_items.get_mut(field_idx) {
+        let renderer = ConsoleMenuRenderer;
+        crate::qmenu::field_key(field, key, &renderer)
+    } else {
+        false
     }
 }
 
@@ -365,112 +416,106 @@ fn field_key(field_idx: usize, key: i32) -> bool {
 /// Draw a banner image centered horizontally.
 fn m_banner(name: &str) {
     let (w, _h) = draw_get_pic_size(name);
-    // SAFETY: single-threaded engine
-    unsafe {
-        draw_pic(VIDDEF.width / 2 - w / 2, VIDDEF.height / 2 - 110, name);
-    }
+    let viddef = cs().viddef;
+    draw_pic(viddef.width / 2 - w / 2, viddef.height / 2 - 110, name);
 }
 
 /// Push a new menu onto the stack.
 pub fn m_push_menu(draw: MenuDrawFn, key: MenuKeyFn) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if cvar_variable_value("maxclients") == 1.0 && com_server_state() != 0 {
-            cvar_set("paused", "1");
-        }
-
-        // if this menu is already present, drop back to that level
-        let mut found = false;
-        for i in 0..M_MENUDEPTH {
-            if M_LAYERS[i].draw == Some(draw) && M_LAYERS[i].key == Some(key) {
-                M_MENUDEPTH = i;
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
-            if M_MENUDEPTH >= MAX_MENU_DEPTH {
-                myq2_common::common::com_error(myq2_common::q_shared::ERR_FATAL, "M_PushMenu: MAX_MENU_DEPTH");
-            }
-            M_LAYERS[M_MENUDEPTH].draw = M_DRAWFUNC;
-            M_LAYERS[M_MENUDEPTH].key = M_KEYFUNC;
-            M_MENUDEPTH += 1;
-        }
-
-        M_DRAWFUNC = Some(draw);
-        M_KEYFUNC = Some(key);
-        M_ENTERSOUND = true;
-        CLS.key_dest = KeyDest::Menu;
+    if cvar_variable_value("maxclients") == 1.0 && com_server_state() != 0 {
+        cvar_set("paused", "1");
     }
+
+    let s = ms();
+
+    // if this menu is already present, drop back to that level
+    let mut found = false;
+    for i in 0..s.m_menudepth {
+        if s.m_layers[i].draw == Some(draw) && s.m_layers[i].key == Some(key) {
+            s.m_menudepth = i;
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        if s.m_menudepth >= MAX_MENU_DEPTH {
+            myq2_common::common::com_error(myq2_common::q_shared::ERR_FATAL, "M_PushMenu: MAX_MENU_DEPTH");
+        }
+        let depth = s.m_menudepth;
+        s.m_layers[depth].draw = s.m_drawfunc;
+        s.m_layers[depth].key = s.m_keyfunc;
+        s.m_menudepth += 1;
+    }
+
+    s.m_drawfunc = Some(draw);
+    s.m_keyfunc = Some(key);
+    s.m_entersound = true;
+    // SAFETY: CLS initialized at startup, accessed from main thread
+    unsafe { CLS.key_dest = KeyDest::Menu; }
 }
 
 /// Force the menu off.
 pub fn m_force_menu_off() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        M_DRAWFUNC = None;
-        M_KEYFUNC = None;
-        CLS.key_dest = KeyDest::Game;
-        M_MENUDEPTH = 0;
-        key_clear_states();
-        cvar_set("paused", "0");
-    }
+    let s = ms();
+    s.m_drawfunc = None;
+    s.m_keyfunc = None;
+    // SAFETY: CLS initialized at startup, accessed from main thread
+    unsafe { CLS.key_dest = KeyDest::Game; }
+    s.m_menudepth = 0;
+    key_clear_states();
+    cvar_set("paused", "0");
 }
 
 // ============================================================
 // Server list for the Join Server menu
 // ============================================================
 
-static mut M_NUM_SERVERS: usize = 0;
-static mut LOCAL_SERVER_NAMES: [[u8; 80]; MAX_LOCAL_SERVERS] = [[0u8; 80]; MAX_LOCAL_SERVERS];
-
 /// Add a server to the local server list (used by the Join Server menu).
 /// Converted from: M_AddToServerList in myq2-original/client/menu.c
-pub fn m_add_to_server_list(info: &str) {
-    // SAFETY: single-threaded engine, mirrors original C static globals
-    unsafe {
-        if M_NUM_SERVERS == MAX_LOCAL_SERVERS {
+pub fn m_add_to_server_list(adr: &myq2_common::qcommon::NetAdr, info: &str) {
+    let s = ms();
+    if s.m_num_servers == MAX_LOCAL_SERVERS {
+        return;
+    }
+
+    let trimmed = info.trim_start();
+
+    // ignore if duplicated
+    for i in 0..s.m_num_servers {
+        let existing = std::str::from_utf8(&s.local_server_names[i])
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        if existing == trimmed {
             return;
         }
-
-        let trimmed = info.trim_start();
-
-        // ignore if duplicated
-        for i in 0..M_NUM_SERVERS {
-            let existing = std::str::from_utf8(&LOCAL_SERVER_NAMES[i])
-                .unwrap_or("")
-                .trim_end_matches('\0');
-            if existing == trimmed {
-                return;
-            }
-        }
-
-        // store the name (truncated to 79 chars + NUL)
-        let bytes = trimmed.as_bytes();
-        let copy_len = bytes.len().min(79);
-        LOCAL_SERVER_NAMES[M_NUM_SERVERS][..copy_len].copy_from_slice(&bytes[..copy_len]);
-        LOCAL_SERVER_NAMES[M_NUM_SERVERS][copy_len] = 0;
-        M_NUM_SERVERS += 1;
     }
+
+    // store the name (truncated to 79 chars + NUL) and network address
+    let bytes = trimmed.as_bytes();
+    let copy_len = bytes.len().min(79);
+    let idx = s.m_num_servers;
+    s.local_server_names[idx][..copy_len].copy_from_slice(&bytes[..copy_len]);
+    s.local_server_names[idx][copy_len] = 0;
+    s.local_server_netadr[idx] = *adr;
+    s.m_num_servers += 1;
 }
 
 /// Pop the current menu.
 pub fn m_pop_menu() {
     s_start_local_sound(MENU_OUT_SOUND);
-    // SAFETY: single-threaded engine
-    unsafe {
-        if M_MENUDEPTH < 1 {
-            myq2_common::common::com_error(myq2_common::q_shared::ERR_FATAL, "M_PopMenu: depth < 1");
-        }
-        M_MENUDEPTH -= 1;
+    let s = ms();
+    if s.m_menudepth < 1 {
+        myq2_common::common::com_error(myq2_common::q_shared::ERR_FATAL, "M_PopMenu: depth < 1");
+    }
+    s.m_menudepth -= 1;
 
-        M_DRAWFUNC = M_LAYERS[M_MENUDEPTH].draw;
-        M_KEYFUNC = M_LAYERS[M_MENUDEPTH].key;
+    let depth = s.m_menudepth;
+    s.m_drawfunc = s.m_layers[depth].draw;
+    s.m_keyfunc = s.m_layers[depth].key;
 
-        if M_MENUDEPTH == 0 {
-            m_force_menu_off();
-        }
+    if s.m_menudepth == 0 {
+        m_force_menu_off();
     }
 }
 
@@ -481,14 +526,12 @@ pub fn m_pop_menu() {
 /// Draws one solid graphics character at menu coordinates.
 /// cx and cy are in 320*240 coordinates.
 pub fn m_draw_character(cx: i32, cy: i32, num: i32) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        draw_char(
-            cx + ((VIDDEF.width - 320) >> 1),
-            cy + ((VIDDEF.height - 240) >> 1),
-            num,
-        );
-    }
+    let viddef = cs().viddef;
+    draw_char(
+        cx + ((viddef.width - 320) >> 1),
+        cy + ((viddef.height - 240) >> 1),
+        num,
+    );
 }
 
 /// Print colored text at menu coordinates.
@@ -511,29 +554,25 @@ pub fn m_print_white(cx: i32, cy: i32, str_text: &str) {
 
 /// Draw a picture at menu coordinates.
 pub fn m_draw_pic(x: i32, y: i32, pic: &str) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        draw_pic(
-            x + ((VIDDEF.width - 320) >> 1),
-            y + ((VIDDEF.height - 240) >> 1),
-            pic,
-        );
-    }
+    let viddef = cs().viddef;
+    draw_pic(
+        x + ((viddef.width - 320) >> 1),
+        y + ((viddef.height - 240) >> 1),
+        pic,
+    );
 }
 
 /// Draw an animating cursor.
 pub fn m_draw_cursor(x: i32, y: i32, f: i32) {
-    static mut CACHED: bool = false;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static CACHED: AtomicBool = AtomicBool::new(false);
 
-    // SAFETY: single-threaded engine
-    unsafe {
-        if !CACHED {
-            for i in 0..NUM_CURSOR_FRAMES {
-                let cursorname = format!("m_cursor{}", i);
-                crate::console::draw_find_pic(&cursorname);
-            }
-            CACHED = true;
+    if !CACHED.load(Ordering::Relaxed) {
+        for i in 0..NUM_CURSOR_FRAMES {
+            let cursorname = format!("m_cursor{}", i);
+            crate::console::draw_find_pic(&cursorname);
         }
+        CACHED.store(true, Ordering::Relaxed);
     }
 
     let cursorname = format!("m_cursor{}", f);
@@ -602,30 +641,30 @@ fn m_main_draw() {
         totalheight += h + 12;
     }
 
-    // SAFETY: single-threaded engine
-    unsafe {
-        let ystart = VIDDEF.height / 2 - 110;
-        let xoffset = (VIDDEF.width - widest + 70) / 2;
+    let ystart = get_viddef().height / 2 - 110;
+    let xoffset = (get_viddef().width - widest + 70) / 2;
 
-        for (i, name) in names.iter().enumerate() {
-            if i as i32 != M_MAIN_CURSOR {
-                draw_pic(xoffset, ystart + i as i32 * 40 + 13, name);
-            }
+    let cursor = ms().m_main_cursor;
+    for (i, name) in names.iter().enumerate() {
+        if i as i32 != cursor {
+            draw_pic(xoffset, ystart + i as i32 * 40 + 13, name);
         }
-
-        let litname = format!("{}_sel", names[M_MAIN_CURSOR as usize]);
-        draw_pic(xoffset, ystart + M_MAIN_CURSOR * 40 + 13, &litname);
-
-        m_draw_cursor(
-            xoffset - 25,
-            ystart + M_MAIN_CURSOR * 40 + 11,
-            (CLS.realtime / 100) % NUM_CURSOR_FRAMES,
-        );
-
-        let (w, h) = draw_get_pic_size("m_main_plaque");
-        draw_pic(xoffset - 30 - w, ystart, "m_main_plaque");
-        draw_pic(xoffset - 30 - w, ystart + h + 5, "m_main_logo");
     }
+
+    let litname = format!("{}_sel", names[cursor as usize]);
+    draw_pic(xoffset, ystart + cursor * 40 + 13, &litname);
+
+    // SAFETY: CLS initialized at startup, accessed from main thread
+    let realtime = unsafe { CLS.realtime };
+    m_draw_cursor(
+        xoffset - 25,
+        ystart + cursor * 40 + 11,
+        (realtime / 100) % NUM_CURSOR_FRAMES,
+    );
+
+    let (w, h) = draw_get_pic_size("m_main_plaque");
+    draw_pic(xoffset - 30 - w, ystart, "m_main_plaque");
+    draw_pic(xoffset - 30 - w, ystart + h + 5, "m_main_logo");
 }
 
 fn m_main_key(key: i32) -> Option<&'static str> {
@@ -635,37 +674,28 @@ fn m_main_key(key: i32) -> Option<&'static str> {
             None
         }
         K_DOWNARROW | 167 /* K_KP_DOWNARROW */ => {
-            // SAFETY: single-threaded engine
-            unsafe {
-                M_MAIN_CURSOR += 1;
-                if M_MAIN_CURSOR >= MAIN_ITEMS {
-                    M_MAIN_CURSOR = 0;
-                }
+            ms().m_main_cursor += 1;
+            if ms().m_main_cursor >= MAIN_ITEMS {
+                ms().m_main_cursor = 0;
             }
             Some(MENU_MOVE_SOUND)
         }
         K_UPARROW | 161 /* K_KP_UPARROW */ => {
-            // SAFETY: single-threaded engine
-            unsafe {
-                M_MAIN_CURSOR -= 1;
-                if M_MAIN_CURSOR < 0 {
-                    M_MAIN_CURSOR = MAIN_ITEMS - 1;
-                }
+            ms().m_main_cursor -= 1;
+            if ms().m_main_cursor < 0 {
+                ms().m_main_cursor = MAIN_ITEMS - 1;
             }
             Some(MENU_MOVE_SOUND)
         }
         K_KP_ENTER | K_ENTER => {
-            // SAFETY: single-threaded engine
-            unsafe {
-                M_ENTERSOUND = true;
-                match M_MAIN_CURSOR {
-                    0 => m_menu_game_f(),
-                    1 => m_menu_multiplayer_f(),
-                    2 => m_menu_options_f(),
-                    3 => m_menu_video_f(),
-                    4 => m_menu_quit_f(),
-                    _ => {}
-                }
+            ms().m_entersound = true;
+            match ms().m_main_cursor {
+                0 => m_menu_game_f(),
+                1 => m_menu_multiplayer_f(),
+                2 => m_menu_options_f(),
+                3 => m_menu_video_f(),
+                4 => m_menu_quit_f(),
+                _ => {}
             }
             None
         }
@@ -683,14 +713,9 @@ pub fn m_menu_main_f() {
 // Converted from: Game_MenuInit / Game_MenuDraw / Game_MenuKey
 // ============================================================
 
-static mut S_GAME_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
-
 /// StartGame — disable updates and start the cinematic going.
 fn start_game() {
-    // SAFETY: single-threaded engine
+    // SAFETY: CLS initialized at startup, accessed from main thread
     unsafe {
         crate::console::CL.servercount = -1;
     }
@@ -699,7 +724,7 @@ fn start_game() {
     cvar_set_value("coop", 0.0);
     cvar_set_value("gamerules", 0.0);
     crate::console::cbuf_add_text("loading ; killserver ; wait ; newgame\n");
-    // SAFETY: single-threaded engine
+    // SAFETY: CLS initialized at startup, accessed from main thread
     unsafe { CLS.key_dest = KeyDest::Game; }
 }
 
@@ -733,64 +758,56 @@ fn credits_func() {
 /// Callback dispatcher for game menu items.
 /// localdata[0] encodes which action: 0=easy, 1=medium, 2=hard, 3=load, 4=save, 5=credits
 fn game_menu_callback(idx: usize) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(item) = MENU_ITEMS.get(idx) {
-            let ld = item.generic().localdata[0];
-            match ld {
-                0 => easy_game_func(),
-                1 => medium_game_func(),
-                2 => hard_game_func(),
-                3 => load_game_func(),
-                4 => save_game_func(),
-                5 => credits_func(),
-                _ => {}
-            }
+    if let Some(item) = ms().menu_items.get(idx) {
+        let ld = item.generic().localdata[0];
+        match ld {
+            0 => easy_game_func(),
+            1 => medium_game_func(),
+            2 => hard_game_func(),
+            3 => load_game_func(),
+            4 => save_game_func(),
+            5 => credits_func(),
+            _ => {}
         }
     }
 }
 
 fn game_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        S_GAME_MENU = MenuFramework {
-            x: (VIDDEF.width as f32 * 0.50) as i32,
-            y: 0, cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
+    let s = ms();
+    s.s_game_menu = MenuFramework {
+        x: (get_viddef().width as f32 * 0.50) as i32,
+        y: 0, cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    s.menu_items.clear();
 
-        let items: &[(&str, i32, i32)] = &[
-            ("easy",      0,  0),
-            ("medium",   10,  1),
-            ("hard",     20,  2),
-            ("load game", 40, 3),
-            ("save game", 50, 4),
-            ("credits",  60,  5),
-        ];
+    let items: &[(&str, i32, i32)] = &[
+        ("easy",      0,  0),
+        ("medium",   10,  1),
+        ("hard",     20,  2),
+        ("load game", 40, 3),
+        ("save game", 50, 4),
+        ("credits",  60,  5),
+    ];
 
-        for &(name, y, id) in items {
-            let item = make_menu_common(
-                MTYPE_ACTION, name, 0, y, QMF_LEFT_JUSTIFY,
-                [id, 0, 0, 0], Some(game_menu_callback), None,
-            );
-            menu_add_item_common(&mut S_GAME_MENU, item);
-        }
-
-        // Insert a blank separator at index 3 (between hard and load game)
-        // The C code adds two separators but they are visual only; we just skip y values instead.
-
-        menu_center(&mut S_GAME_MENU);
+    for &(name, y, id) in items {
+        let item = make_menu_common(
+            MTYPE_ACTION, name, 0, y, QMF_LEFT_JUSTIFY,
+            [id, 0, 0, 0], Some(game_menu_callback), None,
+        );
+        menu_add_item_common(&mut ms().s_game_menu, item);
     }
+
+    // Insert a blank separator at index 3 (between hard and load game)
+    // The C code adds two separators but they are visual only; we just skip y values instead.
+
+    menu_center(&mut ms().s_game_menu);
 }
 
 fn game_menu_draw() {
     m_banner("m_banner_game");
-    // SAFETY: single-threaded engine
-    unsafe {
-        menu_adjust_cursor(&mut S_GAME_MENU, 1);
-        menu_draw(&S_GAME_MENU);
-    }
+    menu_adjust_cursor(&mut ms().s_game_menu, 1);
+    menu_draw(&ms().s_game_menu);
 }
 
 fn game_menu_key(key: i32) -> Option<&'static str> {
@@ -807,61 +824,48 @@ pub fn m_menu_game_f() {
 // Converted from: Multiplayer_MenuInit / Multiplayer_MenuDraw / Multiplayer_MenuKey
 // ============================================================
 
-static mut S_MULTIPLAYER_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
-
 fn multiplayer_menu_callback(idx: usize) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(item) = MENU_ITEMS.get(idx) {
-            match item.generic().localdata[0] {
-                0 => m_menu_join_server_f(),
-                1 => m_menu_start_server_f(),
-                2 => m_menu_player_config_f(),
-                _ => {}
-            }
+    if let Some(item) = ms().menu_items.get(idx) {
+        match item.generic().localdata[0] {
+            0 => m_menu_join_server_f(),
+            1 => m_menu_start_server_f(),
+            2 => m_menu_player_config_f(),
+            _ => {}
         }
     }
 }
 
 fn multiplayer_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        S_MULTIPLAYER_MENU = MenuFramework {
-            x: (VIDDEF.width as f32 * 0.50) as i32 - 64,
-            y: 0, cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
+    let s = ms();
+    s.s_multiplayer_menu = MenuFramework {
+        x: (get_viddef().width as f32 * 0.50) as i32 - 64,
+        y: 0, cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    s.menu_items.clear();
 
-        let items: &[(&str, i32, i32)] = &[
-            (" join network server",  0, 0),
-            (" start network server", 10, 1),
-            (" player setup",         20, 2),
-        ];
+    let items: &[(&str, i32, i32)] = &[
+        (" join network server",  0, 0),
+        (" start network server", 10, 1),
+        (" player setup",         20, 2),
+    ];
 
-        for &(name, y, id) in items {
-            let item = make_menu_common(
-                MTYPE_ACTION, name, 0, y, QMF_LEFT_JUSTIFY,
-                [id, 0, 0, 0], Some(multiplayer_menu_callback), None,
-            );
-            menu_add_item_common(&mut S_MULTIPLAYER_MENU, item);
-        }
-
-        menu_set_status_bar(&mut S_MULTIPLAYER_MENU, None);
-        menu_center(&mut S_MULTIPLAYER_MENU);
+    for &(name, y, id) in items {
+        let item = make_menu_common(
+            MTYPE_ACTION, name, 0, y, QMF_LEFT_JUSTIFY,
+            [id, 0, 0, 0], Some(multiplayer_menu_callback), None,
+        );
+        menu_add_item_common(&mut ms().s_multiplayer_menu, item);
     }
+
+    menu_set_status_bar(&mut ms().s_multiplayer_menu, None);
+    menu_center(&mut ms().s_multiplayer_menu);
 }
 
 fn multiplayer_menu_draw() {
     m_banner("m_banner_multiplayer");
-    // SAFETY: single-threaded engine
-    unsafe {
-        menu_adjust_cursor(&mut S_MULTIPLAYER_MENU, 1);
-        menu_draw(&S_MULTIPLAYER_MENU);
-    }
+    menu_adjust_cursor(&mut ms().s_multiplayer_menu, 1);
+    menu_draw(&ms().s_multiplayer_menu);
 }
 
 fn multiplayer_menu_key(key: i32) -> Option<&'static str> {
@@ -877,11 +881,6 @@ pub fn m_menu_multiplayer_f() {
 // Options Menu
 // Converted from: Options_MenuInit / Options_MenuDraw / Options_MenuKey
 // ============================================================
-
-static mut S_OPTIONS_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
 
 // Options menu item indices (order they are added)
 const OPT_SFX_VOLUME: i32 = 0;
@@ -905,318 +904,308 @@ fn clamp_cvar(min: f32, max: f32, value: f32) -> f32 {
 }
 
 fn options_menu_callback(idx: usize) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(item) = MENU_ITEMS.get(idx) {
-            let id = item.generic().localdata[0];
-            match id {
-                OPT_SFX_VOLUME => {
-                    // UpdateVolumeFunc: read slider curvalue from qmenu item
-                    if let MenuItem::Slider(ref s) = item {
-                        cvar_set_value("s_volume", s.curvalue / 10.0);
-                    }
+    if let Some(item) = ms().menu_items.get(idx) {
+        let id = item.generic().localdata[0];
+        match id {
+            OPT_SFX_VOLUME => {
+                // UpdateVolumeFunc: read slider curvalue from qmenu item
+                if let MenuItem::Slider(ref s) = item {
+                    cvar_set_value("s_volume", s.curvalue / 10.0);
                 }
-                OPT_CD_VOLUME => {
-                    if let MenuItem::SpinControl(ref s) = item {
-                        cvar_set_value("cd_nocd", if s.curvalue == 0 { 1.0 } else { 0.0 });
-                    }
-                }
-                OPT_QUALITY | OPT_COMPATIBILITY => {
-                    // UpdateSoundQualityFunc
-                    let quality_val = if let Some(MenuItem::SpinControl(ref s)) = MENU_ITEMS.get(OPT_QUALITY as usize) {
-                        s.curvalue
-                    } else { 0 };
-                    let compat_val = if let Some(MenuItem::SpinControl(ref s)) = MENU_ITEMS.get(OPT_COMPATIBILITY as usize) {
-                        s.curvalue
-                    } else { 0 };
-                    if quality_val != 0 {
-                        cvar_set_value("s_khz", 22.0);
-                        cvar_set_value("s_loadas8bit", 0.0);
-                    } else {
-                        cvar_set_value("s_khz", 11.0);
-                        cvar_set_value("s_loadas8bit", 1.0);
-                    }
-                    cvar_set_value("s_primary", compat_val as f32);
-                    m_draw_text_box(8, 120 - 48, 36, 3);
-                    m_print(16 + 16, 120 - 48 + 8,  "Restarting the sound system. This");
-                    m_print(16 + 16, 120 - 48 + 16, "could take up to a minute, so");
-                    m_print(16 + 16, 120 - 48 + 24, "please be patient.");
-                    glimp_end_frame();
-                    cl_snd_restart_f();
-                }
-                OPT_SENSITIVITY => {
-                    if let MenuItem::Slider(ref s) = item {
-                        cvar_set_value("sensitivity", s.curvalue / 2.0);
-                    }
-                }
-                OPT_ALWAYSRUN => {
-                    if let MenuItem::SpinControl(ref s) = item {
-                        cvar_set_value("cl_run", s.curvalue as f32);
-                    }
-                }
-                OPT_INVERTMOUSE => {
-                    let cur = cvar_variable_value("m_pitch");
-                    cvar_set_value("m_pitch", -cur);
-                }
-                OPT_LOOKSPRING => {
-                    let cur = cvar_variable_value("lookspring");
-                    cvar_set_value("lookspring", if cur == 0.0 { 1.0 } else { 0.0 });
-                }
-                OPT_LOOKSTRAFE => {
-                    let cur = cvar_variable_value("lookstrafe");
-                    cvar_set_value("lookstrafe", if cur == 0.0 { 1.0 } else { 0.0 });
-                }
-                OPT_FREELOOK => {
-                    if let MenuItem::SpinControl(ref s) = item {
-                        cvar_set_value("freelook", s.curvalue as f32);
-                    }
-                }
-                OPT_CROSSHAIR => {
-                    if let MenuItem::SpinControl(ref s) = item {
-                        cvar_set_value("crosshair", s.curvalue as f32);
-                    }
-                }
-                OPT_JOYSTICK => {
-                    if let MenuItem::SpinControl(ref s) = item {
-                        cvar_set_value("in_joystick", s.curvalue as f32);
-                    }
-                }
-                OPT_CUSTOMIZE => {
-                    m_menu_keys_f();
-                }
-                OPT_DEFAULTS => {
-                    crate::console::cbuf_add_text("exec default.cfg\n");
-                    myq2_common::cmd::cbuf_execute();
-                    controls_set_menu_item_values();
-                }
-                OPT_CONSOLE => {
-                    m_force_menu_off();
-                    CLS.key_dest = KeyDest::Console;
-                }
-                _ => {}
             }
+            OPT_CD_VOLUME => {
+                if let MenuItem::SpinControl(ref s) = item {
+                    cvar_set_value("cd_nocd", if s.curvalue == 0 { 1.0 } else { 0.0 });
+                }
+            }
+            OPT_QUALITY | OPT_COMPATIBILITY => {
+                // UpdateSoundQualityFunc
+                let quality_val = if let Some(MenuItem::SpinControl(ref s)) = ms().menu_items.get(OPT_QUALITY as usize) {
+                    s.curvalue
+                } else { 0 };
+                let compat_val = if let Some(MenuItem::SpinControl(ref s)) = ms().menu_items.get(OPT_COMPATIBILITY as usize) {
+                    s.curvalue
+                } else { 0 };
+                if quality_val != 0 {
+                    cvar_set_value("s_khz", 22.0);
+                    cvar_set_value("s_loadas8bit", 0.0);
+                } else {
+                    cvar_set_value("s_khz", 11.0);
+                    cvar_set_value("s_loadas8bit", 1.0);
+                }
+                cvar_set_value("s_primary", compat_val as f32);
+                m_draw_text_box(8, 120 - 48, 36, 3);
+                m_print(16 + 16, 120 - 48 + 8,  "Restarting the sound system. This");
+                m_print(16 + 16, 120 - 48 + 16, "could take up to a minute, so");
+                m_print(16 + 16, 120 - 48 + 24, "please be patient.");
+                glimp_end_frame();
+                cl_snd_restart_f();
+            }
+            OPT_SENSITIVITY => {
+                if let MenuItem::Slider(ref s) = item {
+                    cvar_set_value("sensitivity", s.curvalue / 2.0);
+                }
+            }
+            OPT_ALWAYSRUN => {
+                if let MenuItem::SpinControl(ref s) = item {
+                    cvar_set_value("cl_run", s.curvalue as f32);
+                }
+            }
+            OPT_INVERTMOUSE => {
+                let cur = cvar_variable_value("m_pitch");
+                cvar_set_value("m_pitch", -cur);
+            }
+            OPT_LOOKSPRING => {
+                let cur = cvar_variable_value("lookspring");
+                cvar_set_value("lookspring", if cur == 0.0 { 1.0 } else { 0.0 });
+            }
+            OPT_LOOKSTRAFE => {
+                let cur = cvar_variable_value("lookstrafe");
+                cvar_set_value("lookstrafe", if cur == 0.0 { 1.0 } else { 0.0 });
+            }
+            OPT_FREELOOK => {
+                if let MenuItem::SpinControl(ref s) = item {
+                    cvar_set_value("freelook", s.curvalue as f32);
+                }
+            }
+            OPT_CROSSHAIR => {
+                if let MenuItem::SpinControl(ref s) = item {
+                    cvar_set_value("crosshair", s.curvalue as f32);
+                }
+            }
+            OPT_JOYSTICK => {
+                if let MenuItem::SpinControl(ref s) = item {
+                    cvar_set_value("in_joystick", s.curvalue as f32);
+                }
+            }
+            OPT_CUSTOMIZE => {
+                m_menu_keys_f();
+            }
+            OPT_DEFAULTS => {
+                crate::console::cbuf_add_text("exec default.cfg\n");
+                myq2_common::cmd::cbuf_execute();
+                controls_set_menu_item_values();
+            }
+            OPT_CONSOLE => {
+                m_force_menu_off();
+                // SAFETY: CLS initialized at startup, accessed from main thread
+                unsafe { CLS.key_dest = KeyDest::Console; }
+            }
+            _ => {}
         }
     }
 }
 
 /// Set the current values of all options menu items from cvars.
 fn controls_set_menu_item_values() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        // SFX volume slider
-        if let Some(MenuItem::Slider(ref mut s)) = MENU_ITEMS.get_mut(OPT_SFX_VOLUME as usize) {
-            s.curvalue = cvar_variable_value("s_volume") * 10.0;
-        }
-        // CD volume
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_CD_VOLUME as usize) {
-            s.curvalue = if cvar_variable_value("cd_nocd") != 0.0 { 0 } else { 1 };
-        }
-        // Sound quality
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_QUALITY as usize) {
-            s.curvalue = if cvar_variable_value("s_loadas8bit") != 0.0 { 0 } else { 1 };
-        }
-        // Sound compatibility
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_COMPATIBILITY as usize) {
-            s.curvalue = cvar_variable_value("s_primary") as i32;
-        }
-        // Sensitivity slider
-        if let Some(MenuItem::Slider(ref mut s)) = MENU_ITEMS.get_mut(OPT_SENSITIVITY as usize) {
-            s.curvalue = cvar_variable_value("sensitivity") * 2.0;
-        }
-        // Always run
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_ALWAYSRUN as usize) {
-            cvar_set_value("cl_run", clamp_cvar(0.0, 1.0, cvar_variable_value("cl_run")));
-            s.curvalue = cvar_variable_value("cl_run") as i32;
-        }
-        // Invert mouse
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_INVERTMOUSE as usize) {
-            s.curvalue = if cvar_variable_value("m_pitch") < 0.0 { 1 } else { 0 };
-        }
-        // Lookspring
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_LOOKSPRING as usize) {
-            cvar_set_value("lookspring", clamp_cvar(0.0, 1.0, cvar_variable_value("lookspring")));
-            s.curvalue = cvar_variable_value("lookspring") as i32;
-        }
-        // Lookstrafe
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_LOOKSTRAFE as usize) {
-            cvar_set_value("lookstrafe", clamp_cvar(0.0, 1.0, cvar_variable_value("lookstrafe")));
-            s.curvalue = cvar_variable_value("lookstrafe") as i32;
-        }
-        // Freelook
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_FREELOOK as usize) {
-            cvar_set_value("freelook", clamp_cvar(0.0, 1.0, cvar_variable_value("freelook")));
-            s.curvalue = cvar_variable_value("freelook") as i32;
-        }
-        // Crosshair
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_CROSSHAIR as usize) {
-            cvar_set_value("crosshair", clamp_cvar(0.0, 3.0, cvar_variable_value("crosshair")));
-            s.curvalue = cvar_variable_value("crosshair") as i32;
-        }
-        // Joystick
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_JOYSTICK as usize) {
-            cvar_set_value("in_joystick", clamp_cvar(0.0, 1.0, cvar_variable_value("in_joystick")));
-            s.curvalue = cvar_variable_value("in_joystick") as i32;
-        }
-        // No alt-tab
-        // (commented out in original C, skipped here)
+    let items = &mut ms().menu_items;
+    // SFX volume slider
+    if let Some(MenuItem::Slider(ref mut s)) = items.get_mut(OPT_SFX_VOLUME as usize) {
+        s.curvalue = cvar_variable_value("s_volume") * 10.0;
     }
+    // CD volume
+    if let Some(MenuItem::SpinControl(ref mut s)) = items.get_mut(OPT_CD_VOLUME as usize) {
+        s.curvalue = if cvar_variable_value("cd_nocd") != 0.0 { 0 } else { 1 };
+    }
+    // Sound quality
+    if let Some(MenuItem::SpinControl(ref mut s)) = items.get_mut(OPT_QUALITY as usize) {
+        s.curvalue = if cvar_variable_value("s_loadas8bit") != 0.0 { 0 } else { 1 };
+    }
+    // Sound compatibility
+    if let Some(MenuItem::SpinControl(ref mut s)) = items.get_mut(OPT_COMPATIBILITY as usize) {
+        s.curvalue = cvar_variable_value("s_primary") as i32;
+    }
+    // Sensitivity slider
+    if let Some(MenuItem::Slider(ref mut s)) = items.get_mut(OPT_SENSITIVITY as usize) {
+        s.curvalue = cvar_variable_value("sensitivity") * 2.0;
+    }
+    // Always run
+    if let Some(MenuItem::SpinControl(ref mut s)) = items.get_mut(OPT_ALWAYSRUN as usize) {
+        cvar_set_value("cl_run", clamp_cvar(0.0, 1.0, cvar_variable_value("cl_run")));
+        s.curvalue = cvar_variable_value("cl_run") as i32;
+    }
+    // Invert mouse
+    if let Some(MenuItem::SpinControl(ref mut s)) = items.get_mut(OPT_INVERTMOUSE as usize) {
+        s.curvalue = if cvar_variable_value("m_pitch") < 0.0 { 1 } else { 0 };
+    }
+    // Lookspring
+    if let Some(MenuItem::SpinControl(ref mut s)) = items.get_mut(OPT_LOOKSPRING as usize) {
+        cvar_set_value("lookspring", clamp_cvar(0.0, 1.0, cvar_variable_value("lookspring")));
+        s.curvalue = cvar_variable_value("lookspring") as i32;
+    }
+    // Lookstrafe
+    if let Some(MenuItem::SpinControl(ref mut s)) = items.get_mut(OPT_LOOKSTRAFE as usize) {
+        cvar_set_value("lookstrafe", clamp_cvar(0.0, 1.0, cvar_variable_value("lookstrafe")));
+        s.curvalue = cvar_variable_value("lookstrafe") as i32;
+    }
+    // Freelook
+    if let Some(MenuItem::SpinControl(ref mut s)) = items.get_mut(OPT_FREELOOK as usize) {
+        cvar_set_value("freelook", clamp_cvar(0.0, 1.0, cvar_variable_value("freelook")));
+        s.curvalue = cvar_variable_value("freelook") as i32;
+    }
+    // Crosshair
+    if let Some(MenuItem::SpinControl(ref mut s)) = items.get_mut(OPT_CROSSHAIR as usize) {
+        cvar_set_value("crosshair", clamp_cvar(0.0, 3.0, cvar_variable_value("crosshair")));
+        s.curvalue = cvar_variable_value("crosshair") as i32;
+    }
+    // Joystick
+    if let Some(MenuItem::SpinControl(ref mut s)) = items.get_mut(OPT_JOYSTICK as usize) {
+        cvar_set_value("in_joystick", clamp_cvar(0.0, 1.0, cvar_variable_value("in_joystick")));
+        s.curvalue = cvar_variable_value("in_joystick") as i32;
+    }
+    // No alt-tab
+    // (commented out in original C, skipped here)
 }
 
 fn options_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        S_OPTIONS_MENU = MenuFramework {
-            x: VIDDEF.width / 2,
-            y: VIDDEF.height / 2 - 58,
-            cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
+    ms().s_options_menu = MenuFramework {
+        x: get_viddef().width / 2,
+        y: get_viddef().height / 2 - 58,
+        cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    ms().menu_items.clear();
 
-        // 0: SFX volume slider
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SLIDER, "effects volume", 0, 0, 0,
-            [OPT_SFX_VOLUME, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::Slider(ref mut s)) = MENU_ITEMS.get_mut(OPT_SFX_VOLUME as usize) {
-            s.minvalue = 0.0;
-            s.maxvalue = 10.0;
-            s.curvalue = cvar_variable_value("s_volume") * 10.0;
-        }
-
-        // 1: CD music spin
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "CD music", 0, 10, 0,
-            [OPT_CD_VOLUME, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_CD_VOLUME as usize) {
-            s.itemnames = strs(&["disabled", "enabled"]);
-            s.curvalue = if cvar_variable_value("cd_nocd") != 0.0 { 0 } else { 1 };
-        }
-
-        // 2: sound quality
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "sound quality", 0, 20, 0,
-            [OPT_QUALITY, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_QUALITY as usize) {
-            s.itemnames = strs(&["low", "high"]);
-            s.curvalue = if cvar_variable_value("s_loadas8bit") != 0.0 { 0 } else { 1 };
-        }
-
-        // 3: sound compatibility
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "sound compatibility", 0, 30, 0,
-            [OPT_COMPATIBILITY, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_COMPATIBILITY as usize) {
-            s.itemnames = strs(&["max compatibility", "max performance"]);
-            s.curvalue = cvar_variable_value("s_primary") as i32;
-        }
-
-        // 4: mouse speed slider
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SLIDER, "mouse speed", 0, 50, 0,
-            [OPT_SENSITIVITY, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::Slider(ref mut s)) = MENU_ITEMS.get_mut(OPT_SENSITIVITY as usize) {
-            s.minvalue = 2.0;
-            s.maxvalue = 22.0;
-            s.curvalue = cvar_variable_value("sensitivity") * 2.0;
-        }
-
-        // 5: always run
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "always run", 0, 60, 0,
-            [OPT_ALWAYSRUN, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_ALWAYSRUN as usize) {
-            s.itemnames = strs(&["no", "yes"]);
-        }
-
-        // 6: invert mouse
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "invert mouse", 0, 70, 0,
-            [OPT_INVERTMOUSE, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_INVERTMOUSE as usize) {
-            s.itemnames = strs(&["no", "yes"]);
-        }
-
-        // 7: lookspring
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "lookspring", 0, 80, 0,
-            [OPT_LOOKSPRING, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_LOOKSPRING as usize) {
-            s.itemnames = strs(&["no", "yes"]);
-        }
-
-        // 8: lookstrafe
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "lookstrafe", 0, 90, 0,
-            [OPT_LOOKSTRAFE, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_LOOKSTRAFE as usize) {
-            s.itemnames = strs(&["no", "yes"]);
-        }
-
-        // 9: free look
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "free look", 0, 100, 0,
-            [OPT_FREELOOK, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_FREELOOK as usize) {
-            s.itemnames = strs(&["no", "yes"]);
-        }
-
-        // 10: crosshair
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "crosshair", 0, 110, 0,
-            [OPT_CROSSHAIR, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_CROSSHAIR as usize) {
-            s.itemnames = strs(&["none", "cross", "dot", "angle"]);
-        }
-
-        // 11: joystick
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "use joystick", 0, 120, 0,
-            [OPT_JOYSTICK, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(OPT_JOYSTICK as usize) {
-            s.itemnames = strs(&["no", "yes"]);
-        }
-
-        // 12: customize controls
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_ACTION, "customize controls", 0, 140, 0,
-            [OPT_CUSTOMIZE, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-
-        // 13: reset defaults
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_ACTION, "reset defaults", 0, 150, 0,
-            [OPT_DEFAULTS, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-
-        // 14: go to console
-        menu_add_item_common(&mut S_OPTIONS_MENU, make_menu_common(
-            MTYPE_ACTION, "go to console", 0, 160, 0,
-            [OPT_CONSOLE, 0, 0, 0], Some(options_menu_callback), None,
-        ));
-
-        controls_set_menu_item_values();
+    // 0: SFX volume slider
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SLIDER, "effects volume", 0, 0, 0,
+        [OPT_SFX_VOLUME, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::Slider(ref mut s)) = ms().menu_items.get_mut(OPT_SFX_VOLUME as usize) {
+        s.minvalue = 0.0;
+        s.maxvalue = 10.0;
+        s.curvalue = cvar_variable_value("s_volume") * 10.0;
     }
+
+    // 1: CD music spin
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "CD music", 0, 10, 0,
+        [OPT_CD_VOLUME, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(OPT_CD_VOLUME as usize) {
+        s.itemnames = strs(&["disabled", "enabled"]);
+        s.curvalue = if cvar_variable_value("cd_nocd") != 0.0 { 0 } else { 1 };
+    }
+
+    // 2: sound quality
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "sound quality", 0, 20, 0,
+        [OPT_QUALITY, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(OPT_QUALITY as usize) {
+        s.itemnames = strs(&["low", "high"]);
+        s.curvalue = if cvar_variable_value("s_loadas8bit") != 0.0 { 0 } else { 1 };
+    }
+
+    // 3: sound compatibility
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "sound compatibility", 0, 30, 0,
+        [OPT_COMPATIBILITY, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(OPT_COMPATIBILITY as usize) {
+        s.itemnames = strs(&["max compatibility", "max performance"]);
+        s.curvalue = cvar_variable_value("s_primary") as i32;
+    }
+
+    // 4: mouse speed slider
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SLIDER, "mouse speed", 0, 50, 0,
+        [OPT_SENSITIVITY, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::Slider(ref mut s)) = ms().menu_items.get_mut(OPT_SENSITIVITY as usize) {
+        s.minvalue = 2.0;
+        s.maxvalue = 22.0;
+        s.curvalue = cvar_variable_value("sensitivity") * 2.0;
+    }
+
+    // 5: always run
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "always run", 0, 60, 0,
+        [OPT_ALWAYSRUN, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(OPT_ALWAYSRUN as usize) {
+        s.itemnames = strs(&["no", "yes"]);
+    }
+
+    // 6: invert mouse
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "invert mouse", 0, 70, 0,
+        [OPT_INVERTMOUSE, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(OPT_INVERTMOUSE as usize) {
+        s.itemnames = strs(&["no", "yes"]);
+    }
+
+    // 7: lookspring
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "lookspring", 0, 80, 0,
+        [OPT_LOOKSPRING, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(OPT_LOOKSPRING as usize) {
+        s.itemnames = strs(&["no", "yes"]);
+    }
+
+    // 8: lookstrafe
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "lookstrafe", 0, 90, 0,
+        [OPT_LOOKSTRAFE, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(OPT_LOOKSTRAFE as usize) {
+        s.itemnames = strs(&["no", "yes"]);
+    }
+
+    // 9: free look
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "free look", 0, 100, 0,
+        [OPT_FREELOOK, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(OPT_FREELOOK as usize) {
+        s.itemnames = strs(&["no", "yes"]);
+    }
+
+    // 10: crosshair
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "crosshair", 0, 110, 0,
+        [OPT_CROSSHAIR, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(OPT_CROSSHAIR as usize) {
+        s.itemnames = strs(&["none", "cross", "dot", "angle"]);
+    }
+
+    // 11: joystick
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "use joystick", 0, 120, 0,
+        [OPT_JOYSTICK, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(OPT_JOYSTICK as usize) {
+        s.itemnames = strs(&["no", "yes"]);
+    }
+
+    // 12: customize controls
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_ACTION, "customize controls", 0, 140, 0,
+        [OPT_CUSTOMIZE, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+
+    // 13: reset defaults
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_ACTION, "reset defaults", 0, 150, 0,
+        [OPT_DEFAULTS, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+
+    // 14: go to console
+    menu_add_item_common(&mut ms().s_options_menu, make_menu_common(
+        MTYPE_ACTION, "go to console", 0, 160, 0,
+        [OPT_CONSOLE, 0, 0, 0], Some(options_menu_callback), None,
+    ));
+
+    controls_set_menu_item_values();
 }
 
 fn options_menu_draw() {
     m_banner("m_banner_options");
-    // SAFETY: single-threaded engine
-    unsafe {
-        menu_adjust_cursor(&mut S_OPTIONS_MENU, 1);
-        menu_draw(&S_OPTIONS_MENU);
-    }
+    menu_adjust_cursor(&mut ms().s_options_menu, 1);
+    menu_draw(&ms().s_options_menu);
 }
 
 fn options_menu_key(key: i32) -> Option<&'static str> {
@@ -1233,45 +1222,31 @@ pub fn m_menu_options_f() {
 // ============================================================
 
 fn keys_menu_draw() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        menu_adjust_cursor(&mut S_KEYS_MENU, 1);
-        menu_draw(&S_KEYS_MENU);
+    menu_adjust_cursor(&mut ms().s_keys_menu, 1);
+    menu_draw(&ms().s_keys_menu);
 
-        // Draw key bindings for each item (ownerdraw equivalent)
-        for i in 0..MENU_ITEMS.len() {
-            draw_key_binding_func(i);
-        }
+    // Draw key bindings for each item (ownerdraw equivalent)
+    let num_items = ms().menu_items.len();
+    for i in 0..num_items {
+        draw_key_binding_func(i);
+    }
 
-        // Draw custom cursor
-        if BIND_GRAB {
-            draw_char(
-                S_KEYS_MENU.x,
-                S_KEYS_MENU.y + S_KEYS_MENU.cursor * 9,
-                b'=' as i32,
-            );
-        } else {
-            draw_char(
-                S_KEYS_MENU.x,
-                S_KEYS_MENU.y + S_KEYS_MENU.cursor * 9,
-                12 + ((crate::console::sys_milliseconds() / 250) & 1),
-            );
-        }
+    // Draw custom cursor
+    let s = ms();
+    if s.bind_grab {
+        draw_char(
+            s.s_keys_menu.x,
+            s.s_keys_menu.y + s.s_keys_menu.cursor * 9,
+            b'=' as i32,
+        );
+    } else {
+        draw_char(
+            s.s_keys_menu.x,
+            s.s_keys_menu.y + s.s_keys_menu.cursor * 9,
+            12 + ((crate::console::sys_milliseconds() / 250) & 1),
+        );
     }
 }
-
-// Keys menu static state
-static mut S_KEYS_MENU: MenuFramework = MenuFramework {
-    x: 0,
-    y: 0,
-    cursor: 0,
-    nitems: 0,
-    nslots: 0,
-    items: Vec::new(),
-    statusbar: None,
-    cursordraw: None,
-};
-static mut BIND_GRAB: bool = false;
 
 /// Bindnames table: [command, display name] pairs (from the original C source).
 static BINDNAMES: &[(&str, &str)] = &[
@@ -1304,16 +1279,14 @@ static BINDNAMES: &[(&str, &str)] = &[
 fn m_find_keys_for_command(command: &str) -> [i32; 2] {
     let mut keys = [-1i32; 2];
     let mut count = 0;
-    // SAFETY: single-threaded engine
-    unsafe {
-        for k in 0..256 {
-            if let Some(ref binding) = crate::keys::KEYBINDINGS[k] {
-                if binding == command {
-                    keys[count] = k as i32;
-                    count += 1;
-                    if count == 2 {
-                        break;
-                    }
+    let ks = crate::keys::ks();
+    for k in 0..256 {
+        if let Some(ref binding) = ks.keybindings[k] {
+            if binding == command {
+                keys[count] = k as i32;
+                count += 1;
+                if count == 2 {
+                    break;
                 }
             }
         }
@@ -1323,42 +1296,41 @@ fn m_find_keys_for_command(command: &str) -> [i32; 2] {
 
 /// Unbind all keys bound to the given command.
 fn m_unbind_command(command: &str) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        for k in 0..256 {
-            if let Some(ref binding) = crate::keys::KEYBINDINGS[k] {
-                if binding == command {
-                    crate::keys::key_set_binding(k as i32, "");
-                }
-            }
+    let mut ks = crate::keys::ks();
+    for k in 0..256 {
+        let matches = if let Some(ref binding) = ks.keybindings[k] {
+            binding == command
+        } else {
+            false
+        };
+        if matches {
+            ks.keybindings[k] = None;
         }
     }
 }
 
 /// Draw key binding info for a key action item.
 fn draw_key_binding_func(idx: usize) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(item) = MENU_ITEMS.get(idx) {
-            let bind_idx = item.generic().localdata[0] as usize;
-            if bind_idx < BINDNAMES.len() {
-                let keys = m_find_keys_for_command(BINDNAMES[bind_idx].0);
-                let parent_x = S_KEYS_MENU.x;
-                let parent_y = S_KEYS_MENU.y;
-                let x = item.generic().x + parent_x + 16;
-                let y = item.generic().y + parent_y;
+    let s = ms();
+    if let Some(item) = s.menu_items.get(idx) {
+        let bind_idx = item.generic().localdata[0] as usize;
+        if bind_idx < BINDNAMES.len() {
+            let keys = m_find_keys_for_command(BINDNAMES[bind_idx].0);
+            let parent_x = s.s_keys_menu.x;
+            let parent_y = s.s_keys_menu.y;
+            let x = item.generic().x + parent_x + 16;
+            let y = item.generic().y + parent_y;
 
-                if keys[0] == -1 {
-                    menu_draw_string(x, y, "???");
-                } else {
-                    let name = crate::keys::key_keynum_to_string(keys[0]);
-                    menu_draw_string(x, y, &name);
-                    let name_width = name.len() as i32 * 8;
-                    if keys[1] != -1 {
-                        menu_draw_string(x + 8 + name_width, y, "or");
-                        let name2 = crate::keys::key_keynum_to_string(keys[1]);
-                        menu_draw_string(x + 32 + name_width, y, &name2);
-                    }
+            if keys[0] == -1 {
+                menu_draw_string(x, y, "???");
+            } else {
+                let name = crate::keys::key_keynum_to_string(keys[0]);
+                menu_draw_string(x, y, &name);
+                let name_width = name.len() as i32 * 8;
+                if keys[1] != -1 {
+                    menu_draw_string(x + 8 + name_width, y, "or");
+                    let name2 = crate::keys::key_keynum_to_string(keys[1]);
+                    menu_draw_string(x + 32 + name_width, y, &name2);
                 }
             }
         }
@@ -1367,77 +1339,71 @@ fn draw_key_binding_func(idx: usize) {
 
 /// Initialize the keys menu framework.
 fn keys_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        S_KEYS_MENU = MenuFramework {
-            x: (VIDDEF.width as f32 * 0.50) as i32,
-            y: 0,
-            cursor: 0,
-            nitems: 0,
-            nslots: 0,
-            items: Vec::new(),
-            statusbar: Some("enter to change, backspace to clear".to_string()),
-            cursordraw: None,
-        };
-        MENU_ITEMS.clear();
+    ms().s_keys_menu = MenuFramework {
+        x: (get_viddef().width as f32 * 0.50) as i32,
+        y: 0,
+        cursor: 0,
+        nitems: 0,
+        nslots: 0,
+        items: Vec::new(),
+        statusbar: Some("enter to change, backspace to clear".to_string()),
+        cursordraw: None,
+    };
+    ms().menu_items.clear();
 
-        for (i, &(_cmd, label)) in BINDNAMES.iter().enumerate() {
-            let item = make_menu_common(
-                MTYPE_ACTION, label, 0, i as i32 * 9, QMF_GRAYED,
-                [i as i32, 0, 0, 0], None, None,
-            );
-            menu_add_item_common(&mut S_KEYS_MENU, item);
-        }
-
-        menu_set_status_bar(&mut S_KEYS_MENU, Some("enter to change, backspace to clear"));
-        menu_center(&mut S_KEYS_MENU);
+    for (i, &(_cmd, label)) in BINDNAMES.iter().enumerate() {
+        let item = make_menu_common(
+            MTYPE_ACTION, label, 0, i as i32 * 9, QMF_GRAYED,
+            [i as i32, 0, 0, 0], None, None,
+        );
+        menu_add_item_common(&mut ms().s_keys_menu, item);
     }
+
+    menu_set_status_bar(&mut ms().s_keys_menu, Some("enter to change, backspace to clear"));
+    menu_center(&mut ms().s_keys_menu);
 }
 
 fn keys_menu_key(key: i32) -> Option<&'static str> {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if BIND_GRAB {
-            if key != K_ESCAPE && key != 96 /* '`' */ {
-                let cursor = S_KEYS_MENU.cursor as usize;
-                if cursor < BINDNAMES.len() {
-                    let cmd = format!(
-                        "bind \"{}\" \"{}\"\n",
-                        crate::keys::key_keynum_to_string(key),
-                        BINDNAMES[cursor].0
-                    );
-                    cbuf_insert_text(&cmd);
-                }
+    if ms().bind_grab {
+        if key != K_ESCAPE && key != 96 /* '`' */ {
+            let cursor = ms().s_keys_menu.cursor as usize;
+            if cursor < BINDNAMES.len() {
+                let cmd = format!(
+                    "bind \"{}\" \"{}\"\n",
+                    crate::keys::key_keynum_to_string(key),
+                    BINDNAMES[cursor].0
+                );
+                cbuf_insert_text(&cmd);
             }
-            menu_set_status_bar(&mut S_KEYS_MENU, Some("enter to change, backspace to clear"));
-            BIND_GRAB = false;
-            return Some(MENU_OUT_SOUND);
         }
+        menu_set_status_bar(&mut ms().s_keys_menu, Some("enter to change, backspace to clear"));
+        ms().bind_grab = false;
+        return Some(MENU_OUT_SOUND);
+    }
 
-        match key {
-            K_KP_ENTER | K_ENTER => {
-                // Start key binding grab
-                let cursor = S_KEYS_MENU.cursor as usize;
-                if cursor < BINDNAMES.len() {
-                    let found_keys = m_find_keys_for_command(BINDNAMES[cursor].0);
-                    if found_keys[1] != -1 {
-                        m_unbind_command(BINDNAMES[cursor].0);
-                    }
-                    BIND_GRAB = true;
-                    menu_set_status_bar(&mut S_KEYS_MENU, Some("press a key or button for this action"));
-                }
-                Some(MENU_IN_SOUND)
-            }
-            127 /* K_BACKSPACE */ | 132 /* K_DEL */ | 170 /* K_KP_DEL */ => {
-                // Delete bindings
-                let cursor = S_KEYS_MENU.cursor as usize;
-                if cursor < BINDNAMES.len() {
+    match key {
+        K_KP_ENTER | K_ENTER => {
+            // Start key binding grab
+            let cursor = ms().s_keys_menu.cursor as usize;
+            if cursor < BINDNAMES.len() {
+                let found_keys = m_find_keys_for_command(BINDNAMES[cursor].0);
+                if found_keys[1] != -1 {
                     m_unbind_command(BINDNAMES[cursor].0);
                 }
-                Some(MENU_OUT_SOUND)
+                ms().bind_grab = true;
+                menu_set_status_bar(&mut ms().s_keys_menu, Some("press a key or button for this action"));
             }
-            _ => default_menu_key(key),
+            Some(MENU_IN_SOUND)
         }
+        127 /* K_BACKSPACE */ | 132 /* K_DEL */ | 170 /* K_KP_DEL */ => {
+            // Delete bindings
+            let cursor = ms().s_keys_menu.cursor as usize;
+            if cursor < BINDNAMES.len() {
+                m_unbind_command(BINDNAMES[cursor].0);
+            }
+            Some(MENU_OUT_SOUND)
+        }
+        _ => default_menu_key(key),
     }
 }
 
@@ -1548,46 +1514,43 @@ static ID_CREDITS: &[&str] = &[
     "properties of their respective owners.",
 ];
 
-static mut CREDITS_START_TIME: i32 = 0;
-static mut CREDITS: &[&str] = ID_CREDITS;
-
 fn m_credits_menu_draw() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        let credits = CREDITS;
-        let mut y = VIDDEF.height as f32
-            - ((CLS.realtime - CREDITS_START_TIME) as f32 / 40.0);
-        let mut i = 0;
+    let credits = ms().credits;
+    // SAFETY: CLS initialized at startup, accessed from main thread
+    let realtime = unsafe { CLS.realtime };
+    let mut y = get_viddef().height as f32
+        - ((realtime - ms().credits_start_time) as f32 / 40.0);
+    let mut i = 0;
 
-        while i < credits.len() && (y as i32) < VIDDEF.height {
-            if y as i32 > -8 {
-                let line = credits[i];
-                let (bold, stringoffset) = if line.starts_with('+') {
-                    (true, 1)
+    while i < credits.len() && (y as i32) < get_viddef().height {
+        if y as i32 > -8 {
+            let line = credits[i];
+            let (bold, stringoffset) = if line.starts_with('+') {
+                (true, 1)
+            } else {
+                (false, 0)
+            };
+
+            let chars: Vec<u8> = line.bytes().skip(stringoffset).collect();
+            for (j, &ch) in chars.iter().enumerate() {
+                let x = (get_viddef().width - line.len() as i32 * 8 - stringoffset as i32 * 8) / 2
+                    + (j as i32 + stringoffset as i32) * 8;
+
+                if bold {
+                    draw_char(x, y as i32, ch as i32 + 128);
                 } else {
-                    (false, 0)
-                };
-
-                let chars: Vec<u8> = line.bytes().skip(stringoffset).collect();
-                for (j, &ch) in chars.iter().enumerate() {
-                    let x = (VIDDEF.width - line.len() as i32 * 8 - stringoffset as i32 * 8) / 2
-                        + (j as i32 + stringoffset as i32) * 8;
-
-                    if bold {
-                        draw_char(x, y as i32, ch as i32 + 128);
-                    } else {
-                        draw_char(x, y as i32, ch as i32);
-                    }
+                    draw_char(x, y as i32, ch as i32);
                 }
             }
-
-            y += 10.0;
-            i += 1;
         }
 
-        if (y as i32) < 0 {
-            CREDITS_START_TIME = CLS.realtime;
-        }
+        y += 10.0;
+        i += 1;
+    }
+
+    if (y as i32) < 0 {
+        // SAFETY: CLS initialized at startup, accessed from main thread
+        ms().credits_start_time = unsafe { CLS.realtime };
     }
 }
 
@@ -1599,34 +1562,32 @@ fn m_credits_key(key: i32) -> Option<&'static str> {
 }
 
 pub fn m_menu_credits_f() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        // Try loading custom credits file
-        if let Some(data) = fs_load_file("credits") {
-            // Parse the credits file into lines, splitting on \r\n or \n.
-            // Store in a leaked Vec so that CREDITS can hold &'static [&'static str].
-            let text = String::from_utf8_lossy(&data);
-            let lines: Vec<&str> = text.lines().collect();
-            let owned: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
-            let leaked: &'static Vec<String> = Box::leak(Box::new(owned));
-            let str_refs: Vec<&'static str> = leaked.iter().map(|s| s.as_str()).collect();
-            let leaked_refs: &'static [&'static str] = Box::leak(str_refs.into_boxed_slice());
-            CREDITS = leaked_refs;
+    // Try loading custom credits file
+    if let Some(data) = fs_load_file("credits") {
+        // Parse the credits file into lines, splitting on \r\n or \n.
+        // Store in a leaked Vec so that credits can hold &'static [&'static str].
+        let text = String::from_utf8_lossy(&data);
+        let lines: Vec<&str> = text.lines().collect();
+        let owned: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+        let leaked: &'static Vec<String> = Box::leak(Box::new(owned));
+        let str_refs: Vec<&'static str> = leaked.iter().map(|s| s.as_str()).collect();
+        let leaked_refs: &'static [&'static str] = Box::leak(str_refs.into_boxed_slice());
+        ms().credits = leaked_refs;
+    } else {
+        let is_developer = developer_searchpath(1);
+        if is_developer == 1 {
+            // xatrix credits would go here
+            ms().credits = ID_CREDITS; // simplified — xatcredits omitted for brevity
+        } else if is_developer == 2 {
+            // rogue credits would go here
+            ms().credits = ID_CREDITS; // simplified — roguecredits omitted for brevity
         } else {
-            let is_developer = developer_searchpath(1);
-            if is_developer == 1 {
-                // xatrix credits would go here
-                CREDITS = ID_CREDITS; // simplified — xatcredits omitted for brevity
-            } else if is_developer == 2 {
-                // rogue credits would go here
-                CREDITS = ID_CREDITS; // simplified — roguecredits omitted for brevity
-            } else {
-                CREDITS = ID_CREDITS;
-            }
+            ms().credits = ID_CREDITS;
         }
-
-        CREDITS_START_TIME = CLS.realtime;
     }
+
+    // SAFETY: CLS initialized at startup, accessed from main thread
+    ms().credits_start_time = unsafe { CLS.realtime };
     m_push_menu(m_credits_menu_draw, m_credits_key);
 }
 
@@ -1638,97 +1599,74 @@ pub fn m_menu_credits_f() {
 // Save/Load game support
 // ============================================================
 
-static mut M_SAVESTRINGS: [[u8; 32]; MAX_SAVEGAMES] = [[0u8; 32]; MAX_SAVEGAMES];
-static mut M_SAVEVALID: [bool; MAX_SAVEGAMES] = [false; MAX_SAVEGAMES];
-
-static mut S_LOADGAME_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
-
-static mut S_SAVEGAME_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
-
 /// Create_Savestrings — reads save game headers to populate the save/load menus.
 fn create_savestrings() {
     let gamedir = crate::console::fs_gamedir();
     for i in 0..MAX_SAVEGAMES {
         let path = format!("{}/save/save{}/server.ssv", gamedir, i);
-        // SAFETY: single-threaded engine
-        unsafe {
-            if let Ok(mut f) = std::fs::File::open(&path) {
-                let mut buf = [0u8; 32];
-                let _ = std::io::Read::read(&mut f, &mut buf);
-                M_SAVESTRINGS[i] = buf;
-                M_SAVEVALID[i] = true;
-            } else {
-                let empty = b"<EMPTY>\0";
-                M_SAVESTRINGS[i] = [0u8; 32];
-                M_SAVESTRINGS[i][..empty.len()].copy_from_slice(empty);
-                M_SAVEVALID[i] = false;
-            }
+        let s = ms();
+        if let Ok(mut f) = std::fs::File::open(&path) {
+            let mut buf = [0u8; 32];
+            let _ = std::io::Read::read(&mut f, &mut buf);
+            s.m_savestrings[i] = buf;
+            s.m_savevalid[i] = true;
+        } else {
+            let empty = b"<EMPTY>\0";
+            s.m_savestrings[i] = [0u8; 32];
+            s.m_savestrings[i][..empty.len()].copy_from_slice(empty);
+            s.m_savevalid[i] = false;
         }
     }
 }
 
 fn savestring_as_str(idx: usize) -> &'static str {
-    // SAFETY: single-threaded engine
-    unsafe {
-        let bytes = &M_SAVESTRINGS[idx];
-        let len = bytes.iter().position(|&b| b == 0).unwrap_or(32);
-        std::str::from_utf8(&bytes[..len]).unwrap_or("<EMPTY>")
-    }
+    let bytes = &ms().m_savestrings[idx];
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(32);
+    // SAFETY: The returned reference has 'static lifetime because ms() returns &'static mut MenuState
+    std::str::from_utf8(&bytes[..len]).unwrap_or("<EMPTY>")
 }
 
 fn loadgame_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        S_LOADGAME_MENU = MenuFramework {
-            x: VIDDEF.width / 2 - 120,
-            y: VIDDEF.height / 2 - 58,
-            cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
-        create_savestrings();
+    ms().s_loadgame_menu = MenuFramework {
+        x: get_viddef().width / 2 - 120,
+        y: get_viddef().height / 2 - 58,
+        cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    ms().menu_items.clear();
+    create_savestrings();
 
-        for i in 0..MAX_SAVEGAMES {
-            let y = if i > 0 { i as i32 * 10 + 10 } else { 0 };
-            let item = make_menu_common(
-                MTYPE_ACTION, savestring_as_str(i), 0, y, QMF_LEFT_JUSTIFY,
-                [i as i32, 0, 0, 0], None, None,
-            );
-            menu_add_item_common(&mut S_LOADGAME_MENU, item);
-        }
+    for i in 0..MAX_SAVEGAMES {
+        let y = if i > 0 { i as i32 * 10 + 10 } else { 0 };
+        let item = make_menu_common(
+            MTYPE_ACTION, savestring_as_str(i), 0, y, QMF_LEFT_JUSTIFY,
+            [i as i32, 0, 0, 0], None, None,
+        );
+        menu_add_item_common(&mut ms().s_loadgame_menu, item);
     }
 }
 
 fn loadgame_menu_draw() {
     m_banner("m_banner_load_game");
-    // SAFETY: single-threaded engine
-    unsafe { menu_draw(&S_LOADGAME_MENU); }
+    menu_draw(&ms().s_loadgame_menu);
 }
 
 fn loadgame_menu_key(key: i32) -> Option<&'static str> {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if key == K_ESCAPE || key == K_ENTER {
-            S_SAVEGAME_MENU.cursor = S_LOADGAME_MENU.cursor - 1;
-            if S_SAVEGAME_MENU.cursor < 0 {
-                S_SAVEGAME_MENU.cursor = 0;
-            }
+    if key == K_ESCAPE || key == K_ENTER {
+        let load_cursor = ms().s_loadgame_menu.cursor;
+        ms().s_savegame_menu.cursor = load_cursor - 1;
+        if ms().s_savegame_menu.cursor < 0 {
+            ms().s_savegame_menu.cursor = 0;
         }
-        if key == K_KP_ENTER || key == K_ENTER {
-            let idx = S_LOADGAME_MENU.cursor as usize;
-            if idx < MAX_SAVEGAMES && M_SAVEVALID[idx] {
-                let cmd = format!("load save{}\n", idx);
-                crate::console::cbuf_add_text(&cmd);
-            }
-            m_force_menu_off();
-            return None;
+    }
+    if key == K_KP_ENTER || key == K_ENTER {
+        let idx = ms().s_loadgame_menu.cursor as usize;
+        if idx < MAX_SAVEGAMES && ms().m_savevalid[idx] {
+            let cmd = format!("load save{}\n", idx);
+            crate::console::cbuf_add_text(&cmd);
         }
+        m_force_menu_off();
+        return None;
     }
     default_menu_key(key)
 }
@@ -1739,55 +1677,47 @@ pub fn m_menu_load_game_f() {
 }
 
 fn savegame_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        S_SAVEGAME_MENU = MenuFramework {
-            x: VIDDEF.width / 2 - 120,
-            y: VIDDEF.height / 2 - 58,
-            cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
-        create_savestrings();
+    ms().s_savegame_menu = MenuFramework {
+        x: get_viddef().width / 2 - 120,
+        y: get_viddef().height / 2 - 58,
+        cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    ms().menu_items.clear();
+    create_savestrings();
 
-        // Don't include the autosave slot (slot 0)
-        for i in 0..(MAX_SAVEGAMES - 1) {
-            let item = make_menu_common(
-                MTYPE_ACTION, savestring_as_str(i + 1), 0, i as i32 * 10, QMF_LEFT_JUSTIFY,
-                [(i + 1) as i32, 0, 0, 0], None, None,
-            );
-            menu_add_item_common(&mut S_SAVEGAME_MENU, item);
-        }
+    // Don't include the autosave slot (slot 0)
+    for i in 0..(MAX_SAVEGAMES - 1) {
+        let item = make_menu_common(
+            MTYPE_ACTION, savestring_as_str(i + 1), 0, i as i32 * 10, QMF_LEFT_JUSTIFY,
+            [(i + 1) as i32, 0, 0, 0], None, None,
+        );
+        menu_add_item_common(&mut ms().s_savegame_menu, item);
     }
 }
 
 fn savegame_menu_draw() {
     m_banner("m_banner_save_game");
-    // SAFETY: single-threaded engine
-    unsafe {
-        menu_adjust_cursor(&mut S_SAVEGAME_MENU, 1);
-        menu_draw(&S_SAVEGAME_MENU);
-    }
+    menu_adjust_cursor(&mut ms().s_savegame_menu, 1);
+    menu_draw(&ms().s_savegame_menu);
 }
 
 fn savegame_menu_key(key: i32) -> Option<&'static str> {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if key == K_ENTER || key == K_ESCAPE {
-            S_LOADGAME_MENU.cursor = S_SAVEGAME_MENU.cursor - 1;
-            if S_LOADGAME_MENU.cursor < 0 {
-                S_LOADGAME_MENU.cursor = 0;
-            }
+    if key == K_ENTER || key == K_ESCAPE {
+        let save_cursor = ms().s_savegame_menu.cursor;
+        ms().s_loadgame_menu.cursor = save_cursor - 1;
+        if ms().s_loadgame_menu.cursor < 0 {
+            ms().s_loadgame_menu.cursor = 0;
         }
-        if key == K_KP_ENTER || key == K_ENTER {
-            let cursor = S_SAVEGAME_MENU.cursor as usize;
-            // localdata[0] = cursor + 1 (skip autosave)
-            let save_idx = cursor + 1;
-            let cmd = format!("save save{}\n", save_idx);
-            crate::console::cbuf_add_text(&cmd);
-            m_force_menu_off();
-            return None;
-        }
+    }
+    if key == K_KP_ENTER || key == K_ENTER {
+        let cursor = ms().s_savegame_menu.cursor as usize;
+        // localdata[0] = cursor + 1 (skip autosave)
+        let save_idx = cursor + 1;
+        let cmd = format!("save save{}\n", save_idx);
+        crate::console::cbuf_add_text(&cmd);
+        m_force_menu_off();
+        return None;
     }
     default_menu_key(key)
 }
@@ -1806,22 +1736,16 @@ pub fn m_menu_save_game_f() {
 // Converted from: JoinServer_MenuInit / JoinServer_MenuDraw / JoinServer_MenuKey
 // ============================================================
 
-static mut S_JOINSERVER_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
-
 const NO_SERVER_STRING: &str = "<no server>";
 
 fn search_local_games() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        M_NUM_SERVERS = 0;
-        for i in 0..MAX_LOCAL_SERVERS {
-            let bytes = NO_SERVER_STRING.as_bytes();
-            LOCAL_SERVER_NAMES[i] = [0u8; 80];
-            LOCAL_SERVER_NAMES[i][..bytes.len()].copy_from_slice(bytes);
-        }
+    let s = ms();
+    s.m_num_servers = 0;
+    for i in 0..MAX_LOCAL_SERVERS {
+        let bytes = NO_SERVER_STRING.as_bytes();
+        s.local_server_names[i] = [0u8; 80];
+        s.local_server_names[i][..bytes.len()].copy_from_slice(bytes);
+        s.local_server_netadr[i] = myq2_common::qcommon::NetAdr::default();
     }
 
     m_draw_text_box(8, 120 - 48, 36, 3);
@@ -1834,25 +1758,23 @@ fn search_local_games() {
 }
 
 fn joinserver_menu_callback(idx: usize) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(item) = MENU_ITEMS.get(idx) {
-            let id = item.generic().localdata[0];
-            match id {
-                -1 => m_menu_address_book_f(),  // address book
-                -2 => search_local_games(),      // refresh
-                _ => {
-                    // server action — id is the server index
-                    let server_idx = id as usize;
-                    if server_idx < M_NUM_SERVERS {
-                        let name = std::str::from_utf8(&LOCAL_SERVER_NAMES[server_idx])
-                            .unwrap_or("")
-                            .trim_end_matches('\0');
-                        if name != NO_SERVER_STRING {
-                            // In the full engine, we would connect to local_server_netadr[server_idx].
-                            // For now, just force menu off (network address resolution not yet wired).
-                            m_force_menu_off();
-                        }
+    if let Some(item) = ms().menu_items.get(idx) {
+        let id = item.generic().localdata[0];
+        match id {
+            -1 => m_menu_address_book_f(),  // address book
+            -2 => search_local_games(),      // refresh
+            _ => {
+                // server action — id is the server index
+                let server_idx = id as usize;
+                let s = ms();
+                if server_idx < s.m_num_servers {
+                    let name = std::str::from_utf8(&s.local_server_names[server_idx])
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    if name != NO_SERVER_STRING {
+                        let addr_str = myq2_common::net::net_adr_to_string(&s.local_server_netadr[server_idx]);
+                        myq2_common::cmd::cbuf_add_text(&format!("connect {}\n", addr_str));
+                        m_force_menu_off();
                     }
                 }
             }
@@ -1861,50 +1783,46 @@ fn joinserver_menu_callback(idx: usize) {
 }
 
 fn joinserver_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        S_JOINSERVER_MENU = MenuFramework {
-            x: (VIDDEF.width as f32 * 0.50) as i32 - 120,
-            y: 0, cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
+    ms().s_joinserver_menu = MenuFramework {
+        x: (get_viddef().width as f32 * 0.50) as i32 - 120,
+        y: 0, cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    ms().menu_items.clear();
 
-        // Address book action
-        menu_add_item_common(&mut S_JOINSERVER_MENU, make_menu_common(
-            MTYPE_ACTION, "address book", 0, 0, QMF_LEFT_JUSTIFY,
-            [-1, 0, 0, 0], Some(joinserver_menu_callback), None,
+    // Address book action
+    menu_add_item_common(&mut ms().s_joinserver_menu, make_menu_common(
+        MTYPE_ACTION, "address book", 0, 0, QMF_LEFT_JUSTIFY,
+        [-1, 0, 0, 0], Some(joinserver_menu_callback), None,
+    ));
+
+    // Separator: "connect to..."
+    menu_add_item_common(&mut ms().s_joinserver_menu, make_menu_common(
+        MTYPE_SEPARATOR, "connect to...", 80, 30, 0,
+        [0, 0, 0, 0], None, None,
+    ));
+
+    // Search action
+    menu_add_item_common(&mut ms().s_joinserver_menu, make_menu_common(
+        MTYPE_ACTION, "refresh server list", 0, 10, QMF_LEFT_JUSTIFY,
+        [-2, 0, 0, 0], Some(joinserver_menu_callback), Some("search for servers"),
+    ));
+
+    // Server entries
+    for i in 0..MAX_LOCAL_SERVERS {
+        menu_add_item_common(&mut ms().s_joinserver_menu, make_menu_common(
+            MTYPE_ACTION, NO_SERVER_STRING, 0, 40 + i as i32 * 10, QMF_LEFT_JUSTIFY,
+            [i as i32, 0, 0, 0], Some(joinserver_menu_callback), Some("press ENTER to connect"),
         ));
-
-        // Separator: "connect to..."
-        menu_add_item_common(&mut S_JOINSERVER_MENU, make_menu_common(
-            MTYPE_SEPARATOR, "connect to...", 80, 30, 0,
-            [0, 0, 0, 0], None, None,
-        ));
-
-        // Search action
-        menu_add_item_common(&mut S_JOINSERVER_MENU, make_menu_common(
-            MTYPE_ACTION, "refresh server list", 0, 10, QMF_LEFT_JUSTIFY,
-            [-2, 0, 0, 0], Some(joinserver_menu_callback), Some("search for servers"),
-        ));
-
-        // Server entries
-        for i in 0..MAX_LOCAL_SERVERS {
-            menu_add_item_common(&mut S_JOINSERVER_MENU, make_menu_common(
-                MTYPE_ACTION, NO_SERVER_STRING, 0, 40 + i as i32 * 10, QMF_LEFT_JUSTIFY,
-                [i as i32, 0, 0, 0], Some(joinserver_menu_callback), Some("press ENTER to connect"),
-            ));
-        }
-
-        menu_center(&mut S_JOINSERVER_MENU);
-        search_local_games();
     }
+
+    menu_center(&mut ms().s_joinserver_menu);
+    search_local_games();
 }
 
 fn joinserver_menu_draw() {
     m_banner("m_banner_join_server");
-    // SAFETY: single-threaded engine
-    unsafe { menu_draw(&S_JOINSERVER_MENU); }
+    menu_draw(&ms().s_joinserver_menu);
 }
 
 fn joinserver_menu_key(key: i32) -> Option<&'static str> {
@@ -1921,13 +1839,6 @@ pub fn m_menu_join_server_f() {
 // Converted from: StartServer_MenuInit / StartServer_MenuDraw / StartServer_MenuKey
 // ============================================================
 
-static mut S_STARTSERVER_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
-
-static mut STARTSERVER_MAPNAMES: Vec<String> = Vec::new();
-
 // Item indices for start server menu
 const SS_STARTMAP: i32 = 0;
 const SS_RULES: i32 = 1;
@@ -1939,268 +1850,254 @@ const SS_DMOPTIONS: i32 = 6;
 const SS_BEGIN: i32 = 7;
 
 fn startserver_menu_callback(idx: usize) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(item) = MENU_ITEMS.get(idx) {
-            let id = item.generic().localdata[0];
-            match id {
-                SS_RULES => {
-                    // RulesChangeFunc — update statusbar based on rules selection
-                    // (simplified; full implementation would update field statusbars)
-                }
-                SS_DMOPTIONS => {
-                    // Check if coop is selected (rules curvalue == 1)
-                    if let Some(MenuItem::SpinControl(ref s)) = MENU_ITEMS.get(SS_RULES as usize) {
-                        if s.curvalue == 1 {
-                            return; // N/A for cooperative
-                        }
+    if let Some(item) = ms().menu_items.get(idx) {
+        let id = item.generic().localdata[0];
+        match id {
+            SS_RULES => {
+                // RulesChangeFunc — update statusbar based on rules selection
+                // (simplified; full implementation would update field statusbars)
+            }
+            SS_DMOPTIONS => {
+                // Check if coop is selected (rules curvalue == 1)
+                if let Some(MenuItem::SpinControl(ref s)) = ms().menu_items.get(SS_RULES as usize) {
+                    if s.curvalue == 1 {
+                        return; // N/A for cooperative
                     }
-                    m_menu_dm_options_f();
                 }
-                SS_BEGIN => {
-                    // StartServerActionFunc
-                    let map_idx = if let Some(MenuItem::SpinControl(ref s)) = MENU_ITEMS.get(SS_STARTMAP as usize) {
-                        s.curvalue as usize
+                m_menu_dm_options_f();
+            }
+            SS_BEGIN => {
+                // StartServerActionFunc
+                let map_idx = if let Some(MenuItem::SpinControl(ref s)) = ms().menu_items.get(SS_STARTMAP as usize) {
+                    s.curvalue as usize
+                } else { 0 };
+
+                if map_idx < ms().startserver_mapnames.len() {
+                    let mapname = ms().startserver_mapnames[map_idx].clone();
+                    // mapname format is "LongName\nSHORTNAME" — extract the shortname
+                    let startmap = if let Some(pos) = mapname.find('\n') {
+                        mapname[pos + 1..].to_string()
+                    } else {
+                        mapname.clone()
+                    };
+
+                    // Read field values for timelimit, fraglimit, maxclients, hostname
+                    let timelimit = get_field_buffer_str(SS_TIMELIMIT as usize);
+                    let fraglimit = get_field_buffer_str(SS_FRAGLIMIT as usize);
+                    let maxclients = get_field_buffer_str(SS_MAXCLIENTS as usize);
+                    let hostname = get_field_buffer_str(SS_HOSTNAME as usize);
+
+                    let tl: f32 = timelimit.parse().unwrap_or(0.0);
+                    let fl: f32 = fraglimit.parse().unwrap_or(0.0);
+                    let mc: f32 = maxclients.parse().unwrap_or(0.0);
+
+                    cvar_set_value("maxclients", mc);
+                    cvar_set_value("timelimit", tl);
+                    cvar_set_value("fraglimit", fl);
+                    cvar_set("hostname", &hostname);
+
+                    let rules_val = if let Some(MenuItem::SpinControl(ref s)) = ms().menu_items.get(SS_RULES as usize) {
+                        s.curvalue
                     } else { 0 };
 
-                    if map_idx < STARTSERVER_MAPNAMES.len() {
-                        let mapname = &STARTSERVER_MAPNAMES[map_idx];
-                        // mapname format is "LongName\nSHORTNAME" — extract the shortname
-                        let startmap = if let Some(pos) = mapname.find('\n') {
-                            &mapname[pos + 1..]
-                        } else {
-                            mapname.as_str()
-                        };
-
-                        // Read field values for timelimit, fraglimit, maxclients, hostname
-                        let timelimit = get_field_buffer_str(SS_TIMELIMIT as usize);
-                        let fraglimit = get_field_buffer_str(SS_FRAGLIMIT as usize);
-                        let maxclients = get_field_buffer_str(SS_MAXCLIENTS as usize);
-                        let hostname = get_field_buffer_str(SS_HOSTNAME as usize);
-
-                        let tl: f32 = timelimit.parse().unwrap_or(0.0);
-                        let fl: f32 = fraglimit.parse().unwrap_or(0.0);
-                        let mc: f32 = maxclients.parse().unwrap_or(0.0);
-
-                        cvar_set_value("maxclients", mc);
-                        cvar_set_value("timelimit", tl);
-                        cvar_set_value("fraglimit", fl);
-                        cvar_set("hostname", &hostname);
-
-                        let rules_val = if let Some(MenuItem::SpinControl(ref s)) = MENU_ITEMS.get(SS_RULES as usize) {
-                            s.curvalue
-                        } else { 0 };
-
-                        if rules_val < 2 || developer_searchpath(2) != 2 {
-                            cvar_set_value("deathmatch", if rules_val == 0 { 1.0 } else { 0.0 });
-                            cvar_set_value("coop", rules_val as f32);
-                            cvar_set_value("gamerules", 0.0);
-                        } else {
-                            cvar_set_value("deathmatch", 1.0);
-                            cvar_set_value("coop", 0.0);
-                            cvar_set_value("gamerules", rules_val as f32);
-                        }
-
-                        // Coop spawn spots
-                        let spot = if rules_val == 1 {
-                            let sm = startmap.to_lowercase();
-                            match sm.as_str() {
-                                "bunk1" | "mintro" | "fact1" => Some("start"),
-                                "power1" => Some("pstart"),
-                                "biggun" => Some("bstart"),
-                                "hangar1" | "city1" => Some("unitstart"),
-                                "boss1" => Some("bosstart"),
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
-
-                        if let Some(spot) = spot {
-                            if com_server_state() != 0 {
-                                crate::console::cbuf_add_text("disconnect\n");
-                            }
-                            crate::console::cbuf_add_text(&format!("gamemap \"*{}${}\"\n", startmap, spot));
-                        } else {
-                            crate::console::cbuf_add_text(&format!("map {}\n", startmap));
-                        }
-
-                        m_force_menu_off();
+                    if rules_val < 2 || developer_searchpath(2) != 2 {
+                        cvar_set_value("deathmatch", if rules_val == 0 { 1.0 } else { 0.0 });
+                        cvar_set_value("coop", rules_val as f32);
+                        cvar_set_value("gamerules", 0.0);
+                    } else {
+                        cvar_set_value("deathmatch", 1.0);
+                        cvar_set_value("coop", 0.0);
+                        cvar_set_value("gamerules", rules_val as f32);
                     }
+
+                    // Coop spawn spots
+                    let spot = if rules_val == 1 {
+                        let sm = startmap.to_lowercase();
+                        match sm.as_str() {
+                            "bunk1" | "mintro" | "fact1" => Some("start"),
+                            "power1" => Some("pstart"),
+                            "biggun" => Some("bstart"),
+                            "hangar1" | "city1" => Some("unitstart"),
+                            "boss1" => Some("bosstart"),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(spot) = spot {
+                        if com_server_state() != 0 {
+                            crate::console::cbuf_add_text("disconnect\n");
+                        }
+                        crate::console::cbuf_add_text(&format!("gamemap \"*{}${}\"\n", startmap, spot));
+                    } else {
+                        crate::console::cbuf_add_text(&format!("map {}\n", startmap));
+                    }
+
+                    m_force_menu_off();
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
 }
 
-/// Helper: get the text content of a MenuField at the given MENU_ITEMS index.
+/// Helper: get the text content of a MenuField at the given menu_items index.
 fn get_field_buffer_str(idx: usize) -> String {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(MenuItem::Field(ref f)) = MENU_ITEMS.get(idx) {
-            f.buffer.clone()
-        } else {
-            String::new()
-        }
+    if let Some(MenuItem::Field(ref f)) = ms().menu_items.get(idx) {
+        f.buffer.clone()
+    } else {
+        String::new()
     }
 }
 
-/// Helper: set the text content of a MenuField at the given MENU_ITEMS index.
+/// Helper: set the text content of a MenuField at the given menu_items index.
 fn set_field_buffer(idx: usize, text: &str) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(MenuItem::Field(ref mut f)) = MENU_ITEMS.get_mut(idx) {
-            f.buffer = text.to_string();
-        }
+    if let Some(MenuItem::Field(ref mut f)) = ms().menu_items.get_mut(idx) {
+        f.buffer = text.to_string();
     }
 }
 
 fn startserver_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        // Load maps list
-        STARTSERVER_MAPNAMES.clear();
-        let gamedir = crate::console::fs_gamedir();
-        let mapsname = format!("{}/maps.lst", gamedir);
+    // Load maps list
+    ms().startserver_mapnames.clear();
+    let gamedir = crate::console::fs_gamedir();
+    let mapsname = format!("{}/maps.lst", gamedir);
 
-        let buffer = std::fs::read_to_string(&mapsname)
-            .ok()
-            .or_else(|| fs_load_file("maps.lst").map(|data| String::from_utf8_lossy(&data).to_string()));
+    let buffer = std::fs::read_to_string(&mapsname)
+        .ok()
+        .or_else(|| fs_load_file("maps.lst").map(|data| String::from_utf8_lossy(&data).to_string()));
 
-        let mut mapname_strs: Vec<String> = Vec::new();
-        if let Some(buf) = buffer {
-            // Parse "shortname longname\r\n" pairs
-            let lines: Vec<&str> = buf.lines().collect();
-            for line in lines {
-                let line = line.trim();
-                if line.is_empty() { continue; }
-                let mut parts = line.splitn(2, char::is_whitespace);
-                let shortname = parts.next().unwrap_or("").to_uppercase();
-                let longname = parts.next().unwrap_or("").trim().to_string();
-                if !shortname.is_empty() {
-                    mapname_strs.push(format!("{}\n{}", longname, shortname));
-                }
+    let mut mapname_strs: Vec<String> = Vec::new();
+    if let Some(buf) = buffer {
+        // Parse "shortname longname\r\n" pairs
+        let lines: Vec<&str> = buf.lines().collect();
+        for line in lines {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let mut parts = line.splitn(2, char::is_whitespace);
+            let shortname = parts.next().unwrap_or("").to_uppercase();
+            let longname = parts.next().unwrap_or("").trim().to_string();
+            if !shortname.is_empty() {
+                mapname_strs.push(format!("{}\n{}", longname, shortname));
             }
         }
-
-        if mapname_strs.is_empty() {
-            mapname_strs.push("base1\nBASE1".to_string());
-        }
-
-        STARTSERVER_MAPNAMES = mapname_strs;
-
-        S_STARTSERVER_MENU = MenuFramework {
-            x: (VIDDEF.width as f32 * 0.50) as i32,
-            y: 0, cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
-
-        // 0: start map spin
-        menu_add_item_common(&mut S_STARTSERVER_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "initial map", 0, 0, 0,
-            [SS_STARTMAP, 0, 0, 0], None, None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(SS_STARTMAP as usize) {
-            // Build display names from the "longname\nSHORTNAME" format — show longname
-            let display_names: Vec<String> = STARTSERVER_MAPNAMES.iter()
-                .map(|n| {
-                    if let Some(pos) = n.find('\n') { n[..pos].to_string() } else { n.clone() }
-                })
-                .collect();
-            s.itemnames = display_names;
-        }
-
-        // 1: rules spin
-        menu_add_item_common(&mut S_STARTSERVER_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "rules", 0, 20, 0,
-            [SS_RULES, 0, 0, 0], Some(startserver_menu_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(SS_RULES as usize) {
-            if developer_searchpath(2) == 2 {
-                s.itemnames = strs(&["deathmatch", "cooperative", "tag"]);
-            } else {
-                s.itemnames = strs(&["deathmatch", "cooperative"]);
-            }
-            s.curvalue = if cvar_variable_value("coop") != 0.0 { 1 } else { 0 };
-        }
-
-        // 2: timelimit field
-        menu_add_item_common(&mut S_STARTSERVER_MENU, make_menu_common(
-            MTYPE_FIELD, "time limit", 0, 36, QMF_NUMBERSONLY,
-            [SS_TIMELIMIT, 0, 0, 0], None, Some("0 = no limit"),
-        ));
-        if let Some(MenuItem::Field(ref mut f)) = MENU_ITEMS.get_mut(SS_TIMELIMIT as usize) {
-            f.length = 3;
-            f.visible_length = 3;
-        }
-        set_field_buffer(SS_TIMELIMIT as usize, &cvar_variable_string("timelimit"));
-
-        // 3: fraglimit field
-        menu_add_item_common(&mut S_STARTSERVER_MENU, make_menu_common(
-            MTYPE_FIELD, "frag limit", 0, 54, QMF_NUMBERSONLY,
-            [SS_FRAGLIMIT, 0, 0, 0], None, Some("0 = no limit"),
-        ));
-        if let Some(MenuItem::Field(ref mut f)) = MENU_ITEMS.get_mut(SS_FRAGLIMIT as usize) {
-            f.length = 3;
-            f.visible_length = 3;
-        }
-        set_field_buffer(SS_FRAGLIMIT as usize, &cvar_variable_string("fraglimit"));
-
-        // 4: maxclients field
-        menu_add_item_common(&mut S_STARTSERVER_MENU, make_menu_common(
-            MTYPE_FIELD, "max players", 0, 72, QMF_NUMBERSONLY,
-            [SS_MAXCLIENTS, 0, 0, 0], None, None,
-        ));
-        if let Some(MenuItem::Field(ref mut f)) = MENU_ITEMS.get_mut(SS_MAXCLIENTS as usize) {
-            f.length = 3;
-            f.visible_length = 3;
-        }
-        let mc_str = if cvar_variable_value("maxclients") == 1.0 {
-            "8".to_string()
-        } else {
-            cvar_variable_string("maxclients")
-        };
-        set_field_buffer(SS_MAXCLIENTS as usize, &mc_str);
-
-        // 5: hostname field
-        menu_add_item_common(&mut S_STARTSERVER_MENU, make_menu_common(
-            MTYPE_FIELD, "hostname", 0, 90, 0,
-            [SS_HOSTNAME, 0, 0, 0], None, None,
-        ));
-        if let Some(MenuItem::Field(ref mut f)) = MENU_ITEMS.get_mut(SS_HOSTNAME as usize) {
-            f.length = 12;
-            f.visible_length = 12;
-        }
-        set_field_buffer(SS_HOSTNAME as usize, &cvar_variable_string("hostname"));
-
-        // 6: deathmatch flags action
-        menu_add_item_common(&mut S_STARTSERVER_MENU, make_menu_common(
-            MTYPE_ACTION, " deathmatch flags", 24, 108, QMF_LEFT_JUSTIFY,
-            [SS_DMOPTIONS, 0, 0, 0], Some(startserver_menu_callback), None,
-        ));
-
-        // 7: begin action
-        menu_add_item_common(&mut S_STARTSERVER_MENU, make_menu_common(
-            MTYPE_ACTION, " begin", 24, 128, QMF_LEFT_JUSTIFY,
-            [SS_BEGIN, 0, 0, 0], Some(startserver_menu_callback), None,
-        ));
-
-        menu_center(&mut S_STARTSERVER_MENU);
     }
+
+    if mapname_strs.is_empty() {
+        mapname_strs.push("base1\nBASE1".to_string());
+    }
+
+    ms().startserver_mapnames = mapname_strs;
+
+    ms().s_startserver_menu = MenuFramework {
+        x: (get_viddef().width as f32 * 0.50) as i32,
+        y: 0, cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    ms().menu_items.clear();
+
+    // 0: start map spin
+    menu_add_item_common(&mut ms().s_startserver_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "initial map", 0, 0, 0,
+        [SS_STARTMAP, 0, 0, 0], None, None,
+    ));
+    // Build display names from the "longname\nSHORTNAME" format — show longname
+    let display_names: Vec<String> = ms().startserver_mapnames.iter()
+        .map(|n| {
+            if let Some(pos) = n.find('\n') { n[..pos].to_string() } else { n.clone() }
+        })
+        .collect();
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(SS_STARTMAP as usize) {
+        s.itemnames = display_names;
+    }
+
+    // 1: rules spin
+    menu_add_item_common(&mut ms().s_startserver_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "rules", 0, 20, 0,
+        [SS_RULES, 0, 0, 0], Some(startserver_menu_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(SS_RULES as usize) {
+        if developer_searchpath(2) == 2 {
+            s.itemnames = strs(&["deathmatch", "cooperative", "tag"]);
+        } else {
+            s.itemnames = strs(&["deathmatch", "cooperative"]);
+        }
+        s.curvalue = if cvar_variable_value("coop") != 0.0 { 1 } else { 0 };
+    }
+
+    // 2: timelimit field
+    menu_add_item_common(&mut ms().s_startserver_menu, make_menu_common(
+        MTYPE_FIELD, "time limit", 0, 36, QMF_NUMBERSONLY,
+        [SS_TIMELIMIT, 0, 0, 0], None, Some("0 = no limit"),
+    ));
+    if let Some(MenuItem::Field(ref mut f)) = ms().menu_items.get_mut(SS_TIMELIMIT as usize) {
+        f.length = 3;
+        f.visible_length = 3;
+    }
+    set_field_buffer(SS_TIMELIMIT as usize, &cvar_variable_string("timelimit"));
+
+    // 3: fraglimit field
+    menu_add_item_common(&mut ms().s_startserver_menu, make_menu_common(
+        MTYPE_FIELD, "frag limit", 0, 54, QMF_NUMBERSONLY,
+        [SS_FRAGLIMIT, 0, 0, 0], None, Some("0 = no limit"),
+    ));
+    if let Some(MenuItem::Field(ref mut f)) = ms().menu_items.get_mut(SS_FRAGLIMIT as usize) {
+        f.length = 3;
+        f.visible_length = 3;
+    }
+    set_field_buffer(SS_FRAGLIMIT as usize, &cvar_variable_string("fraglimit"));
+
+    // 4: maxclients field
+    menu_add_item_common(&mut ms().s_startserver_menu, make_menu_common(
+        MTYPE_FIELD, "max players", 0, 72, QMF_NUMBERSONLY,
+        [SS_MAXCLIENTS, 0, 0, 0], None, None,
+    ));
+    if let Some(MenuItem::Field(ref mut f)) = ms().menu_items.get_mut(SS_MAXCLIENTS as usize) {
+        f.length = 3;
+        f.visible_length = 3;
+    }
+    let mc_str = if cvar_variable_value("maxclients") == 1.0 {
+        "8".to_string()
+    } else {
+        cvar_variable_string("maxclients")
+    };
+    set_field_buffer(SS_MAXCLIENTS as usize, &mc_str);
+
+    // 5: hostname field
+    menu_add_item_common(&mut ms().s_startserver_menu, make_menu_common(
+        MTYPE_FIELD, "hostname", 0, 90, 0,
+        [SS_HOSTNAME, 0, 0, 0], None, None,
+    ));
+    if let Some(MenuItem::Field(ref mut f)) = ms().menu_items.get_mut(SS_HOSTNAME as usize) {
+        f.length = 12;
+        f.visible_length = 12;
+    }
+    set_field_buffer(SS_HOSTNAME as usize, &cvar_variable_string("hostname"));
+
+    // 6: deathmatch flags action
+    menu_add_item_common(&mut ms().s_startserver_menu, make_menu_common(
+        MTYPE_ACTION, " deathmatch flags", 24, 108, QMF_LEFT_JUSTIFY,
+        [SS_DMOPTIONS, 0, 0, 0], Some(startserver_menu_callback), None,
+    ));
+
+    // 7: begin action
+    menu_add_item_common(&mut ms().s_startserver_menu, make_menu_common(
+        MTYPE_ACTION, " begin", 24, 128, QMF_LEFT_JUSTIFY,
+        [SS_BEGIN, 0, 0, 0], Some(startserver_menu_callback), None,
+    ));
+
+    menu_center(&mut ms().s_startserver_menu);
 }
 
 fn startserver_menu_draw() {
-    // SAFETY: single-threaded engine
-    unsafe { menu_draw(&S_STARTSERVER_MENU); }
+    menu_draw(&ms().s_startserver_menu);
 }
 
 fn startserver_menu_key(key: i32) -> Option<&'static str> {
     if key == K_ESCAPE {
         // Free mapnames on exit (C code frees them here)
-        // SAFETY: single-threaded engine
-        unsafe { STARTSERVER_MAPNAMES.clear(); }
+        ms().startserver_mapnames.clear();
     }
     default_menu_key_with_menu(key, true)
 }
@@ -2214,11 +2111,6 @@ pub fn m_menu_start_server_f() {
 // DM Options Menu
 // Converted from: DMOptions_MenuInit / DMOptions_MenuDraw / DMOptions_MenuKey
 // ============================================================
-
-static mut S_DMOPTIONS_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
 
 // dmflags constants from q_shared
 use myq2_common::q_shared::{
@@ -2239,172 +2131,165 @@ use myq2_common::q_shared::{
 // (optionally 15-18: rogue items)
 
 fn dmflag_callback(idx: usize) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        let mut flags = DmFlags::from_bits_truncate(cvar_variable_value("dmflags") as i32);
+    let mut flags = DmFlags::from_bits_truncate(cvar_variable_value("dmflags") as i32);
 
-        if let Some(item) = MENU_ITEMS.get(idx) {
-            let flag_bits = item.generic().localdata[1];
-            let inverted = item.generic().localdata[2] != 0;
+    if let Some(item) = ms().menu_items.get(idx) {
+        let flag_bits = item.generic().localdata[1];
+        let inverted = item.generic().localdata[2] != 0;
 
-            if let MenuItem::SpinControl(ref s) = item {
-                let curval = s.curvalue;
+        if let MenuItem::SpinControl(ref s) = item {
+            let curval = s.curvalue;
 
-                // teamplay is special (localdata[1] == -1 sentinel)
-                if flag_bits == -1 {
-                    // teamplay: 0=disabled, 1=by skin, 2=by model
-                    if curval == 1 {
-                        flags.insert(DF_SKINTEAMS);
-                        flags.remove(DF_MODELTEAMS);
-                    } else if curval == 2 {
-                        flags.insert(DF_MODELTEAMS);
-                        flags.remove(DF_SKINTEAMS);
+            // teamplay is special (localdata[1] == -1 sentinel)
+            if flag_bits == -1 {
+                // teamplay: 0=disabled, 1=by skin, 2=by model
+                if curval == 1 {
+                    flags.insert(DF_SKINTEAMS);
+                    flags.remove(DF_MODELTEAMS);
+                } else if curval == 2 {
+                    flags.insert(DF_MODELTEAMS);
+                    flags.remove(DF_SKINTEAMS);
+                } else {
+                    flags.remove(DF_MODELTEAMS | DF_SKINTEAMS);
+                }
+            } else {
+                let flag = DmFlags::from_bits_truncate(flag_bits);
+                if inverted {
+                    // "inverted" means curvalue=1 means flag OFF (e.g., "allow health" = no DF_NO_HEALTH)
+                    if curval != 0 {
+                        flags.remove(flag);
                     } else {
-                        flags.remove(DF_MODELTEAMS | DF_SKINTEAMS);
+                        flags.insert(flag);
                     }
                 } else {
-                    let flag = DmFlags::from_bits_truncate(flag_bits);
-                    if inverted {
-                        // "inverted" means curvalue=1 means flag OFF (e.g., "allow health" = no DF_NO_HEALTH)
-                        if curval != 0 {
-                            flags.remove(flag);
-                        } else {
-                            flags.insert(flag);
-                        }
+                    // normal: curvalue=1 means flag ON
+                    if curval != 0 {
+                        flags.insert(flag);
                     } else {
-                        // normal: curvalue=1 means flag ON
-                        if curval != 0 {
-                            flags.insert(flag);
-                        } else {
-                            flags.remove(flag);
-                        }
+                        flags.remove(flag);
                     }
                 }
             }
         }
-
-        let flags_i32 = flags.bits();
-        cvar_set_value("dmflags", flags_i32 as f32);
-
-        // Update statusbar
-        let status = format!("dmflags = {}", flags_i32);
-        // Store in a leaked string for static lifetime
-        let leaked: &'static str = Box::leak(status.into_boxed_str());
-        menu_set_status_bar(&mut S_DMOPTIONS_MENU, Some(leaked));
     }
+
+    let flags_i32 = flags.bits();
+    cvar_set_value("dmflags", flags_i32 as f32);
+
+    // Update statusbar
+    let status = format!("dmflags = {}", flags_i32);
+    // Store in a leaked string for static lifetime
+    let leaked: &'static str = Box::leak(status.into_boxed_str());
+    menu_set_status_bar(&mut ms().s_dmoptions_menu, Some(leaked));
 }
 
 fn dmoptions_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        let dmflags_i32 = cvar_variable_value("dmflags") as i32;
-        let dmflags = DmFlags::from_bits_truncate(dmflags_i32);
+    let dmflags_i32 = cvar_variable_value("dmflags") as i32;
+    let dmflags = DmFlags::from_bits_truncate(dmflags_i32);
 
-        S_DMOPTIONS_MENU = MenuFramework {
-            x: (VIDDEF.width as f32 * 0.50) as i32,
-            y: 0, cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
+    ms().s_dmoptions_menu = MenuFramework {
+        x: (get_viddef().width as f32 * 0.50) as i32,
+        y: 0, cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    ms().menu_items.clear();
 
-        // (name, y, flag, inverted, is_teamplay)
-        // flag_bits stores the i32 representation for localdata storage;
-        // -1 is a sentinel for the teamplay item.
-        struct DmItem {
-            name: &'static str,
-            flag_bits: i32,
-            inverted: bool,     // true = "allow X" where flag means "no X"
-            is_teamplay: bool,
-        }
+    // (name, y, flag, inverted, is_teamplay)
+    // flag_bits stores the i32 representation for localdata storage;
+    // -1 is a sentinel for the teamplay item.
+    struct DmItem {
+        name: &'static str,
+        flag_bits: i32,
+        inverted: bool,     // true = "allow X" where flag means "no X"
+        is_teamplay: bool,
+    }
 
-        let dm_items: Vec<DmItem> = vec![
-            DmItem { name: "falling damage",    flag_bits: DF_NO_FALLING.bits(),      inverted: true,  is_teamplay: false },
-            DmItem { name: "weapons stay",      flag_bits: DF_WEAPONS_STAY.bits(),    inverted: false, is_teamplay: false },
-            DmItem { name: "instant powerups",  flag_bits: DF_INSTANT_ITEMS.bits(),   inverted: false, is_teamplay: false },
-            DmItem { name: "allow powerups",    flag_bits: DF_NO_ITEMS.bits(),        inverted: true,  is_teamplay: false },
-            DmItem { name: "allow health",      flag_bits: DF_NO_HEALTH.bits(),       inverted: true,  is_teamplay: false },
-            DmItem { name: "allow armor",       flag_bits: DF_NO_ARMOR.bits(),        inverted: true,  is_teamplay: false },
-            DmItem { name: "spawn farthest",    flag_bits: DF_SPAWN_FARTHEST.bits(),  inverted: false, is_teamplay: false },
-            DmItem { name: "same map",          flag_bits: DF_SAME_LEVEL.bits(),      inverted: false, is_teamplay: false },
-            DmItem { name: "force respawn",     flag_bits: DF_FORCE_RESPAWN.bits(),   inverted: false, is_teamplay: false },
-            DmItem { name: "teamplay",          flag_bits: -1,                        inverted: false, is_teamplay: true  },
-            DmItem { name: "allow exit",        flag_bits: DF_ALLOW_EXIT.bits(),      inverted: false, is_teamplay: false },
-            DmItem { name: "infinite ammo",     flag_bits: DF_INFINITE_AMMO.bits(),   inverted: false, is_teamplay: false },
-            DmItem { name: "fixed FOV",         flag_bits: DF_FIXED_FOV.bits(),       inverted: false, is_teamplay: false },
-            DmItem { name: "quad drop",         flag_bits: DF_QUAD_DROP.bits(),       inverted: false, is_teamplay: false },
-            DmItem { name: "friendly fire",     flag_bits: DF_NO_FRIENDLY_FIRE.bits(), inverted: true, is_teamplay: false },
-        ];
+    let dm_items: Vec<DmItem> = vec![
+        DmItem { name: "falling damage",    flag_bits: DF_NO_FALLING.bits(),      inverted: true,  is_teamplay: false },
+        DmItem { name: "weapons stay",      flag_bits: DF_WEAPONS_STAY.bits(),    inverted: false, is_teamplay: false },
+        DmItem { name: "instant powerups",  flag_bits: DF_INSTANT_ITEMS.bits(),   inverted: false, is_teamplay: false },
+        DmItem { name: "allow powerups",    flag_bits: DF_NO_ITEMS.bits(),        inverted: true,  is_teamplay: false },
+        DmItem { name: "allow health",      flag_bits: DF_NO_HEALTH.bits(),       inverted: true,  is_teamplay: false },
+        DmItem { name: "allow armor",       flag_bits: DF_NO_ARMOR.bits(),        inverted: true,  is_teamplay: false },
+        DmItem { name: "spawn farthest",    flag_bits: DF_SPAWN_FARTHEST.bits(),  inverted: false, is_teamplay: false },
+        DmItem { name: "same map",          flag_bits: DF_SAME_LEVEL.bits(),      inverted: false, is_teamplay: false },
+        DmItem { name: "force respawn",     flag_bits: DF_FORCE_RESPAWN.bits(),   inverted: false, is_teamplay: false },
+        DmItem { name: "teamplay",          flag_bits: -1,                        inverted: false, is_teamplay: true  },
+        DmItem { name: "allow exit",        flag_bits: DF_ALLOW_EXIT.bits(),      inverted: false, is_teamplay: false },
+        DmItem { name: "infinite ammo",     flag_bits: DF_INFINITE_AMMO.bits(),   inverted: false, is_teamplay: false },
+        DmItem { name: "fixed FOV",         flag_bits: DF_FIXED_FOV.bits(),       inverted: false, is_teamplay: false },
+        DmItem { name: "quad drop",         flag_bits: DF_QUAD_DROP.bits(),       inverted: false, is_teamplay: false },
+        DmItem { name: "friendly fire",     flag_bits: DF_NO_FRIENDLY_FIRE.bits(), inverted: true, is_teamplay: false },
+    ];
 
-        let mut y = 0i32;
-        for (i, dm) in dm_items.iter().enumerate() {
-            let item = make_menu_common(
-                MTYPE_SPINCONTROL, dm.name, 0, y, 0,
-                [i as i32, dm.flag_bits, if dm.inverted { 1 } else { 0 }, 0],
-                Some(dmflag_callback), None,
-            );
-            menu_add_item_common(&mut S_DMOPTIONS_MENU, item);
+    let mut y = 0i32;
+    for (i, dm) in dm_items.iter().enumerate() {
+        let item = make_menu_common(
+            MTYPE_SPINCONTROL, dm.name, 0, y, 0,
+            [i as i32, dm.flag_bits, if dm.inverted { 1 } else { 0 }, 0],
+            Some(dmflag_callback), None,
+        );
+        menu_add_item_common(&mut ms().s_dmoptions_menu, item);
 
-            if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(i) {
-                if dm.is_teamplay {
-                    s.itemnames = strs(&["disabled", "by skin", "by model"]);
-                    // Determine teamplay curvalue from flags
-                    if dmflags.intersects(DF_SKINTEAMS) {
-                        s.curvalue = 1;
-                    } else if dmflags.intersects(DF_MODELTEAMS) {
-                        s.curvalue = 2;
-                    } else {
-                        s.curvalue = 0;
-                    }
+        if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(i) {
+            if dm.is_teamplay {
+                s.itemnames = strs(&["disabled", "by skin", "by model"]);
+                // Determine teamplay curvalue from flags
+                if dmflags.intersects(DF_SKINTEAMS) {
+                    s.curvalue = 1;
+                } else if dmflags.intersects(DF_MODELTEAMS) {
+                    s.curvalue = 2;
                 } else {
-                    s.itemnames = strs(&["no", "yes"]);
-                    let flag = DmFlags::from_bits_truncate(dm.flag_bits);
-                    if dm.inverted {
-                        s.curvalue = if !dmflags.intersects(flag) { 1 } else { 0 };
-                    } else {
-                        s.curvalue = if dmflags.intersects(flag) { 1 } else { 0 };
-                    }
+                    s.curvalue = 0;
                 }
-            }
-
-            y += 10;
-        }
-
-        // Rogue-specific items
-        if developer_searchpath(2) == 2 {
-            let rogue_items: &[(&str, i32)] = &[
-                ("remove mines",       DF_NO_MINES.bits()),
-                ("remove nukes",       DF_NO_NUKES.bits()),
-                ("2x/4x stacking off", DF_NO_STACK_DOUBLE.bits()),
-                ("remove spheres",     DF_NO_SPHERES.bits()),
-            ];
-            for (ri, &(name, flag_bits)) in rogue_items.iter().enumerate() {
-                let idx = dm_items.len() + ri;
-                let item = make_menu_common(
-                    MTYPE_SPINCONTROL, name, 0, y, 0,
-                    [idx as i32, flag_bits, 0, 0], Some(dmflag_callback), None,
-                );
-                menu_add_item_common(&mut S_DMOPTIONS_MENU, item);
-                if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(idx) {
-                    s.itemnames = strs(&["no", "yes"]);
-                    let flag = DmFlags::from_bits_truncate(flag_bits);
+            } else {
+                s.itemnames = strs(&["no", "yes"]);
+                let flag = DmFlags::from_bits_truncate(dm.flag_bits);
+                if dm.inverted {
+                    s.curvalue = if !dmflags.intersects(flag) { 1 } else { 0 };
+                } else {
                     s.curvalue = if dmflags.intersects(flag) { 1 } else { 0 };
                 }
-                y += 10;
             }
         }
 
-        menu_center(&mut S_DMOPTIONS_MENU);
-
-        // Set initial statusbar
-        let status = format!("dmflags = {}", dmflags_i32);
-        let leaked: &'static str = Box::leak(status.into_boxed_str());
-        menu_set_status_bar(&mut S_DMOPTIONS_MENU, Some(leaked));
+        y += 10;
     }
+
+    // Rogue-specific items
+    if developer_searchpath(2) == 2 {
+        let rogue_items: &[(&str, i32)] = &[
+            ("remove mines",       DF_NO_MINES.bits()),
+            ("remove nukes",       DF_NO_NUKES.bits()),
+            ("2x/4x stacking off", DF_NO_STACK_DOUBLE.bits()),
+            ("remove spheres",     DF_NO_SPHERES.bits()),
+        ];
+        for (ri, &(name, flag_bits)) in rogue_items.iter().enumerate() {
+            let idx = dm_items.len() + ri;
+            let item = make_menu_common(
+                MTYPE_SPINCONTROL, name, 0, y, 0,
+                [idx as i32, flag_bits, 0, 0], Some(dmflag_callback), None,
+            );
+            menu_add_item_common(&mut ms().s_dmoptions_menu, item);
+            if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(idx) {
+                s.itemnames = strs(&["no", "yes"]);
+                let flag = DmFlags::from_bits_truncate(flag_bits);
+                s.curvalue = if dmflags.intersects(flag) { 1 } else { 0 };
+            }
+            y += 10;
+        }
+    }
+
+    menu_center(&mut ms().s_dmoptions_menu);
+
+    // Set initial statusbar
+    let status = format!("dmflags = {}", dmflags_i32);
+    let leaked: &'static str = Box::leak(status.into_boxed_str());
+    menu_set_status_bar(&mut ms().s_dmoptions_menu, Some(leaked));
 }
 
 fn dmoptions_menu_draw() {
-    // SAFETY: single-threaded engine
-    unsafe { menu_draw(&S_DMOPTIONS_MENU); }
+    menu_draw(&ms().s_dmoptions_menu);
 }
 
 fn dmoptions_menu_key(key: i32) -> Option<&'static str> {
@@ -2421,114 +2306,102 @@ pub fn m_menu_dm_options_f() {
 // Converted from: DownloadOptions_MenuInit / DownloadOptions_MenuDraw / DownloadOptions_MenuKey
 // ============================================================
 
-static mut S_DOWNLOADOPTIONS_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
-
 fn download_callback(idx: usize) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(MenuItem::SpinControl(ref s)) = MENU_ITEMS.get(idx) {
-            let id = s.generic.localdata[0];
-            let val = s.curvalue as f32;
-            match id {
-                1 => cvar_set_value("allow_download", val),
-                2 => cvar_set_value("allow_download_maps", val),
-                3 => cvar_set_value("allow_download_players", val),
-                4 => cvar_set_value("allow_download_models", val),
-                5 => cvar_set_value("allow_download_sounds", val),
-                _ => {}
-            }
+    if let Some(MenuItem::SpinControl(ref s)) = ms().menu_items.get(idx) {
+        let id = s.generic.localdata[0];
+        let val = s.curvalue as f32;
+        match id {
+            1 => cvar_set_value("allow_download", val),
+            2 => cvar_set_value("allow_download_maps", val),
+            3 => cvar_set_value("allow_download_players", val),
+            4 => cvar_set_value("allow_download_models", val),
+            5 => cvar_set_value("allow_download_sounds", val),
+            _ => {}
         }
     }
 }
 
 fn downloadoptions_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        S_DOWNLOADOPTIONS_MENU = MenuFramework {
-            x: (VIDDEF.width as f32 * 0.50) as i32,
-            y: 0, cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
+    ms().s_downloadoptions_menu = MenuFramework {
+        x: (get_viddef().width as f32 * 0.50) as i32,
+        y: 0, cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    ms().menu_items.clear();
 
-        let mut y = 0i32;
+    let mut y = 0i32;
 
-        // 0: title separator
-        menu_add_item_common(&mut S_DOWNLOADOPTIONS_MENU, make_menu_common(
-            MTYPE_SEPARATOR, "Download Options", 48, y, 0,
-            [0, 0, 0, 0], None, None,
-        ));
+    // 0: title separator
+    menu_add_item_common(&mut ms().s_downloadoptions_menu, make_menu_common(
+        MTYPE_SEPARATOR, "Download Options", 48, y, 0,
+        [0, 0, 0, 0], None, None,
+    ));
 
-        // 1: allow downloading
-        y += 20;
-        menu_add_item_common(&mut S_DOWNLOADOPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "allow downloading", 0, y, 0,
-            [1, 0, 0, 0], Some(download_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.last_mut() {
-            s.itemnames = strs(&["no", "yes"]);
-            s.curvalue = if cvar_variable_value("allow_download") != 0.0 { 1 } else { 0 };
-        }
+    // 1: allow downloading
+    y += 20;
+    menu_add_item_common(&mut ms().s_downloadoptions_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "allow downloading", 0, y, 0,
+        [1, 0, 0, 0], Some(download_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.last_mut() {
+        s.itemnames = strs(&["no", "yes"]);
+        s.curvalue = if cvar_variable_value("allow_download") != 0.0 { 1 } else { 0 };
+    }
 
-        // 2: maps
-        y += 20;
-        menu_add_item_common(&mut S_DOWNLOADOPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "maps", 0, y, 0,
-            [2, 0, 0, 0], Some(download_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.last_mut() {
-            s.itemnames = strs(&["no", "yes"]);
-            s.curvalue = if cvar_variable_value("allow_download_maps") != 0.0 { 1 } else { 0 };
-        }
+    // 2: maps
+    y += 20;
+    menu_add_item_common(&mut ms().s_downloadoptions_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "maps", 0, y, 0,
+        [2, 0, 0, 0], Some(download_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.last_mut() {
+        s.itemnames = strs(&["no", "yes"]);
+        s.curvalue = if cvar_variable_value("allow_download_maps") != 0.0 { 1 } else { 0 };
+    }
 
-        // 3: player models/skins
-        y += 10;
-        menu_add_item_common(&mut S_DOWNLOADOPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "player models/skins", 0, y, 0,
-            [3, 0, 0, 0], Some(download_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.last_mut() {
-            s.itemnames = strs(&["no", "yes"]);
-            s.curvalue = if cvar_variable_value("allow_download_players") != 0.0 { 1 } else { 0 };
-        }
+    // 3: player models/skins
+    y += 10;
+    menu_add_item_common(&mut ms().s_downloadoptions_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "player models/skins", 0, y, 0,
+        [3, 0, 0, 0], Some(download_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.last_mut() {
+        s.itemnames = strs(&["no", "yes"]);
+        s.curvalue = if cvar_variable_value("allow_download_players") != 0.0 { 1 } else { 0 };
+    }
 
-        // 4: models
-        y += 10;
-        menu_add_item_common(&mut S_DOWNLOADOPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "models", 0, y, 0,
-            [4, 0, 0, 0], Some(download_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.last_mut() {
-            s.itemnames = strs(&["no", "yes"]);
-            s.curvalue = if cvar_variable_value("allow_download_models") != 0.0 { 1 } else { 0 };
-        }
+    // 4: models
+    y += 10;
+    menu_add_item_common(&mut ms().s_downloadoptions_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "models", 0, y, 0,
+        [4, 0, 0, 0], Some(download_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.last_mut() {
+        s.itemnames = strs(&["no", "yes"]);
+        s.curvalue = if cvar_variable_value("allow_download_models") != 0.0 { 1 } else { 0 };
+    }
 
-        // 5: sounds
-        y += 10;
-        menu_add_item_common(&mut S_DOWNLOADOPTIONS_MENU, make_menu_common(
-            MTYPE_SPINCONTROL, "sounds", 0, y, 0,
-            [5, 0, 0, 0], Some(download_callback), None,
-        ));
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.last_mut() {
-            s.itemnames = strs(&["no", "yes"]);
-            s.curvalue = if cvar_variable_value("allow_download_sounds") != 0.0 { 1 } else { 0 };
-        }
+    // 5: sounds
+    y += 10;
+    menu_add_item_common(&mut ms().s_downloadoptions_menu, make_menu_common(
+        MTYPE_SPINCONTROL, "sounds", 0, y, 0,
+        [5, 0, 0, 0], Some(download_callback), None,
+    ));
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.last_mut() {
+        s.itemnames = strs(&["no", "yes"]);
+        s.curvalue = if cvar_variable_value("allow_download_sounds") != 0.0 { 1 } else { 0 };
+    }
 
-        menu_center(&mut S_DOWNLOADOPTIONS_MENU);
+    menu_center(&mut ms().s_downloadoptions_menu);
 
-        // Skip over title separator
-        if S_DOWNLOADOPTIONS_MENU.cursor == 0 {
-            S_DOWNLOADOPTIONS_MENU.cursor = 1;
-        }
+    // Skip over title separator
+    if ms().s_downloadoptions_menu.cursor == 0 {
+        ms().s_downloadoptions_menu.cursor = 1;
     }
 }
 
 fn downloadoptions_menu_draw() {
-    // SAFETY: single-threaded engine
-    unsafe { menu_draw(&S_DOWNLOADOPTIONS_MENU); }
+    menu_draw(&ms().s_downloadoptions_menu);
 }
 
 fn downloadoptions_menu_key(key: i32) -> Option<&'static str> {
@@ -2545,41 +2418,33 @@ pub fn m_menu_download_options_f() {
 // Converted from: AddressBook_MenuInit / AddressBook_MenuDraw / AddressBook_MenuKey
 // ============================================================
 
-static mut S_ADDRESSBOOK_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
-
 fn addressbook_menu_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        S_ADDRESSBOOK_MENU = MenuFramework {
-            x: VIDDEF.width / 2 - 142,
-            y: VIDDEF.height / 2 - 58,
-            cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
+    ms().s_addressbook_menu = MenuFramework {
+        x: get_viddef().width / 2 - 142,
+        y: get_viddef().height / 2 - 58,
+        cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    ms().menu_items.clear();
 
-        for i in 0..NUM_ADDRESSBOOK_ENTRIES {
-            let cvar_name = format!("adr{}", i);
-            cvar_get(&cvar_name, "", 0);
-            let adr_value = cvar_variable_string(&cvar_name);
+    for i in 0..NUM_ADDRESSBOOK_ENTRIES {
+        let cvar_name = format!("adr{}", i);
+        cvar_get(&cvar_name, "", 0);
+        let adr_value = cvar_variable_string(&cvar_name);
 
-            let item = make_menu_common(
-                MTYPE_FIELD, "", 0, i as i32 * 18, 0,
-                [i as i32, 0, 0, 0], None, None,
-            );
-            menu_add_item_common(&mut S_ADDRESSBOOK_MENU, item);
+        let item = make_menu_common(
+            MTYPE_FIELD, "", 0, i as i32 * 18, 0,
+            [i as i32, 0, 0, 0], None, None,
+        );
+        menu_add_item_common(&mut ms().s_addressbook_menu, item);
 
-            // Set field properties
-            if let Some(MenuItem::Field(ref mut f)) = MENU_ITEMS.get_mut(i) {
-                f.cursor = 0;
-                f.length = 60;
-                f.visible_length = 30;
-                // Copy address value into buffer
-                f.buffer = adr_value;
-            }
+        // Set field properties
+        if let Some(MenuItem::Field(ref mut f)) = ms().menu_items.get_mut(i) {
+            f.cursor = 0;
+            f.length = 60;
+            f.visible_length = 30;
+            // Copy address value into buffer
+            f.buffer = adr_value;
         }
     }
 }
@@ -2598,8 +2463,7 @@ fn addressbook_menu_key(key: i32) -> Option<&'static str> {
 
 fn addressbook_menu_draw() {
     m_banner("m_banner_addressbook");
-    // SAFETY: single-threaded engine
-    unsafe { menu_draw(&S_ADDRESSBOOK_MENU); }
+    menu_draw(&ms().s_addressbook_menu);
 }
 
 pub fn m_menu_address_book_f() {
@@ -2610,11 +2474,6 @@ pub fn m_menu_address_book_f() {
 // ============================================================
 // Player Config (stub)
 // ============================================================
-
-static mut S_PLAYER_CONFIG_MENU: MenuFramework = MenuFramework {
-    x: 0, y: 0, cursor: 0, nitems: 0, nslots: 0,
-    items: Vec::new(), statusbar: None, cursordraw: None,
-};
 
 // Player config menu item indices
 const PC_NAME: usize = 0;
@@ -2627,29 +2486,26 @@ const PC_DOWNLOAD: usize = 5;
 static RATE_TBL: &[i32] = &[2500, 3200, 5000, 10000, 25000, 0];
 
 fn playerconfig_callback(idx: usize) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(item) = MENU_ITEMS.get(idx) {
-            let id = item.generic().localdata[0] as usize;
-            match id {
-                PC_HANDEDNESS => {
-                    if let MenuItem::SpinControl(ref s) = item {
-                        cvar_set_value("hand", s.curvalue as f32);
-                    }
+    if let Some(item) = ms().menu_items.get(idx) {
+        let id = item.generic().localdata[0] as usize;
+        match id {
+            PC_HANDEDNESS => {
+                if let MenuItem::SpinControl(ref s) = item {
+                    cvar_set_value("hand", s.curvalue as f32);
                 }
-                PC_RATE => {
-                    if let MenuItem::SpinControl(ref s) = item {
-                        let rate_idx = s.curvalue as usize;
-                        if rate_idx < RATE_TBL.len() - 1 {
-                            cvar_set_value("rate", RATE_TBL[rate_idx] as f32);
-                        }
-                    }
-                }
-                PC_DOWNLOAD => {
-                    m_menu_download_options_f();
-                }
-                _ => {}
             }
+            PC_RATE => {
+                if let MenuItem::SpinControl(ref s) = item {
+                    let rate_idx = s.curvalue as usize;
+                    if rate_idx < RATE_TBL.len() - 1 {
+                        cvar_set_value("rate", RATE_TBL[rate_idx] as f32);
+                    }
+                }
+            }
+            PC_DOWNLOAD => {
+                m_menu_download_options_f();
+            }
+            _ => {}
         }
     }
 }
@@ -2657,94 +2513,90 @@ fn playerconfig_callback(idx: usize) {
 /// PlayerConfig_MenuInit — initialize player configuration menu.
 /// Returns true if valid player models were found.
 fn player_config_menu_init() -> bool {
-    // SAFETY: single-threaded engine
-    unsafe {
-        S_PLAYER_CONFIG_MENU = MenuFramework {
-            x: VIDDEF.width / 2 - 95,
-            y: VIDDEF.height / 2 - 97,
-            cursor: 0, nitems: 0, nslots: 0,
-            items: Vec::new(), statusbar: None, cursordraw: None,
-        };
-        MENU_ITEMS.clear();
+    ms().s_player_config_menu = MenuFramework {
+        x: get_viddef().width / 2 - 95,
+        y: get_viddef().height / 2 - 97,
+        cursor: 0, nitems: 0, nslots: 0,
+        items: Vec::new(), statusbar: None, cursordraw: None,
+    };
+    ms().menu_items.clear();
 
-        // 0: Name field
-        let name_item = make_menu_common(
-            MTYPE_FIELD, "name", 0, 0, 0,
-            [PC_NAME as i32, 0, 0, 0], None, None,
-        );
-        menu_add_item_common(&mut S_PLAYER_CONFIG_MENU, name_item);
-        if let Some(MenuItem::Field(ref mut f)) = MENU_ITEMS.get_mut(PC_NAME) {
-            f.length = 20;
-            f.visible_length = 20;
-        }
-        set_field_buffer(PC_NAME, &cvar_variable_string("name"));
-
-        // 1: Model selection
-        let model_item = make_menu_common(
-            MTYPE_SPINCONTROL, "model", 0, 20, 0,
-            [PC_MODEL as i32, 0, 0, 0], None, None,
-        );
-        menu_add_item_common(&mut S_PLAYER_CONFIG_MENU, model_item);
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(PC_MODEL) {
-            s.itemnames = strs(&["male", "female", "cyborg"]);
-        }
-
-        // 2: Skin selection
-        let skin_item = make_menu_common(
-            MTYPE_SPINCONTROL, "skin", 0, 30, 0,
-            [PC_SKIN as i32, 0, 0, 0], None, None,
-        );
-        menu_add_item_common(&mut S_PLAYER_CONFIG_MENU, skin_item);
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(PC_SKIN) {
-            s.itemnames = strs(&["grunt", "major", "id"]);
-        }
-
-        // 3: Handedness
-        let hand_item = make_menu_common(
-            MTYPE_SPINCONTROL, "handedness", 0, 50, 0,
-            [PC_HANDEDNESS as i32, 0, 0, 0], Some(playerconfig_callback), None,
-        );
-        menu_add_item_common(&mut S_PLAYER_CONFIG_MENU, hand_item);
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(PC_HANDEDNESS) {
-            s.itemnames = strs(&["right", "left", "center"]);
-            s.curvalue = clamp_cvar(0.0, 2.0, cvar_variable_value("hand")) as i32;
-        }
-
-        // 4: Rate
-        let rate_item = make_menu_common(
-            MTYPE_SPINCONTROL, "connect speed", 0, 60, 0,
-            [PC_RATE as i32, 0, 0, 0], Some(playerconfig_callback), None,
-        );
-        menu_add_item_common(&mut S_PLAYER_CONFIG_MENU, rate_item);
-        if let Some(MenuItem::SpinControl(ref mut s)) = MENU_ITEMS.get_mut(PC_RATE) {
-            s.itemnames = strs(&["28.8 Modem", "33.6 Modem", "Single ISDN", "Dual ISDN/Cable", "T1/LAN", "User defined"]);
-            let rate = cvar_variable_value("rate") as i32;
-            let mut rate_idx = RATE_TBL.len() - 1; // "User defined"
-            for (i, &r) in RATE_TBL.iter().enumerate() {
-                if r > 0 && rate == r {
-                    rate_idx = i;
-                    break;
-                }
-            }
-            s.curvalue = rate_idx as i32;
-        }
-
-        // 5: Download options
-        let dl_item = make_menu_common(
-            MTYPE_ACTION, "download options", 0, 80, 0,
-            [PC_DOWNLOAD as i32, 0, 0, 0], Some(playerconfig_callback), None,
-        );
-        menu_add_item_common(&mut S_PLAYER_CONFIG_MENU, dl_item);
-
-        menu_center(&mut S_PLAYER_CONFIG_MENU);
+    // 0: Name field
+    let name_item = make_menu_common(
+        MTYPE_FIELD, "name", 0, 0, 0,
+        [PC_NAME as i32, 0, 0, 0], None, None,
+    );
+    menu_add_item_common(&mut ms().s_player_config_menu, name_item);
+    if let Some(MenuItem::Field(ref mut f)) = ms().menu_items.get_mut(PC_NAME) {
+        f.length = 20;
+        f.visible_length = 20;
     }
+    set_field_buffer(PC_NAME, &cvar_variable_string("name"));
+
+    // 1: Model selection
+    let model_item = make_menu_common(
+        MTYPE_SPINCONTROL, "model", 0, 20, 0,
+        [PC_MODEL as i32, 0, 0, 0], None, None,
+    );
+    menu_add_item_common(&mut ms().s_player_config_menu, model_item);
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(PC_MODEL) {
+        s.itemnames = strs(&["male", "female", "cyborg"]);
+    }
+
+    // 2: Skin selection
+    let skin_item = make_menu_common(
+        MTYPE_SPINCONTROL, "skin", 0, 30, 0,
+        [PC_SKIN as i32, 0, 0, 0], None, None,
+    );
+    menu_add_item_common(&mut ms().s_player_config_menu, skin_item);
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(PC_SKIN) {
+        s.itemnames = strs(&["grunt", "major", "id"]);
+    }
+
+    // 3: Handedness
+    let hand_item = make_menu_common(
+        MTYPE_SPINCONTROL, "handedness", 0, 50, 0,
+        [PC_HANDEDNESS as i32, 0, 0, 0], Some(playerconfig_callback), None,
+    );
+    menu_add_item_common(&mut ms().s_player_config_menu, hand_item);
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(PC_HANDEDNESS) {
+        s.itemnames = strs(&["right", "left", "center"]);
+        s.curvalue = clamp_cvar(0.0, 2.0, cvar_variable_value("hand")) as i32;
+    }
+
+    // 4: Rate
+    let rate_item = make_menu_common(
+        MTYPE_SPINCONTROL, "connect speed", 0, 60, 0,
+        [PC_RATE as i32, 0, 0, 0], Some(playerconfig_callback), None,
+    );
+    menu_add_item_common(&mut ms().s_player_config_menu, rate_item);
+    if let Some(MenuItem::SpinControl(ref mut s)) = ms().menu_items.get_mut(PC_RATE) {
+        s.itemnames = strs(&["28.8 Modem", "33.6 Modem", "Single ISDN", "Dual ISDN/Cable", "T1/LAN", "User defined"]);
+        let rate = cvar_variable_value("rate") as i32;
+        let mut rate_idx = RATE_TBL.len() - 1; // "User defined"
+        for (i, &r) in RATE_TBL.iter().enumerate() {
+            if r > 0 && rate == r {
+                rate_idx = i;
+                break;
+            }
+        }
+        s.curvalue = rate_idx as i32;
+    }
+
+    // 5: Download options
+    let dl_item = make_menu_common(
+        MTYPE_ACTION, "download options", 0, 80, 0,
+        [PC_DOWNLOAD as i32, 0, 0, 0], Some(playerconfig_callback), None,
+    );
+    menu_add_item_common(&mut ms().s_player_config_menu, dl_item);
+
+    menu_center(&mut ms().s_player_config_menu);
     true
 }
 
 fn player_config_menu_draw() {
     m_banner("m_banner_player_setup");
-    // SAFETY: single-threaded engine
-    unsafe { menu_draw(&S_PLAYER_CONFIG_MENU); }
+    menu_draw(&ms().s_player_config_menu);
 }
 
 fn player_config_menu_key(key: i32) -> Option<&'static str> {
@@ -2753,9 +2605,8 @@ fn player_config_menu_key(key: i32) -> Option<&'static str> {
 
 pub fn m_menu_player_config_f() {
     if !player_config_menu_init() {
-        // SAFETY: single-threaded engine — set status on multiplayer menu
-        // (we don't have direct access to the multiplayer menu framework here,
-        // so just return; the C code sets a statusbar on s_multiplayer_menu)
+        // No valid player models found — just return;
+        // the C code sets a statusbar on s_multiplayer_menu
         return;
     }
     m_push_menu(player_config_menu_draw, player_config_menu_key);
@@ -2767,10 +2618,8 @@ pub fn m_menu_player_config_f() {
 
 fn m_quit_draw() {
     let (w, h) = draw_get_pic_size("quit");
-    // SAFETY: single-threaded engine
-    unsafe {
-        draw_pic((VIDDEF.width - w) / 2, (VIDDEF.height - h) / 2, "quit");
-    }
+    let vd = get_viddef();
+    draw_pic((vd.width - w) / 2, (vd.height - h) / 2, "quit");
 }
 
 fn m_quit_key(key: i32) -> Option<&'static str> {
@@ -2780,7 +2629,7 @@ fn m_quit_key(key: i32) -> Option<&'static str> {
             None
         }
         89 /* 'Y' */ | 121 /* 'y' */ => {
-            // SAFETY: single-threaded engine
+            // SAFETY: CLS initialized at startup, accessed from main thread
             unsafe {
                 CLS.key_dest = KeyDest::Console;
             }
@@ -2799,105 +2648,103 @@ pub fn m_menu_quit_f() {
 // Default_MenuKey
 // ============================================================
 
-/// Identify which menu framework is currently active and return a mutable reference to it.
+/// Identify which menu framework is currently active and return a mutable pointer to it.
 /// This is needed because Default_MenuKey in C takes the menu as a parameter.
-/// SAFETY: single-threaded engine, must only be called from menu key handlers.
-unsafe fn get_active_menu() -> Option<*mut MenuFramework> {
-    // Check which draw function is active and return the corresponding menu.
-    if M_DRAWFUNC == Some(game_menu_draw) { return Some(&mut S_GAME_MENU); }
-    if M_DRAWFUNC == Some(multiplayer_menu_draw) { return Some(&mut S_MULTIPLAYER_MENU); }
-    if M_DRAWFUNC == Some(options_menu_draw) { return Some(&mut S_OPTIONS_MENU); }
-    if M_DRAWFUNC == Some(keys_menu_draw) { return Some(&mut S_KEYS_MENU); }
-    if M_DRAWFUNC == Some(loadgame_menu_draw) { return Some(&mut S_LOADGAME_MENU); }
-    if M_DRAWFUNC == Some(savegame_menu_draw) { return Some(&mut S_SAVEGAME_MENU); }
-    if M_DRAWFUNC == Some(joinserver_menu_draw) { return Some(&mut S_JOINSERVER_MENU); }
-    if M_DRAWFUNC == Some(startserver_menu_draw) { return Some(&mut S_STARTSERVER_MENU); }
-    if M_DRAWFUNC == Some(dmoptions_menu_draw) { return Some(&mut S_DMOPTIONS_MENU); }
-    if M_DRAWFUNC == Some(downloadoptions_menu_draw) { return Some(&mut S_DOWNLOADOPTIONS_MENU); }
-    if M_DRAWFUNC == Some(addressbook_menu_draw) { return Some(&mut S_ADDRESSBOOK_MENU); }
-    if M_DRAWFUNC == Some(player_config_menu_draw) { return Some(&mut S_PLAYER_CONFIG_MENU); }
+fn get_active_menu() -> Option<*mut MenuFramework> {
+    let s = ms();
+    if s.m_drawfunc == Some(game_menu_draw) { return Some(&mut s.s_game_menu); }
+    if s.m_drawfunc == Some(multiplayer_menu_draw) { return Some(&mut s.s_multiplayer_menu); }
+    if s.m_drawfunc == Some(options_menu_draw) { return Some(&mut s.s_options_menu); }
+    if s.m_drawfunc == Some(keys_menu_draw) { return Some(&mut s.s_keys_menu); }
+    if s.m_drawfunc == Some(loadgame_menu_draw) { return Some(&mut s.s_loadgame_menu); }
+    if s.m_drawfunc == Some(savegame_menu_draw) { return Some(&mut s.s_savegame_menu); }
+    if s.m_drawfunc == Some(joinserver_menu_draw) { return Some(&mut s.s_joinserver_menu); }
+    if s.m_drawfunc == Some(startserver_menu_draw) { return Some(&mut s.s_startserver_menu); }
+    if s.m_drawfunc == Some(dmoptions_menu_draw) { return Some(&mut s.s_dmoptions_menu); }
+    if s.m_drawfunc == Some(downloadoptions_menu_draw) { return Some(&mut s.s_downloadoptions_menu); }
+    if s.m_drawfunc == Some(addressbook_menu_draw) { return Some(&mut s.s_addressbook_menu); }
+    if s.m_drawfunc == Some(player_config_menu_draw) { return Some(&mut s.s_player_config_menu); }
     None
 }
 
 /// Default_MenuKey with menu framework — handles cursor movement, item selection, and sliding.
 /// `has_menu` indicates whether this menu uses a framework (most do).
 pub fn default_menu_key_with_menu(key: i32, has_menu: bool) -> Option<&'static str> {
-    // SAFETY: single-threaded engine
-    unsafe {
-        let menu_ptr = if has_menu { get_active_menu() } else { None };
+    let menu_ptr = if has_menu { get_active_menu() } else { None };
 
-        // If the current item is a field, let it handle the key first
-        if let Some(mp) = menu_ptr {
-            let menu = &*mp;
-            if let Some(item) = MENU_ITEMS.get(menu.cursor as usize) {
-                if item.generic().item_type == MTYPE_FIELD {
-                    if field_key(menu.cursor as usize, key) {
-                        return None;
-                    }
+    // If the current item is a field, let it handle the key first
+    if let Some(mp) = menu_ptr {
+        // SAFETY: get_active_menu returns a valid pointer into ms() fields
+        let menu = unsafe { &*mp };
+        if let Some(item) = ms().menu_items.get(menu.cursor as usize) {
+            if item.generic().item_type == MTYPE_FIELD {
+                if field_key(menu.cursor as usize, key) {
+                    return None;
                 }
             }
         }
+    }
 
-        match key {
-            K_ESCAPE => {
-                m_pop_menu();
-                return Some(MENU_OUT_SOUND);
-            }
-            K_KP_UPARROW | K_UPARROW => {
-                if let Some(mp) = menu_ptr {
-                    let menu = &mut *mp;
-                    menu.cursor -= 1;
-                    menu_adjust_cursor(menu, -1);
-                    return Some(MENU_MOVE_SOUND);
-                }
-            }
-            K_TAB | K_KP_DOWNARROW | K_DOWNARROW => {
-                if let Some(mp) = menu_ptr {
-                    let menu = &mut *mp;
-                    menu.cursor += 1;
-                    menu_adjust_cursor(menu, 1);
-                    return Some(MENU_MOVE_SOUND);
-                }
-            }
-            K_KP_LEFTARROW | K_LEFTARROW => {
-                if let Some(mp) = menu_ptr {
-                    let menu = &mut *mp;
-                    menu_slide_item(menu, -1);
-                    return Some(MENU_MOVE_SOUND);
-                }
-            }
-            K_KP_RIGHTARROW | K_RIGHTARROW => {
-                if let Some(mp) = menu_ptr {
-                    let menu = &mut *mp;
-                    menu_slide_item(menu, 1);
-                    return Some(MENU_MOVE_SOUND);
-                }
-            }
-            K_MOUSE1 | K_MOUSE2 | K_MOUSE3 | K_MOUSE4 | K_MOUSE5
-            | K_JOY1 | K_JOY2 | K_JOY3 | K_JOY4
-            | K_AUX1 | K_AUX2 | K_AUX3 | K_AUX4 | K_AUX5 | K_AUX6 | K_AUX7 | K_AUX8
-            | K_AUX9 | K_AUX10 | K_AUX11 | K_AUX12 | K_AUX13 | K_AUX14 | K_AUX15 | K_AUX16
-            | K_AUX17 | K_AUX18 | K_AUX19 | K_AUX20 | K_AUX21 | K_AUX22 | K_AUX23 | K_AUX24
-            | K_AUX25 | K_AUX26 | K_AUX27 | K_AUX28 | K_AUX29 | K_AUX30 | K_AUX31 | K_AUX32
-            | K_KP_ENTER | K_ENTER => {
-                if let Some(mp) = menu_ptr {
-                    let menu = &mut *mp;
-                    // Try to fire the callback for the item at cursor
-                    let cursor = menu.cursor as usize;
-                    if let Some(item) = MENU_ITEMS.get(cursor) {
-                        if let Some(ref cb) = item.generic().callback {
-                            cb(cursor);
-                            return Some(MENU_MOVE_SOUND);
-                        }
-                    }
-                    menu_select_item(menu);
-                }
+    match key {
+        K_ESCAPE => {
+            m_pop_menu();
+            return Some(MENU_OUT_SOUND);
+        }
+        K_KP_UPARROW | K_UPARROW => {
+            if let Some(mp) = menu_ptr {
+                // SAFETY: get_active_menu returns a valid pointer into ms() fields
+                let menu = unsafe { &mut *mp };
+                menu.cursor -= 1;
+                menu_adjust_cursor(menu, -1);
                 return Some(MENU_MOVE_SOUND);
             }
-            _ => {}
         }
-        None
+        K_TAB | K_KP_DOWNARROW | K_DOWNARROW => {
+            if let Some(mp) = menu_ptr {
+                let menu = unsafe { &mut *mp };
+                menu.cursor += 1;
+                menu_adjust_cursor(menu, 1);
+                return Some(MENU_MOVE_SOUND);
+            }
+        }
+        K_KP_LEFTARROW | K_LEFTARROW => {
+            if let Some(mp) = menu_ptr {
+                let menu = unsafe { &mut *mp };
+                menu_slide_item(menu, -1);
+                return Some(MENU_MOVE_SOUND);
+            }
+        }
+        K_KP_RIGHTARROW | K_RIGHTARROW => {
+            if let Some(mp) = menu_ptr {
+                let menu = unsafe { &mut *mp };
+                menu_slide_item(menu, 1);
+                return Some(MENU_MOVE_SOUND);
+            }
+        }
+        K_MOUSE1 | K_MOUSE2 | K_MOUSE3 | K_MOUSE4 | K_MOUSE5
+        | K_JOY1 | K_JOY2 | K_JOY3 | K_JOY4
+        | K_AUX1 | K_AUX2 | K_AUX3 | K_AUX4 | K_AUX5 | K_AUX6 | K_AUX7 | K_AUX8
+        | K_AUX9 | K_AUX10 | K_AUX11 | K_AUX12 | K_AUX13 | K_AUX14 | K_AUX15 | K_AUX16
+        | K_AUX17 | K_AUX18 | K_AUX19 | K_AUX20 | K_AUX21 | K_AUX22 | K_AUX23 | K_AUX24
+        | K_AUX25 | K_AUX26 | K_AUX27 | K_AUX28 | K_AUX29 | K_AUX30 | K_AUX31 | K_AUX32
+        | K_KP_ENTER | K_ENTER => {
+            if let Some(mp) = menu_ptr {
+                let menu = unsafe { &mut *mp };
+                // Try to fire the callback for the item at cursor
+                let cursor = menu.cursor as usize;
+                if let Some(item) = ms().menu_items.get(cursor) {
+                    if let Some(ref cb) = item.generic().callback {
+                        cb(cursor);
+                        return Some(MENU_MOVE_SOUND);
+                    }
+                }
+                menu_select_item(menu);
+            }
+            return Some(MENU_MOVE_SOUND);
+        }
+        _ => {}
     }
+    None
 }
 
 /// Default key handler for framework-based menus (legacy wrapper, no menu adjustment).
@@ -2952,7 +2799,7 @@ pub fn m_init() {
 
 /// Draw the current menu.
 pub fn m_draw() {
-    // SAFETY: single-threaded engine
+    // SAFETY: CLS initialized at startup, accessed from main thread
     unsafe {
         if CLS.key_dest != KeyDest::Menu {
             return;
@@ -2963,19 +2810,19 @@ pub fn m_draw() {
 
         // dim everything behind it down
         if crate::console::scr_draw_cinematic() {
-            draw_fill(0, 0, VIDDEF.width, VIDDEF.height, 0, 1.0);
+            draw_fill(0, 0, get_viddef().width, get_viddef().height, 0, 1.0);
         } else {
             draw_fade_screen();
         }
 
-        if let Some(draw_fn) = M_DRAWFUNC {
+        if let Some(draw_fn) = ms().m_drawfunc {
             draw_fn();
         }
 
         // delay playing the enter sound
-        if M_ENTERSOUND {
+        if ms().m_entersound {
             s_start_local_sound(MENU_IN_SOUND);
-            M_ENTERSOUND = false;
+            ms().m_entersound = false;
         }
     }
 }
@@ -2986,12 +2833,9 @@ pub fn m_draw() {
 
 /// Handle a key press in the menu.
 pub fn m_keydown(key: i32) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if let Some(key_fn) = M_KEYFUNC {
-            if let Some(sound) = key_fn(key) {
-                s_start_local_sound(sound);
-            }
+    if let Some(key_fn) = ms().m_keyfunc {
+        if let Some(sound) = key_fn(key) {
+            s_start_local_sound(sound);
         }
     }
 }

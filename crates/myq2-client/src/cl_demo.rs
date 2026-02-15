@@ -32,6 +32,7 @@ pub const KEYFRAME_INTERVAL: u32 = 50;
 /// A keyframe snapshot for seeking within demos.
 /// Stores enough state to resume playback from this point.
 #[derive(Clone)]
+#[derive(Default)]
 pub struct DemoKeyframe {
     /// Server time at this keyframe
     pub servertime: i32,
@@ -45,17 +46,6 @@ pub struct DemoKeyframe {
     pub baselines: Vec<EntityState>,
 }
 
-impl Default for DemoKeyframe {
-    fn default() -> Self {
-        Self {
-            servertime: 0,
-            file_offset: 0,
-            frame_number: 0,
-            configstrings: HashMap::new(),
-            baselines: Vec::new(),
-        }
-    }
-}
 
 /// Index of keyframes for a demo file, enabling fast seeking.
 pub struct DemoIndex {

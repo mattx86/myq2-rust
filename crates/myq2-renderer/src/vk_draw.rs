@@ -6,7 +6,7 @@
 
 use crate::vk_local::*;
 use crate::vk_image;
-use crate::vk_rmain::{vid_printf, MODERN};
+use crate::vk_rmain::vid_printf;
 use crate::modern::RenderPath;
 use myq2_common::q_shared::{MAX_QPATH, PRINT_ALL};
 
@@ -14,21 +14,15 @@ use myq2_common::q_shared::{MAX_QPATH, PRINT_ALL};
 // Module state
 // ============================================================
 
-static mut draw_chars: *mut Image = std::ptr::null_mut();
-
-extern "C" {
-    // These are defined in vk_image
-}
-
 // ============================================================
 // Draw_InitLocal
 // ============================================================
 
 /// Load console characters (don't bilerp characters).
 pub unsafe fn draw_init_local() {
-    draw_chars = vk_find_image("pics/conchars.pcx", ImageType::Pic);
-    if !draw_chars.is_null() {
-        vk_bind((*draw_chars).texnum);
+    let chars = vk_find_image("pics/conchars.pcx", ImageType::Pic);
+    if !chars.is_null() {
+        vk_bind((*chars).texnum);
         qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MIN_FILTER, VK_NEAREST as f32);
         qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MAG_FILTER, VK_NEAREST as f32);
     }
@@ -40,7 +34,7 @@ pub unsafe fn draw_init_local() {
 
 pub unsafe fn draw_char(x: i32, y: i32, num: i32) {
     // SAFETY: MODERN is always initialized before drawing begins
-    MODERN.as_mut().unwrap().draw_char(x, y, num);
+    crate::vk_rmain::rg().modern.as_mut().unwrap().draw_char(x, y, num);
 }
 
 // ============================================================
@@ -64,7 +58,7 @@ pub unsafe fn draw_get_pic_size(w: &mut i32, h: &mut i32, pic: &str) {
 
 pub unsafe fn draw_stretch_pic(x: i32, y: i32, w: i32, h: i32, pic: &str) {
     // SAFETY: MODERN is always initialized before drawing begins
-    MODERN.as_mut().unwrap().draw_stretch_pic(x, y, w, h, pic);
+    crate::vk_rmain::rg().modern.as_mut().unwrap().draw_stretch_pic(x, y, w, h, pic);
 }
 
 // ============================================================
@@ -73,7 +67,7 @@ pub unsafe fn draw_stretch_pic(x: i32, y: i32, w: i32, h: i32, pic: &str) {
 
 pub unsafe fn draw_pic(x: i32, y: i32, pic: &str) {
     // SAFETY: MODERN is always initialized before drawing begins
-    MODERN.as_mut().unwrap().draw_pic(x, y, pic);
+    crate::vk_rmain::rg().modern.as_mut().unwrap().draw_pic(x, y, pic);
 }
 
 // ============================================================
@@ -82,7 +76,7 @@ pub unsafe fn draw_pic(x: i32, y: i32, pic: &str) {
 
 pub unsafe fn draw_tile_clear(x: i32, y: i32, w: i32, h: i32, pic: &str) {
     // SAFETY: MODERN is always initialized before drawing begins
-    MODERN.as_mut().unwrap().draw_tile_clear(x, y, w, h, pic);
+    crate::vk_rmain::rg().modern.as_mut().unwrap().draw_tile_clear(x, y, w, h, pic);
 }
 
 // ============================================================
@@ -91,7 +85,7 @@ pub unsafe fn draw_tile_clear(x: i32, y: i32, w: i32, h: i32, pic: &str) {
 
 pub unsafe fn draw_fill(x: i32, y: i32, w: i32, h: i32, c: i32, alpha: f32) {
     // SAFETY: MODERN is always initialized before drawing begins
-    MODERN.as_mut().unwrap().draw_fill(x, y, w, h, c, alpha);
+    crate::vk_rmain::rg().modern.as_mut().unwrap().draw_fill(x, y, w, h, c, alpha);
 }
 
 // ============================================================
@@ -100,7 +94,7 @@ pub unsafe fn draw_fill(x: i32, y: i32, w: i32, h: i32, c: i32, alpha: f32) {
 
 pub unsafe fn draw_fade_screen() {
     // SAFETY: MODERN is always initialized before drawing begins
-    MODERN.as_mut().unwrap().draw_fade_screen();
+    crate::vk_rmain::rg().modern.as_mut().unwrap().draw_fade_screen();
 }
 
 // ============================================================
@@ -116,5 +110,5 @@ pub unsafe fn draw_stretch_raw(
     // SAFETY: data points to valid pixel data of size cols*rows from cinematic decoder
     let data_slice = std::slice::from_raw_parts(data, data_len);
     // SAFETY: MODERN is always initialized before drawing begins
-    MODERN.as_mut().unwrap().draw_stretch_raw(x, y, w, h, cols, rows, data_slice);
+    crate::vk_rmain::rg().modern.as_mut().unwrap().draw_stretch_raw(x, y, w, h, cols, rows, data_slice);
 }

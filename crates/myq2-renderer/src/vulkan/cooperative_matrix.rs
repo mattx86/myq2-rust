@@ -341,8 +341,8 @@ impl MatrixMultiplyConfig {
     /// Calculate workgroup count for dispatch.
     pub fn workgroup_count(&self, tile_m: u32, tile_n: u32) -> [u32; 3] {
         [
-            (self.m + tile_m - 1) / tile_m,
-            (self.n + tile_n - 1) / tile_n,
+            self.m.div_ceil(tile_m),
+            self.n.div_ceil(tile_n),
             1,
         ]
     }

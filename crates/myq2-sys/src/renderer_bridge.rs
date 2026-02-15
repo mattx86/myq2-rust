@@ -10,22 +10,22 @@ use myq2_renderer::vk_rmain;
 use myq2_renderer::vk_warp;
 
 fn bridge_draw_char(x: i32, y: i32, num: i32) {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     unsafe { vk_draw::draw_char(x, y, num); }
 }
 
 fn bridge_draw_stretch_pic(x: i32, y: i32, w: i32, h: i32, name: &str) {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     unsafe { vk_draw::draw_stretch_pic(x, y, w, h, name); }
 }
 
 fn bridge_draw_pic(x: i32, y: i32, name: &str) {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     unsafe { vk_draw::draw_pic(x, y, name); }
 }
 
 fn bridge_draw_find_pic(name: &str) -> i32 {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     // Returns non-null pointer as 1 (found), null as 0 (not found).
     unsafe {
         let ptr = vk_image::draw_find_pic(name);
@@ -34,7 +34,7 @@ fn bridge_draw_find_pic(name: &str) -> i32 {
 }
 
 fn bridge_draw_get_pic_size(name: &str) -> (i32, i32) {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     unsafe {
         let mut w: i32 = 0;
         let mut h: i32 = 0;
@@ -44,17 +44,17 @@ fn bridge_draw_get_pic_size(name: &str) -> (i32, i32) {
 }
 
 fn bridge_draw_fill(x: i32, y: i32, w: i32, h: i32, c: i32, alpha: f32) {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     unsafe { vk_draw::draw_fill(x, y, w, h, c, alpha); }
 }
 
 fn bridge_draw_tile_clear(x: i32, y: i32, w: i32, h: i32, name: &str) {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     unsafe { vk_draw::draw_tile_clear(x, y, w, h, name); }
 }
 
 fn bridge_draw_fade_screen() {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     unsafe { vk_draw::draw_fade_screen(); }
 }
 
@@ -85,9 +85,13 @@ fn bridge_r_render_frame(refdef: &RefDef) {
                 // Cast it back; null (0) becomes a null pointer.
                 model: if e.model == 0 { std::ptr::null() } else { e.model as *const myq2_renderer::vk_model_types::Model },
                 frame: e.frame,
+                oldframe: e.oldframe,
+                backlerp: e.backlerp,
                 flags: e.flags,
                 alpha: e.alpha,
                 skinnum: e.skinnum,
+                lightstyle: e.lightstyle,
+                skin: e.skin,
             }
         }).collect(),
         num_particles: refdef.num_particles as usize,
@@ -104,17 +108,17 @@ fn bridge_r_render_frame(refdef: &RefDef) {
 }
 
 fn bridge_r_begin_registration(map: &str) {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     unsafe { vk_model::r_begin_registration(map); }
 }
 
 fn bridge_r_end_registration() {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     unsafe { vk_model::r_end_registration(); }
 }
 
 fn bridge_r_register_model(name: &str) -> i32 {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     // Returns non-null pointer as 1, null as 0. The client uses non-zero to
     // mean "valid handle".
     unsafe {
@@ -124,7 +128,7 @@ fn bridge_r_register_model(name: &str) -> i32 {
 }
 
 fn bridge_r_register_skin(name: &str) -> i32 {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     // Returns non-null pointer as 1, null as 0.
     unsafe {
         let ptr = vk_image::r_register_skin(name);
@@ -133,7 +137,7 @@ fn bridge_r_register_skin(name: &str) -> i32 {
 }
 
 fn bridge_r_set_sky(name: &str, rotate: f32, axis: &[f32; 3]) {
-    // SAFETY: single-threaded engine
+    // SAFETY: renderer dispatch called from main thread only
     unsafe { vk_warp::r_set_sky(name, rotate, axis); }
 }
 
@@ -142,20 +146,18 @@ fn bridge_r_set_palette_null() {
 }
 
 fn bridge_draw_stretch_raw(x: i32, y: i32, w: i32, h: i32, cols: i32, rows: i32, data: &[u8]) {
-    // SAFETY: single-threaded engine, renderer global state
+    // SAFETY: renderer dispatch called from main thread only
     unsafe {
         myq2_renderer::vk_draw::draw_stretch_raw(x, y, w, h, cols, rows, data.as_ptr());
     }
 }
 
 fn bridge_viddef_width() -> i32 {
-    // SAFETY: single-threaded engine
-    unsafe { myq2_renderer::vk_rmain::VID.width }
+    myq2_renderer::vk_rmain::rg().vid.width
 }
 
 fn bridge_viddef_height() -> i32 {
-    // SAFETY: single-threaded engine
-    unsafe { myq2_renderer::vk_rmain::VID.height }
+    myq2_renderer::vk_rmain::rg().vid.height
 }
 
 fn bridge_r_set_palette(palette: Option<&[u8]>) {
@@ -169,7 +171,7 @@ fn bridge_r_add_stain(org: &[f32; 3], intensity: f32, r: f32, g: f32, b: f32, a:
         2 => StainType::Add,
         _ => StainType::Modulate,
     };
-    // SAFETY: single-threaded engine, renderer global state
+    // SAFETY: renderer dispatch called from main thread only
     unsafe {
         myq2_renderer::vk_light::add_stain(org, intensity, r, g, b, a, stain_type);
     }

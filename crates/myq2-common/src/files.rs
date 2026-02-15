@@ -637,6 +637,22 @@ impl FsContext {
         }
     }
 
+    /// Checks if autoexec.cfg exists and returns the path, WITHOUT calling any callbacks.
+    /// Used by the module-level fs_exec_autoexec() to avoid FS_CTX → CMD_CTX deadlock.
+    pub fn exec_autoexec_path(&self) -> Option<String> {
+        let name = if !self.gamedirvar.is_empty() {
+            format!("{}/{}/autoexec.cfg", self.basedir, self.gamedirvar)
+        } else {
+            format!("{}/{}/autoexec.cfg", self.basedir, BASEDIRNAME)
+        };
+
+        if Path::new(&name).exists() {
+            Some(name)
+        } else {
+            None
+        }
+    }
+
     // ============================================================
     // FS_SetGamedir
     // ============================================================
@@ -835,6 +851,11 @@ pub fn fs_init() {
     let mut g = FS_CTX.lock().unwrap();
     let mut ctx = FsContext::new();
     ctx.init_filesystem();
+    // Wire up the cbuf_add_text callback so exec_autoexec() and set_gamedir() can
+    // add commands to the command buffer.
+    ctx.cbuf_add_text = Some(Box::new(|text| {
+        crate::cmd::cbuf_add_text(text);
+    }));
     *g = Some(ctx);
 }
 
@@ -852,7 +873,17 @@ pub fn fs_create_path(path: &str) {
 }
 
 pub fn fs_exec_autoexec() -> Option<String> {
-    FS_CTX.lock().unwrap().as_ref().and_then(|c| c.exec_autoexec())
+    // Check if autoexec.cfg exists while holding FS_CTX, but do NOT call
+    // cbuf_add_text inside the lock — that would create FS_CTX → CMD_CTX
+    // lock ordering, which reverses CMD_CTX → FS_CTX used by cmd_exec_f.
+    let result = FS_CTX.lock().unwrap().as_ref().and_then(|c| {
+        c.exec_autoexec_path()
+    });
+    // Call cbuf_add_text AFTER releasing FS_CTX to avoid deadlock
+    if result.is_some() {
+        crate::cmd::cbuf_add_text("exec autoexec.cfg\n");
+    }
+    result
 }
 
 pub fn fs_load_file(name: &str) -> Option<Vec<u8>> {

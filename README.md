@@ -36,19 +36,46 @@ Based on id Software's Quake II engine (v3.21), licensed under the GPL.
 - **Auto-reconnect** — automatic reconnection on timeout with exponential backoff
 - **Packet duplication** — send duplicate packets for lossy connections (WiFi, satellite)
 - **FPS-independent strafe jumping** — consistent strafe jump gains at any FPS
-- **Async client** — decouple render FPS from network packet rate via `cl_async`
+- **Async client** — decouple render FPS from network packet rate
+  - `cl_async` enables independent timing (1=decoupled, 0=legacy)
+  - `r_maxfps` controls render FPS (0=unlimited/vsync)
+  - `cl_maxpackets` controls network packet rate (default: 30/sec)
+  - Allows high FPS rendering while maintaining optimal network timing
 - **Chat enhancements** — word filter, ignore list, chat logging
-- **Health-based crosshair** — crosshair color changes based on health via `ch_health`
+- **Health-based crosshair** — crosshair color changes based on player health
+  - Enabled via `ch_health` cvar (0=off, 1=on)
+  - Color smoothly transitions from green (full health) to red (low health)
+  - Works with all crosshair styles (1-5)
+- **Weapon fire prediction** — immediate visual feedback before server confirmation
+  - Instant muzzle flash on attack button press
+  - Supports: MuzzleFlash, Tracer, BulletImpact, RocketTrail, RailTrail effects
+  - Confirmed when server sends SVC_MuzzleFlash
+  - Eliminates perceived input lag on weapon firing
 
 ### Network Smoothing System
 - **Adaptive interpolation** — adjusts buffer size based on network jitter
+  - Records packet arrivals, calculates jitter statistics
+  - Target buffer auto-adjusts between 50-200ms
 - **Dead reckoning** — predicts player positions between server updates
-- **Weapon fire prediction** — immediate muzzle flash before server confirmation
+  - Uses velocity + acceleration for prediction
+  - Confidence decays over time (2x per second)
+  - High confidence (>0.5): pure prediction; Medium: blended with last known position
+- **Snapshot-based interpolation** — uses buffered snapshots for smoother lerpfrac
+  - Records server snapshots with arrival times
+  - Blends 70% snapshot-based + 30% standard timing for stability
 - **Input buffering** — smooths local movement prediction
+  - Buffers 2 frames of input commands
+  - Weighted average blending (newer commands = higher weight)
 - **Spline interpolation** — Catmull-Rom curves for smooth entity movement
+  - Requires 4+ position samples
+  - Falls back to linear when insufficient data
 - **Prediction error smoothing** — smooth server corrections over 100ms
+  - Prevents jarring position snaps on misprediction
 - **Frame time smoothing** — reduces jitter from variable frame rates
+  - Weighted average of 8 recent frame times
 - **Effect continuation** — continues rendering effects during packet loss
+  - Registers significant effects (explosions, blood, debris)
+  - Auto-cleanup after timeout
 
 ### HUD Customization
 - Configurable HUD elements: health, armor, ammo, timer, FPS counter, speed meter, network stats
@@ -56,9 +83,16 @@ Based on id Software's Quake II engine (v3.21), licensed under the GPL.
 - Minimal HUD mode via `hud_minimal`
 
 ### Crosshair Customization
-- 5 procedural styles: Cross, Dot, Circle, CrossDot, XShape
+- **5 procedural styles:**
+  1. **Cross** — Traditional + crosshair
+  2. **Dot** — Center dot only
+  3. **Circle** — Circular crosshair
+  4. **CrossDot** — Cross + center dot
+  5. **XShape** — Diagonal X crosshair
+  - Styles 6+ use image files
 - Configurable size, color, alpha, gap, thickness
-- Dynamic expansion on movement/firing
+- Dynamic expansion on movement/firing via `crosshair_dynamic`
+- Health-based color via `ch_health`
 
 ### Server Browser
 - Master server queries and LAN broadcast discovery
@@ -70,11 +104,77 @@ Based on id Software's Quake II engine (v3.21), licensed under the GPL.
 - Async HTTP downloads via `tokio` — game continues while downloading
 - Progress polling, non-blocking I/O
 
+### File Formats & Configuration
+
+#### Location Files (.loc)
+- Store map location names for chat macros (`$loc_here`)
+- Format: `locs/<mapname>.loc`
+- Commands: `locadd`, `locdel`, `locsave`, `loclist`
+- Auto-loaded on map change
+
+#### Chat Filter
+- Word filter: `filter.txt` in base directory
+- Format: One word per line (case-insensitive)
+- Filtered words replaced with asterisks
+- Reload: `filter_reload` command
+
+#### Chat Logging
+- Enabled via `cl_chat_log` cvar
+- Format: `logs/chat-YYYY-MM-DD.log`
+- Logs all chat messages with timestamps
+
+#### Favorites List
+- Server browser favorites saved to `favorites.txt`
+- One server address per line
+- Commands: `addfavorite`, `browser_clear`
+
 ### Performance Optimizations
-- **Parallelization** via `rayon` across 15+ subsystems (PVS merging, entity saves, particle physics, BSP parsing, etc.)
-- **O(1) lookups** via HashMap for commands, cvars, pack files, items, entities, fields, spawns
-- **Batched GPU uploads** and **parallel command buffer recording** in the Vulkan renderer
-- **Deferred pipeline creation** and **parallel shader loading**
+
+#### CPU Parallelization (via rayon)
+Multi-threaded parallelization across 15 subsystems with tuned thresholds:
+- **PVS/PHS merging** (threshold: 64 longs) — parallel bitwise OR for visibility data
+- **Entity save serialization** (threshold: 32 entities) — parallel entity→buffer, sequential write
+- **Entity visibility extraction** — data extraction pattern with EntityVisData struct
+- **Radius damage** (threshold: 8 entities) — parallel damage calculations
+- **Client ping calculation** (threshold: 8 clients) — parallel ping statistics
+- **Client timeout checking** (threshold: 8 clients) — parallel connection monitoring
+- **Sound channel updates** (threshold: 16 channels) — parallel audio processing
+- **Particle physics** (threshold: 256 particles) — parallel particle simulation
+- **WAV loading** — parallel audio file loading during registration
+- **Client message sending** (threshold: 8 clients) — parallel message preparation
+- **Edict initialization** — parallel initialization of 1024 edicts during level load
+- **Client entity state init** — parallel init of MAX_EDICTS + MAX_PARSE_ENTITIES
+- **BSP lump parsing** (threshold: 64 elements) — parallel parsing of surfaces, nodes, leafs, planes, brushes
+- **Pack file entry parsing** (threshold: 64 files) — parallel .pak/.zip file reading
+- **Directory wildcard matching** (threshold: 64 entries) — parallel file pattern matching
+
+#### Async I/O
+Non-blocking I/O for background operations:
+- **HTTP downloads** via AsyncHttpDownloadManager with tokio
+  - Non-blocking downloads via `cl_http_async_download()`
+  - Progress polling via `cl_http_async_poll()`
+  - Game continues running during downloads
+
+#### GPU Parallelization (Vulkan)
+Batching and parallel execution on the GPU:
+- **Batched GPU uploads** via `flush_uploads()` (threshold: 4 uploads) — single staging buffer
+- **Parallel command buffer recording** via `record_secondary_parallel()` (threshold: 4 buffers)
+- **Lightmap batch upload** — parallel CPU prep, sequential GPU upload
+- **Batch descriptor updates** — single `update_descriptor_sets()` call for multiple descriptors
+- **Parallel shader loading** via `load_shaders_parallel()` (threshold: 4 shaders)
+- **Deferred pipeline creation** — queue via `queue_pipeline()`, flush via `flush_pending_pipelines()`
+- **VBO/IBO staging uploads** — staging buffer pattern for vertex/index buffers
+- **Render command batching** — RenderCommandQueue with SurfaceBatch for texture sorting
+
+#### O(1) Lookup Optimizations
+HashMap-based lookups instead of linear scans:
+- **Command lookup** ([cmd.rs](crates/myq2-common/src/cmd.rs)) — HashMap instead of Vec
+- **Cvar lookup** ([cvar.rs](crates/myq2-common/src/cvar.rs)) — HashMap instead of Vec
+- **Pack file lookup** ([files.rs](crates/myq2-common/src/files.rs)) — HashMap for instant pak/zip search
+- **Item lookup** ([g_items.rs](crates/myq2-game/src/g_items.rs)) — HashMaps for classname and pickup name
+- **FIELDS/SPAWNS lookup** ([g_spawn.rs](crates/myq2-game/src/g_spawn.rs)) — OnceLock HashMaps
+- **Entity lookup** ([g_utils.rs](crates/myq2-game/src/g_utils.rs)) — HashMaps for targetname and classname
+- **Team linking** ([g_spawn.rs](crates/myq2-game/src/g_spawn.rs)) — HashMap grouping for O(n) instead of O(n²)
 
 ## Building
 
@@ -87,6 +187,22 @@ cargo run             # run the engine
 cargo test            # run all tests
 cargo clippy          # lint
 ```
+
+## Runtime Dependencies
+
+### Required
+- **Vulkan SDK** — Required for renderer
+- **OpenAL** — Required for audio (OpenAL Soft recommended)
+
+### Performance Libraries
+- **rayon** — Multi-threaded parallelization for CPU-bound tasks
+- **tokio** — Async I/O for HTTP downloads and background tasks
+- **parking_lot** — High-performance mutexes
+- **crossbeam** — Lock-free data structures for concurrent operations
+
+### Rendering
+- **ash** — Vulkan bindings for Rust
+- **gpu-allocator** — Vulkan memory management
 
 ## Project Structure
 

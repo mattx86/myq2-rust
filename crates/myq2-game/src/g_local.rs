@@ -722,7 +722,7 @@ pub struct GClient {
 }
 
 /// Full edict structure.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Edict {
     // Server-visible fields (DO NOT reorder)
     pub s: EntityState,
@@ -851,6 +851,118 @@ pub struct Edict {
 
     pub moveinfo: MoveInfo,
     pub monsterinfo: MonsterInfo,
+}
+
+impl Default for Edict {
+    fn default() -> Self {
+        Self {
+            s: EntityState::default(),
+            client: None,
+            inuse: false,
+            linkcount: 0,
+            area: AreaLink::default(),
+            num_clusters: 0,
+            clusternums: [0; MAX_ENT_CLUSTERS],
+            headnode: 0,
+            areanum: 0,
+            areanum2: 0,
+            svflags: 0,
+            mins: [0.0; 3],
+            maxs: [0.0; 3],
+            absmin: [0.0; 3],
+            absmax: [0.0; 3],
+            size: [0.0; 3],
+            solid: Solid::default(),
+            clipmask: 0,
+            owner: -1,
+            movetype: MoveType::default(),
+            flags: EntityFlags::default(),
+            model: String::new(),
+            freetime: 0.0,
+            message: String::new(),
+            classname: String::new(),
+            spawnflags: 0,
+            timestamp: 0.0,
+            angle: 0.0,
+            target: String::new(),
+            targetname: String::new(),
+            killtarget: String::new(),
+            team: String::new(),
+            pathtarget: String::new(),
+            deathtarget: String::new(),
+            combattarget: String::new(),
+            target_ent: -1,
+            speed: 0.0,
+            accel: 0.0,
+            decel: 0.0,
+            movedir: [0.0; 3],
+            pos1: [0.0; 3],
+            pos2: [0.0; 3],
+            velocity: [0.0; 3],
+            avelocity: [0.0; 3],
+            mass: 0,
+            air_finished: 0.0,
+            gravity: 0.0,
+            goalentity: -1,
+            movetarget: -1,
+            yaw_speed: 0.0,
+            ideal_yaw: 0.0,
+            nextthink: 0.0,
+            prethink_fn: None,
+            think_fn: None,
+            blocked_fn: None,
+            touch_fn: None,
+            use_fn: None,
+            pain_fn: None,
+            die_fn: None,
+            touch_debounce_time: 0.0,
+            pain_debounce_time: 0.0,
+            damage_debounce_time: 0.0,
+            fly_sound_debounce_time: 0.0,
+            last_move_time: 0.0,
+            health: 0,
+            max_health: 0,
+            gib_health: 0,
+            deadflag: 0,
+            show_hostile: 0.0,
+            powerarmor_time: 0.0,
+            map: String::new(),
+            viewheight: 0,
+            takedamage: 0,
+            dmg: 0,
+            radius_dmg: 0,
+            dmg_radius: 0.0,
+            sounds: 0,
+            count: 0,
+            chain: -1,
+            enemy: -1,
+            oldenemy: -1,
+            activator: -1,
+            groundentity: -1,
+            groundentity_linkcount: 0,
+            teamchain: -1,
+            teammaster: -1,
+            mynoise: -1,
+            mynoise2: -1,
+            noise_index: 0,
+            noise_index2: 0,
+            volume: 0.0,
+            attenuation: 0.0,
+            wait: 0.0,
+            delay: 0.0,
+            random: 0.0,
+            teleport_time: 0.0,
+            watertype: 0,
+            waterlevel: 0,
+            move_origin: [0.0; 3],
+            move_angles: [0.0; 3],
+            light_level: 0,
+            style: 0,
+            item: None,
+            moveinfo: MoveInfo::default(),
+            monsterinfo: MonsterInfo::default(),
+        }
+    }
 }
 
 // ============================================================
@@ -1211,7 +1323,7 @@ mod tests {
         assert_eq!(e.size, [0.0; 3]);
         assert_eq!(e.solid, Solid::Not);
         assert_eq!(e.clipmask, 0);
-        assert_eq!(e.owner, 0);
+        assert_eq!(e.owner, -1);
         assert_eq!(e.num_clusters, 0);
         assert_eq!(e.headnode, 0);
         assert_eq!(e.areanum, 0);
@@ -1247,9 +1359,9 @@ mod tests {
         assert!(e.blocked_fn.is_none());
         assert!(e.prethink_fn.is_none());
         assert!(e.item.is_none());
-        assert_eq!(e.enemy, 0);
-        assert_eq!(e.groundentity, 0);
-        assert_eq!(e.chain, 0);
+        assert_eq!(e.enemy, -1);
+        assert_eq!(e.groundentity, -1);
+        assert_eq!(e.chain, -1);
         assert_eq!(e.watertype, 0);
         assert_eq!(e.waterlevel, 0);
     }

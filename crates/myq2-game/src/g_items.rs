@@ -138,7 +138,7 @@ pub const AMMO_SLUGS: i32 = 5;
 // Module-level state (replaces C statics)
 // ============================================================
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ItemsState {
     pub jacket_armor_index: usize,
     pub combat_armor_index: usize,
@@ -1097,10 +1097,11 @@ pub fn drop_item(ctx: &mut GameContext, ent_idx: usize, item_idx: usize) -> usiz
     ctx.edicts[dropped_idx].touch_fn = Some(TOUCH_DROP_TEMP);
     ctx.edicts[dropped_idx].owner = ent_idx as i32;
 
+    let mut forward = [0.0f32; 3];
+
     if ctx.edicts[ent_idx].client.is_some() {
         let client_idx = ctx.edicts[ent_idx].client.unwrap();
         let v_angle = ctx.clients[client_idx].v_angle;
-        let mut forward = [0.0f32; 3];
         let mut right = [0.0f32; 3];
         myq2_common::q_shared::angle_vectors(&v_angle, Some(&mut forward), Some(&mut right), None);
         // Project source from view offset
@@ -1111,7 +1112,6 @@ pub fn drop_item(ctx: &mut GameContext, ent_idx: usize, item_idx: usize) -> usiz
             origin[2] + forward[2] * 24.0,
         ];
     } else {
-        let mut forward = [0.0f32; 3];
         myq2_common::q_shared::angle_vectors(&ctx.edicts[ent_idx].s.angles, Some(&mut forward), None, None);
         let origin = ctx.edicts[ent_idx].s.origin;
         ctx.edicts[dropped_idx].s.origin = [
@@ -1121,9 +1121,8 @@ pub fn drop_item(ctx: &mut GameContext, ent_idx: usize, item_idx: usize) -> usiz
         ];
     }
 
-    // VectorScale(forward, 100, dropped->velocity)
-    // dropped->velocity[2] = 300
-    ctx.edicts[dropped_idx].velocity = [0.0, 0.0, 300.0]; // forward*100 + up placeholder
+    // VectorScale(forward, 100, dropped->velocity); dropped->velocity[2] = 300
+    ctx.edicts[dropped_idx].velocity = [forward[0] * 100.0, forward[1] * 100.0, 300.0];
 
     ctx.edicts[dropped_idx].think_fn = Some(THINK_DROP_MAKE_TOUCHABLE);
     ctx.edicts[dropped_idx].nextthink = ctx.level.time + 1.0;
@@ -1175,19 +1174,17 @@ pub fn droptofloor(ctx: &mut GameContext, ent_idx: usize) {
 
     // Trace down 128 units
     let origin = ctx.edicts[ent_idx].s.origin;
-    let _dest = [origin[0], origin[1], origin[2] - 128.0];
-    let _tr = gi_trace(&origin, &ctx.edicts[ent_idx].mins, &ctx.edicts[ent_idx].maxs, &_dest, ent_idx as i32, MASK_SOLID);
+    let dest = [origin[0], origin[1], origin[2] - 128.0];
+    let tr = gi_trace(&origin, &ctx.edicts[ent_idx].mins, &ctx.edicts[ent_idx].maxs, &dest, ent_idx as i32, MASK_SOLID);
 
-    // Placeholder: check if startsolid
-    let startsolid = false; // Would come from trace result
-    if startsolid {
+    if tr.startsolid {
         let classname = ctx.edicts[ent_idx].classname.clone();
         gi_dprintf(&format!("droptofloor: {} startsolid at {:?}\n", classname, origin));
         crate::g_utils::g_free_edict(ctx, ent_idx);
         return;
     }
 
-    // VectorCopy(tr.endpos, ent->s.origin) — placeholder, trace result would set this
+    ctx.edicts[ent_idx].s.origin = tr.endpos;
 
     let team = ctx.edicts[ent_idx].team.clone();
     if !team.is_empty() {

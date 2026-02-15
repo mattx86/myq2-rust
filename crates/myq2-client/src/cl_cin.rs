@@ -3,6 +3,7 @@
 
 use std::fs::File;
 use std::io::Read;
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use myq2_common::common::{com_printf, com_dprintf, msg_write_byte};
 
 use crate::client::{ClientState, ClientStatic, KeyDest, ConnState};
@@ -63,17 +64,11 @@ impl Default for Cinematics {
 }
 
 /// Global cinematic state
-static mut CIN: Option<Cinematics> = None;
+static CIN: LazyLock<Mutex<Cinematics>> = LazyLock::new(|| Mutex::new(Cinematics::new()));
 
-/// Get a mutable reference to the global cinematics state.
-///
-/// # Safety
-/// Must only be called from the main thread (single-threaded engine).
-pub unsafe fn cin() -> &'static mut Cinematics {
-    if CIN.is_none() {
-        CIN = Some(Cinematics::new());
-    }
-    CIN.as_mut().unwrap()
+/// Get a mutable lock guard to the global cinematics state.
+pub fn cin() -> MutexGuard<'static, Cinematics> {
+    CIN.lock().unwrap()
 }
 
 // ============================================================
@@ -115,8 +110,7 @@ pub fn scr_load_pcx(filename: &str) -> (Option<Vec<u8>>, Option<Vec<u8>>, i32, i
 pub fn scr_stop_cinematic(cl: &mut ClientState, _cls: &mut ClientStatic) {
     cl.cinematictime = 0;
 
-    // SAFETY: single-threaded engine
-    let cin = unsafe { cin() };
+    let mut cin = cin();
 
     cin.pic = None;
     cin.pic_pending = None;
@@ -133,8 +127,12 @@ pub fn scr_stop_cinematic(cl: &mut ClientState, _cls: &mut ClientStatic) {
     cin.hnodes1 = None;
 
     // switch back down to 11 khz sound if necessary
-    if cin.restart_sound {
+    let needs_restart = cin.restart_sound;
+    if needs_restart {
         cin.restart_sound = false;
+    }
+    drop(cin);
+    if needs_restart {
         crate::cl_main::cl_snd_restart_f();
     }
 }
@@ -179,9 +177,7 @@ fn smallest_node1(cin: &mut Cinematics, numhnodes: i32) -> i32 {
 }
 
 /// Huff1TableInit — Reads the 64k counts table and initializes the node trees
-pub fn huff1_table_init(cl: &mut ClientState) {
-    // SAFETY: single-threaded engine
-    let cin = unsafe { cin() };
+pub fn huff1_table_init(cin: &mut Cinematics, cl: &mut ClientState) {
 
     cin.hnodes1 = Some(vec![0i32; 256 * 256 * 2]);
 
@@ -229,7 +225,7 @@ pub fn huff1_table_init(cl: &mut ClientState) {
 }
 
 /// Huff1Decompress
-pub fn huff1_decompress(in_block: &CBlock) -> CBlock {
+pub fn huff1_decompress(cin: &Cinematics, in_block: &CBlock) -> CBlock {
     if in_block.data.len() < 4 {
         return CBlock {
             data: Vec::new(),
@@ -245,9 +241,6 @@ pub fn huff1_decompress(in_block: &CBlock) -> CBlock {
 
     let mut input_pos: usize = 4;
     let mut out_data: Vec<u8> = Vec::with_capacity(count_total as usize);
-
-    // SAFETY: single-threaded engine
-    let cin = unsafe { cin() };
 
     let hnodes = match cin.hnodes1 {
         Some(ref h) => h,
@@ -324,9 +317,7 @@ pub fn huff1_decompress(in_block: &CBlock) -> CBlock {
 }
 
 /// SCR_ReadNextFrame
-pub fn scr_read_next_frame(cl: &mut ClientState) -> Option<Vec<u8>> {
-    // SAFETY: single-threaded engine
-    let cin = unsafe { cin() };
+pub fn scr_read_next_frame(cin: &mut Cinematics, cl: &mut ClientState) -> Option<Vec<u8>> {
 
     let file = match cl.cinematic_file {
         Some(ref mut f) => f,
@@ -383,7 +374,7 @@ pub fn scr_read_next_frame(cl: &mut ClientState) -> Option<Vec<u8>> {
         count: size as usize,
     };
 
-    let huf1 = huff1_decompress(&in_block);
+    let huf1 = huff1_decompress(cin, &in_block);
 
     cl.cinematicframe += 1;
 
@@ -420,13 +411,15 @@ pub fn scr_run_cinematic(cl: &mut ClientState, cls: &mut ClientStatic) {
         cl.cinematictime = cls.realtime - cl.cinematicframe * 1000 / 14;
     }
 
-    // SAFETY: single-threaded engine
-    let cin = unsafe { cin() };
+    let mut cin = cin();
 
     cin.pic = cin.pic_pending.take();
-    cin.pic_pending = scr_read_next_frame(cl);
+    cin.pic_pending = scr_read_next_frame(&mut cin, cl);
 
-    if cin.pic_pending.is_none() {
+    let pending_none = cin.pic_pending.is_none();
+    drop(cin);
+
+    if pending_none {
         scr_stop_cinematic(cl, cls);
         scr_finish_cinematic(cls, cl);
         cl.cinematictime = 1; // hack to get the black screen behind loading
@@ -454,8 +447,7 @@ pub fn scr_draw_cinematic(cl: &mut ClientState, cls: &ClientStatic) -> bool {
         cl.cinematicpalette_active = true;
     }
 
-    // SAFETY: single-threaded engine
-    let cin = unsafe { cin() };
+    let cin = cin();
 
     if cin.pic.is_none() {
         return true;
@@ -479,8 +471,7 @@ pub fn scr_play_cinematic(arg: &str, cl: &mut ClientState, cls: &mut ClientStati
             let name = format!("pics/{}", arg);
             let (pic, palette, w, h) = scr_load_pcx(&name);
 
-            // SAFETY: single-threaded engine
-            let cin = unsafe { cin() };
+            let mut cin = cin();
             cin.pic = pic;
             cin.width = w;
             cin.height = h;
@@ -514,8 +505,7 @@ pub fn scr_play_cinematic(arg: &str, cl: &mut ClientState, cls: &mut ClientStati
 
     cls.state = ConnState::Active;
 
-    // SAFETY: single-threaded engine
-    let cin = unsafe { cin() };
+    let mut cin = cin();
 
     if let Some(ref mut file) = cl.cinematic_file {
         let mut buf4 = [0u8; 4];
@@ -535,7 +525,7 @@ pub fn scr_play_cinematic(arg: &str, cl: &mut ClientState, cls: &mut ClientStati
         cin.s_channels = i32::from_le_bytes(buf4);
     }
 
-    huff1_table_init(cl);
+    huff1_table_init(&mut cin, cl);
 
     // switch up to 22 khz sound if necessary
     let old_khz = cvar_variable_value("s_khz") as i32;
@@ -547,7 +537,7 @@ pub fn scr_play_cinematic(arg: &str, cl: &mut ClientState, cls: &mut ClientStati
     }
 
     cl.cinematicframe = 0;
-    cin.pic = scr_read_next_frame(cl);
+    cin.pic = scr_read_next_frame(&mut cin, cl);
     cl.cinematictime = sys_milliseconds();
 }
 
@@ -567,27 +557,21 @@ fn fs_fopen_file(filename: &str) -> Option<File> {
 }
 
 fn r_set_palette(palette: Option<&[u8]>) {
-    // SAFETY: single-threaded engine
-    unsafe { (crate::console::RENDERER_FNS.r_set_palette)(palette); }
+    (crate::console::renderer_fns().r_set_palette)(palette);
 }
 
 fn draw_stretch_raw(
     x: i32, y: i32, w: i32, h: i32, cols: i32, rows: i32, data: &[u8],
 ) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        (crate::console::RENDERER_FNS.draw_stretch_raw)(x, y, w, h, cols, rows, data);
-    }
+    (crate::console::renderer_fns().draw_stretch_raw)(x, y, w, h, cols, rows, data);
 }
 
 fn viddef_width() -> i32 {
-    // SAFETY: single-threaded engine
-    unsafe { (crate::console::RENDERER_FNS.viddef_width)() }
+    (crate::console::renderer_fns().viddef_width)()
 }
 
 fn viddef_height() -> i32 {
-    // SAFETY: single-threaded engine
-    unsafe { (crate::console::RENDERER_FNS.viddef_height)() }
+    (crate::console::renderer_fns().viddef_height)()
 }
 
 fn scr_end_loading_plaque(clear: bool) {
@@ -595,7 +579,8 @@ fn scr_end_loading_plaque(clear: bool) {
 }
 
 fn scr_begin_loading_plaque() {
-    crate::console::scr_begin_loading_plaque();
+    // Use cl_main version to avoid CONSOLE_STATE deadlock
+    crate::cl_main::scr_begin_loading_plaque();
 }
 
 use myq2_common::cvar::{cvar_variable_value, cvar_set_value};
@@ -674,11 +659,12 @@ mod tests {
 
     #[test]
     fn test_huff1_decompress_empty_input() {
+        let cin = Cinematics::new();
         let block = CBlock {
             data: Vec::new(),
             count: 0,
         };
-        let result = huff1_decompress(&block);
+        let result = huff1_decompress(&cin, &block);
         assert!(result.data.is_empty());
         assert_eq!(result.count, 0);
     }
@@ -686,11 +672,12 @@ mod tests {
     #[test]
     fn test_huff1_decompress_too_short_input() {
         // Less than 4 bytes should return empty
+        let cin = Cinematics::new();
         let block = CBlock {
             data: vec![1, 2, 3],
             count: 3,
         };
-        let result = huff1_decompress(&block);
+        let result = huff1_decompress(&cin, &block);
         assert!(result.data.is_empty());
         assert_eq!(result.count, 0);
     }
@@ -699,11 +686,12 @@ mod tests {
     fn test_huff1_decompress_zero_count() {
         // The first 4 bytes encode the decompressed count as little-endian i32
         // count = 0 means no data to decompress
+        let cin = Cinematics::new();
         let block = CBlock {
             data: vec![0, 0, 0, 0],
             count: 4,
         };
-        let result = huff1_decompress(&block);
+        let result = huff1_decompress(&cin, &block);
         // count_total is 0, so no decompression should occur
         assert!(result.data.is_empty());
         assert_eq!(result.count, 0);
@@ -712,17 +700,14 @@ mod tests {
     #[test]
     fn test_huff1_decompress_no_hnodes() {
         // When hnodes1 is None, decompress should return empty
-        // First ensure the global CIN has no hnodes1
-        unsafe {
-            let c = cin();
-            c.hnodes1 = None;
-        }
+        let mut cin = Cinematics::new();
+        cin.hnodes1 = None;
 
         let block = CBlock {
             data: vec![5, 0, 0, 0, 0xFF], // count_total=5
             count: 5,
         };
-        let result = huff1_decompress(&block);
+        let result = huff1_decompress(&cin, &block);
         assert!(result.data.is_empty());
         assert_eq!(result.count, 0);
     }
@@ -971,8 +956,8 @@ mod tests {
         cl.cinematic_file = None;
 
         // Set up global cin state
-        unsafe {
-            let c = cin();
+        {
+            let mut c = cin();
             c.pic = Some(vec![1, 2, 3]);
             c.pic_pending = Some(vec![4, 5, 6]);
             c.hnodes1 = Some(vec![0; 256]);
@@ -982,7 +967,7 @@ mod tests {
         scr_stop_cinematic(&mut cl, &mut cls);
 
         assert_eq!(cl.cinematictime, 0);
-        unsafe {
+        {
             let c = cin();
             assert!(c.pic.is_none());
             assert!(c.pic_pending.is_none());
@@ -1009,8 +994,8 @@ mod tests {
         cl.cinematicpalette_active = true;
 
         // No pic available but should still return true
-        unsafe {
-            let c = cin();
+        {
+            let mut c = cin();
             c.pic = None;
         }
 

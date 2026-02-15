@@ -1,7 +1,7 @@
 // common.rs — misc functions used in client and server
 // Converted from: myq2-original/qcommon/common.c
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use crate::crc::crc_block;
 use crate::q_shared::{UserCmd, EntityState, Vec3, MAX_EDICTS, RF_BEAM, CVAR_SERVERINFO, CVAR_NOSET, CVAR_ZERO};
@@ -47,8 +47,17 @@ pub fn com_end_redirect() -> Option<String> {
 // Com_Printf / Com_DPrintf / Com_Error
 // ============================================================
 
+// Console print callback (registered by client at startup)
+type ConPrintCallback = Box<dyn Fn(&str) + Send + Sync>;
+static CON_PRINT_CALLBACK: OnceLock<ConPrintCallback> = OnceLock::new();
+
+/// Register console print callback (called by client during initialization)
+pub fn register_con_print(callback: impl Fn(&str) + Send + Sync + 'static) {
+    let _ = CON_PRINT_CALLBACK.set(Box::new(callback));
+}
+
 /// General-purpose print function. Prints to stdout and appends to redirect
-/// buffer if one is active.
+/// buffer if one is active. On the client side, also routes to Con_Print.
 pub fn com_printf(msg: &str) {
     // If redirecting, append to buffer
     {
@@ -59,6 +68,11 @@ pub fn com_printf(msg: &str) {
         }
     }
     print!("{}", msg);
+
+    // Route to console display if callback is registered
+    if let Some(callback) = CON_PRINT_CALLBACK.get() {
+        callback(msg);
+    }
 }
 
 /// Developer-only print. Only prints when developer mode is active.
@@ -689,6 +703,7 @@ pub fn com_block_sequence_crc_byte(base: &[u8], sequence: i32) -> u8 {
 // COM argument handling
 // ============================================================
 
+#[derive(Clone)]
 pub struct ComArgs {
     pub argc: usize,
     pub argv: Vec<String>,
@@ -851,6 +866,23 @@ impl Default for CommonState {
 /// Global engine state, lazily initialized by qcommon_init.
 static COMMON_STATE: Mutex<Option<CommonState>> = Mutex::new(None);
 
+/// Frame callbacks for subsystems that myq2-common cannot depend on directly.
+/// Registered at startup by the binary crate (myq2-sys) which has access to all crates.
+pub struct FrameCallbacks {
+    /// SV_Frame(msec) — server frame tick
+    pub sv_frame: fn(i32),
+    /// CL_Frame(msec) — client frame tick (rendering, input, audio)
+    pub cl_frame: fn(i32),
+}
+
+static FRAME_CALLBACKS: Mutex<Option<FrameCallbacks>> = Mutex::new(None);
+
+/// Register the server and client frame callbacks.
+/// Must be called before the main loop starts.
+pub fn register_frame_callbacks(cb: FrameCallbacks) {
+    *FRAME_CALLBACKS.lock().unwrap() = Some(cb);
+}
+
 /// Set the server state in the global common state.
 ///
 /// Original: `void Com_SetServerState(int state)`
@@ -887,6 +919,54 @@ pub fn qcommon_init(args: &[String]) {
     // Key_Init — wired at runtime by client
     crate::files::fs_init();
     crate::cmodel::cmodel_init();
+
+    // Wire callbacks now that filesystem and cvars are ready
+    crate::cmd::with_cmd_ctx(|cmd| {
+        cmd.fs_load_file = Some(Box::new(|name: &str| {
+            crate::files::fs_load_file(name)
+        }));
+        cmd.cvar_variable_string = Some(Box::new(|name: &str| {
+            crate::cvar::cvar_variable_string(name)
+        }));
+        cmd.cvar_command = Some(Box::new(|ctx: &mut crate::cmd::CmdContext| {
+            let argv0 = ctx.cmd_argv(0).to_string();
+            let argc = ctx.cmd_argc();
+            let argv1 = if argc > 1 { Some(ctx.cmd_argv(1).to_string()) } else { None };
+            crate::cvar::with_cvar_ctx(|cvar| {
+                cvar.command(&argv0, argc, argv1.as_deref())
+            }).unwrap_or(false)
+        }));
+    });
+
+    // Register cvar commands ("set", "unset", "cvarlist")
+    crate::cmd::cmd_add_command("set", Some(Box::new(|ctx: &mut crate::cmd::CmdContext| {
+        let argc = ctx.cmd_argc();
+        let args: Vec<String> = (1..argc).map(|i| ctx.cmd_argv(i).to_string()).collect();
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        crate::cvar::with_cvar_ctx(|cvar| cvar.set_f(argc, &arg_refs));
+    })));
+    crate::cmd::cmd_add_command("seta", Some(Box::new(|ctx: &mut crate::cmd::CmdContext| {
+        let argc = ctx.cmd_argc();
+        let args: Vec<String> = (1..argc).map(|i| ctx.cmd_argv(i).to_string()).collect();
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        crate::cvar::with_cvar_ctx(|cvar| cvar.set_f(argc, &arg_refs));
+    })));
+    crate::cmd::cmd_add_command("unset", Some(Box::new(|ctx: &mut crate::cmd::CmdContext| {
+        let argc = ctx.cmd_argc();
+        let args: Vec<String> = (1..argc).map(|i| ctx.cmd_argv(i).to_string()).collect();
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        crate::cvar::with_cvar_ctx(|cvar| cvar.unset_f(argc, &arg_refs));
+    })));
+    crate::cmd::cmd_add_command("cvarlist", Some(Box::new(|ctx: &mut crate::cmd::CmdContext| {
+        let argc = ctx.cmd_argc();
+        let args: Vec<String> = (1..argc).map(|i| ctx.cmd_argv(i).to_string()).collect();
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        crate::cvar::with_cvar_ctx(|cvar| cvar.list_f(argc, &arg_refs));
+    })));
+
+    // Execute config.cfg (mirrors C: Cbuf_AddText("exec config.cfg\n"))
+    crate::cmd::cbuf_add_text("exec config.cfg\n");
+
     crate::cmd::with_cmd_ctx(|cmd| {
         cmd.cbuf_add_early_commands(&mut state.args, true);
     });
@@ -915,15 +995,34 @@ pub fn qcommon_init(args: &[String]) {
     let port = sys_milliseconds() & 0xffff;
     crate::cvar::cvar_get("qport", &port.to_string(), CVAR_NOSET);
 
-    crate::cmd::with_cmd_ctx(|cmd| {
-        cmd.cbuf_add_late_commands(&state.args);
-    });
-    crate::cmd::cbuf_execute();
+    // NOTE: Late commands (+map, +connect, etc.) are executed AFTER subsystem init
+    // in main.rs, not here. This ensures cl_init and sv_init have registered
+    // their command handlers before the late commands execute.
+    // crate::cmd::with_cmd_ctx(|cmd| {
+    //     cmd.cbuf_add_late_commands(&state.args);
+    // });
+    // crate::cmd::cbuf_execute();
 
     com_printf("====== Qcommon Initialized ======\n");
 
     let mut global = COMMON_STATE.lock().unwrap();
     *global = Some(state);
+}
+
+/// Execute late commands (commands with + prefix from command-line arguments).
+/// This should be called after all subsystems (server, client) are initialized.
+pub fn qcommon_exec_late_commands() {
+    let state_opt = COMMON_STATE.lock().unwrap();
+    if let Some(ref state) = *state_opt {
+        // Clone args to avoid holding the lock during command execution
+        let args = state.args.clone();
+        drop(state_opt);
+
+        crate::cmd::with_cmd_ctx(|cmd| {
+            cmd.cbuf_add_late_commands(&args);
+        });
+        crate::cmd::cbuf_execute();
+    }
 }
 
 /// Run a single engine frame.
@@ -933,13 +1032,22 @@ pub fn qcommon_init(args: &[String]) {
 /// The C original runs: Cbuf_Execute, server frame, client frame.
 /// This stub updates realtime; subsystem ticks will be wired in as modules are converted.
 pub fn qcommon_frame(msec: i32) {
-    let mut global = COMMON_STATE.lock().unwrap();
-    if let Some(ref mut state) = *global {
-        state.realtime += msec;
+    {
+        let mut global = COMMON_STATE.lock().unwrap();
+        if let Some(ref mut state) = *global {
+            state.realtime += msec;
+        }
+    }
 
-        crate::cmd::cbuf_execute();
-        // SV_Frame(msec) — wired at runtime by server
-        // CL_Frame(msec) — wired at runtime by client
+    crate::cmd::cbuf_execute();
+
+    // Call subsystem frame functions (SV_Frame, CL_Frame) via registered callbacks.
+    // Lock is taken and released quickly to copy the function pointers, avoiding
+    // holding the lock across potentially long frame functions.
+    let callbacks = FRAME_CALLBACKS.lock().unwrap().as_ref().map(|cb| (cb.sv_frame, cb.cl_frame));
+    if let Some((sv_frame, cl_frame)) = callbacks {
+        sv_frame(msec);
+        cl_frame(msec);
     }
 }
 

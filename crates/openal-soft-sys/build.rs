@@ -58,9 +58,13 @@ fn main() {
         println!("cargo:rustc-link-lib=ole32");
     } else if cfg!(target_os = "linux") {
         println!("cargo:rustc-link-lib=static=openal");
+        // C++ standard library — OpenAL Soft is written in C++
+        println!("cargo:rustc-link-lib=stdc++");
         println!("cargo:rustc-link-lib=pthread");
         println!("cargo:rustc-link-lib=dl");
         println!("cargo:rustc-link-lib=m");
+        // Atomic operations (required by C++ std::atomic on some platforms)
+        println!("cargo:rustc-link-lib=atomic");
     } else if cfg!(target_os = "macos") {
         println!("cargo:rustc-link-lib=static=openal");
         println!("cargo:rustc-link-lib=framework=AudioToolbox");

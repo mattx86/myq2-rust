@@ -4,13 +4,14 @@
 // Copyright (C) 1997-2001 Id Software, Inc.
 // Licensed under the GNU General Public License v2
 
+use std::sync::{LazyLock, Mutex, MutexGuard};
+
 use myq2_common::common::com_printf;
 use myq2_common::completion::complete_line;
 use crate::client::{ConnState, KeyDest};
 use crate::console::{
-    cbuf_add_text, cmd_add_command, cmd_argc, cmd_argv, con_toggle_console_f, scr_update_screen, wildcardfit, CL, CLS,
-    CHAT_BACKEDIT, CHAT_BUFFER, CHAT_BUFFERLEN, CHAT_TYPE, CON, CT_PERSON, CT_TEAM,
-    CT_TELL, EDIT_LINE, KEY_LINEPOS, KEY_LINES, MAXCMDLINE,
+    cbuf_add_text, cmd_add_command, cmd_argc, cmd_argv, con_toggle_console_f, cs, scr_update_screen, wildcardfit, CL, CLS,
+    CT_ALL, CT_PERSON, CT_TEAM, CT_TELL, MAXCMDLINE,
 };
 
 // ============================================================
@@ -217,23 +218,61 @@ static KEYNAMES: &[KeyName] = &[
 ];
 
 // ============================================================
-// Key state globals
+// Key state — wrapped in Mutex for thread safety
 // ============================================================
 
-pub static mut SHIFT_DOWN: bool = false;
-pub static mut ANYKEYDOWN: i32 = 0;
-pub static mut HISTORY_LINE: i32 = 0;
-pub static mut KEY_WAITING: i32 = 0;
-pub static mut KEYBINDINGS: [Option<String>; 256] = {
-    const NONE: Option<String> = None;
-    [NONE; 256]
-};
-pub static mut CONSOLEKEYS: [bool; 256] = [false; 256];
-pub static mut MENUBOUND: [bool; 256] = [false; 256];
-pub static mut KEYSHIFT: [i32; 256] = [0i32; 256];
-pub static mut KEY_REPEATS: [i32; 256] = [0i32; 256];
-pub static mut KEYDOWN: [bool; 256] = [false; 256];
-pub static mut KEY_INSERT: bool = true;
+pub struct KeyInputState {
+    pub shift_down: bool,
+    pub anykeydown: i32,
+    pub history_line: i32,
+    pub key_waiting: i32,
+    pub keybindings: [Option<String>; 256],
+    pub consolekeys: [bool; 256],
+    pub menubound: [bool; 256],
+    pub keyshift: [i32; 256],
+    pub key_repeats: [i32; 256],
+    pub keydown: [bool; 256],
+    pub key_insert: bool,
+    // Console line editing state (moved from console.rs)
+    pub key_lines: [[u8; MAXCMDLINE]; 32],
+    pub edit_line: i32,
+    pub key_linepos: i32,
+    // Chat state (moved from console.rs)
+    pub chat_type: i32,
+    pub chat_buffer: [u8; MAXCMDLINE],
+    pub chat_bufferlen: i32,
+    pub chat_backedit: i32,
+}
+
+static KEY_STATE: LazyLock<Mutex<KeyInputState>> = LazyLock::new(|| {
+    Mutex::new(KeyInputState {
+        shift_down: false,
+        anykeydown: 0,
+        history_line: 0,
+        key_waiting: 0,
+        keybindings: {
+            const NONE: Option<String> = None;
+            [NONE; 256]
+        },
+        consolekeys: [false; 256],
+        menubound: [false; 256],
+        keyshift: [0; 256],
+        key_repeats: [0; 256],
+        keydown: [false; 256],
+        key_insert: true,
+        key_lines: [[0u8; MAXCMDLINE]; 32],
+        edit_line: 0,
+        key_linepos: 0,
+        chat_type: CT_ALL,
+        chat_buffer: [0u8; MAXCMDLINE],
+        chat_bufferlen: 0,
+        chat_backedit: 0,
+    })
+});
+
+pub fn ks() -> MutexGuard<'static, KeyInputState> {
+    KEY_STATE.lock().unwrap()
+}
 
 // ============================================================
 // Placeholder stubs
@@ -257,8 +296,7 @@ fn cvar_complete_variable(partial: &str) -> Option<String> {
 }
 
 fn sys_get_clipboard_data() -> Option<String> {
-    // SAFETY: single-threaded engine
-    unsafe { (crate::console::SYSTEM_FNS.sys_get_clipboard_data)() }
+    (crate::console::system_fns().sys_get_clipboard_data)()
 }
 
 /// Placeholder — Cbuf_InsertText
@@ -289,8 +327,7 @@ fn m_menu_main_f() {
 
 /// S_StartLocalSound — wired through console module's system function pointer table.
 fn s_start_local_sound(name: &str) {
-    // SAFETY: single-threaded engine
-    unsafe { (crate::console::SYSTEM_FNS.s_start_local_sound)(name) }
+    (crate::console::system_fns().s_start_local_sound)(name)
 }
 
 /// Placeholder — Com_sprintf (not needed — use format!)
@@ -309,67 +346,85 @@ fn key_line_len(line: &[u8; MAXCMDLINE]) -> usize {
 // CompleteCommand - Enhanced with multi-completion support
 // ============================================================
 
-/// Apply a completion to the current edit line.
+/// Apply a full completed line (without the leading ']' prompt) to the edit buffer.
 /// If `add_space` is true, adds a trailing space after the completion.
-fn apply_completion(text: &str, add_space: bool) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        KEY_LINES[EDIT_LINE as usize][1] = b'/';
-        let bytes = text.as_bytes();
-        for (i, &b) in bytes.iter().enumerate() {
-            if i + 2 < MAXCMDLINE {
-                KEY_LINES[EDIT_LINE as usize][i + 2] = b;
-            }
+fn apply_completion(full_line: &str, add_space: bool) {
+    let mut ks = ks();
+    let el = ks.edit_line as usize;
+    // Position 0 is the ']' prompt; content starts at position 1
+    let bytes = full_line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if i + 1 < MAXCMDLINE {
+            ks.key_lines[el][i + 1] = b;
         }
-        KEY_LINEPOS = bytes.len() as i32 + 2;
-        if add_space && (KEY_LINEPOS as usize) < MAXCMDLINE {
-            KEY_LINES[EDIT_LINE as usize][KEY_LINEPOS as usize] = b' ';
-            KEY_LINEPOS += 1;
-        }
-        KEY_LINES[EDIT_LINE as usize][KEY_LINEPOS as usize] = 0;
     }
+    ks.key_linepos = bytes.len() as i32 + 1;
+    if add_space && (ks.key_linepos as usize) < MAXCMDLINE {
+        let pos = ks.key_linepos as usize;
+        ks.key_lines[el][pos] = b' ';
+        ks.key_linepos += 1;
+    }
+    let pos = ks.key_linepos as usize;
+    ks.key_lines[el][pos] = 0;
 }
 
 fn complete_command() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        let line = &KEY_LINES[EDIT_LINE as usize];
-        let mut start = 1usize;
-        if start < MAXCMDLINE && (line[start] == b'\\' || line[start] == b'/') {
-            start += 1;
+    let ks = ks();
+    let line = &ks.key_lines[ks.edit_line as usize];
+    let mut start = 1usize;
+    let has_slash = start < MAXCMDLINE && (line[start] == b'\\' || line[start] == b'/');
+    if has_slash {
+        start += 1;
+    }
+
+    // Build the line string (without leading ] and optional / or \)
+    let len = key_line_len(line);
+    let line_str: String = line[start..len].iter().map(|&b| b as char).collect();
+
+    // Must drop ks before calling apply_completion which also acquires ks()
+    drop(ks);
+
+    // Get completion result
+    let result = complete_line(&line_str);
+
+    // Parse the line to figure out if we're completing a command or argument
+    let parts: Vec<&str> = line_str.split_whitespace().collect();
+    let completing_arg = parts.len() > 1 || (parts.len() == 1 && (line_str.ends_with(' ') || line_str.ends_with('\t')));
+
+    // Helper: rebuild the full line from command + completed match
+    let build_full_line = |match_text: &str| -> String {
+        if completing_arg {
+            // Preserve the command portion, replace only the argument
+            let command = parts[0];
+            format!("{} {}", command, match_text)
+        } else {
+            match_text.to_string()
         }
+    };
 
-        // Build the line string (without leading ] and optional / or \)
-        let len = key_line_len(line);
-        let line_str: String = line[start..len].iter().map(|&b| b as char).collect();
+    match result.matches.len() {
+        0 => {
+            // No matches - do nothing
+        }
+        1 => {
+            // Single match - complete fully with trailing space
+            apply_completion(&build_full_line(&result.matches[0]), true);
+        }
+        _ => {
+            // Multiple matches
+            let trimmed_len = line_str.trim().len();
 
-        // Get completion result
-        let result = complete_line(&line_str);
-
-        match result.matches.len() {
-            0 => {
-                // No matches - do nothing
+            // Complete to common prefix if it's longer than what we have
+            if result.common_prefix.len() > trimmed_len {
+                apply_completion(&build_full_line(&result.common_prefix), false);
             }
-            1 => {
-                // Single match - complete fully with trailing space
-                apply_completion(&result.matches[0], true);
-            }
-            _ => {
-                // Multiple matches
-                let trimmed_len = line_str.trim().len();
 
-                // Complete to common prefix if it's longer than what we have
-                if result.common_prefix.len() > trimmed_len {
-                    apply_completion(&result.common_prefix, false);
-                }
-
-                // Print all matches to console
-                com_printf("\n");
-                for m in &result.matches {
-                    com_printf(&format!("    {}\n", m));
-                }
-                com_printf(&format!("{} possible completions\n", result.matches.len()));
+            // Print all matches to console
+            com_printf("\n");
+            for m in &result.matches {
+                com_printf(&format!("    {}\n", m));
             }
+            com_printf(&format!("{} possible completions\n", result.matches.len()));
         }
     }
 }
@@ -394,64 +449,69 @@ fn char_offset(s: &[u8], charcount: i32) -> usize {
 
 /// Interactive line editing and console scrollback.
 pub fn key_console(mut key: i32) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        // numpad to ascii conversion
-        key = match key {
-            K_KP_SLASH => b'/' as i32,
-            K_KP_MINUS => b'-' as i32,
-            K_KP_PLUS => b'+' as i32,
-            K_KP_HOME => b'7' as i32,
-            K_KP_UPARROW => b'8' as i32,
-            K_KP_PGUP => b'9' as i32,
-            K_KP_LEFTARROW => b'4' as i32,
-            K_KP_5 => b'5' as i32,
-            K_KP_RIGHTARROW => b'6' as i32,
-            K_KP_END => b'1' as i32,
-            K_KP_DOWNARROW => b'2' as i32,
-            K_KP_PGDN => b'3' as i32,
-            K_KP_INS => b'0' as i32,
-            K_KP_DEL => b'.' as i32,
-            _ => key,
-        };
+    let mut ks = ks();
 
-        // Ctrl+V or Shift+Ins paste
-        if ((key as u8).eq_ignore_ascii_case(&b'V') && KEYDOWN[K_CTRL as usize])
-            || ((key == K_INS || key == K_KP_INS) && KEYDOWN[K_SHIFT as usize])
-        {
-            if let Some(cbd) = sys_get_clipboard_data() {
-                let cbd = cbd.replace(&['\n', '\r', '\x08'][..], "");
-                let cbd_bytes = cbd.as_bytes();
-                let mut i = cbd_bytes.len();
-                if i + KEY_LINEPOS as usize >= MAXCMDLINE {
-                    i = MAXCMDLINE - KEY_LINEPOS as usize;
+    // numpad to ascii conversion
+    key = match key {
+        K_KP_SLASH => b'/' as i32,
+        K_KP_MINUS => b'-' as i32,
+        K_KP_PLUS => b'+' as i32,
+        K_KP_HOME => b'7' as i32,
+        K_KP_UPARROW => b'8' as i32,
+        K_KP_PGUP => b'9' as i32,
+        K_KP_LEFTARROW => b'4' as i32,
+        K_KP_5 => b'5' as i32,
+        K_KP_RIGHTARROW => b'6' as i32,
+        K_KP_END => b'1' as i32,
+        K_KP_DOWNARROW => b'2' as i32,
+        K_KP_PGDN => b'3' as i32,
+        K_KP_INS => b'0' as i32,
+        K_KP_DEL => b'.' as i32,
+        _ => key,
+    };
+
+    // Ctrl+V or Shift+Ins paste
+    if ((key as u8).eq_ignore_ascii_case(&b'V') && ks.keydown[K_CTRL as usize])
+        || ((key == K_INS || key == K_KP_INS) && ks.keydown[K_SHIFT as usize])
+    {
+        if let Some(cbd) = sys_get_clipboard_data() {
+            let cbd = cbd.replace(&['\n', '\r', '\x08'][..], "");
+            let cbd_bytes = cbd.as_bytes();
+            let mut i = cbd_bytes.len();
+            if i + ks.key_linepos as usize >= MAXCMDLINE {
+                i = MAXCMDLINE - ks.key_linepos as usize;
+            }
+            if i > 0 {
+                let edit = ks.edit_line as usize;
+                let pos = ks.key_linepos as usize;
+                for j in 0..i {
+                    if pos + j < MAXCMDLINE {
+                        ks.key_lines[edit][pos + j] = cbd_bytes[j];
+                    }
                 }
-                if i > 0 {
-                    let line = &mut KEY_LINES[EDIT_LINE as usize];
-                    let pos = KEY_LINEPOS as usize;
-                    for j in 0..i {
-                        if pos + j < MAXCMDLINE {
-                            line[pos + j] = cbd_bytes[j];
-                        }
-                    }
-                    KEY_LINEPOS += i as i32;
-                    if (KEY_LINEPOS as usize) < MAXCMDLINE {
-                        line[KEY_LINEPOS as usize] = 0;
-                    }
+                ks.key_linepos += i as i32;
+                if (ks.key_linepos as usize) < MAXCMDLINE {
+                    let lp = ks.key_linepos as usize;
+                    ks.key_lines[edit][lp] = 0;
                 }
             }
-            return;
         }
+        return;
+    }
 
-        // Ctrl+L => clear
-        if key == b'l' as i32 && KEYDOWN[K_CTRL as usize] {
-            cbuf_add_text("clear\n");
-            return;
-        }
+    // Ctrl+L => clear
+    if key == b'l' as i32 && ks.keydown[K_CTRL as usize] {
+        cbuf_add_text("clear\n");
+        return;
+    }
 
-        // Enter
-        if key == K_ENTER || key == K_KP_ENTER {
-            let line = &KEY_LINES[EDIT_LINE as usize];
+    // Enter
+    if key == K_ENTER || key == K_KP_ENTER {
+        // Extract display string while we have the lock, then drop it before com_printf
+        let display: String = {
+            let edit = ks.edit_line as usize;
+            let line = &ks.key_lines[edit];
+
             if line[1] == b'\\' || line[1] == b'/' {
                 // skip the command prefix
                 let s: String = line[2..].iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
@@ -462,203 +522,231 @@ pub fn key_console(mut key: i32) {
             }
             cbuf_add_text("\n");
 
-            let display: String = line.iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
-            com_printf(&format!("{}\n", display));
+            line.iter().take_while(|&&b| b != 0).map(|&b| b as char).collect()
+        };
 
-            EDIT_LINE = (EDIT_LINE + 1) & 31;
-            HISTORY_LINE = EDIT_LINE;
-            KEY_LINES[EDIT_LINE as usize][0] = b']';
-            KEY_LINES[EDIT_LINE as usize][1] = 0;
-            KEY_LINEPOS = 1;
+        // IMPORTANT: Drop the ks lock before calling com_printf to avoid deadlock.
+        // com_printf -> print!() can trigger console rendering which needs to lock KEY_STATE.
+        drop(ks);
 
+        com_printf(&format!("{}\n", display));
+
+        // Re-acquire lock for the rest of the function (use ks2 to avoid shadowing conflict)
+        {
+            let mut ks2 = self::ks();
+            ks2.edit_line = (ks2.edit_line + 1) & 31;
+            ks2.history_line = ks2.edit_line;
+            let new_edit = ks2.edit_line as usize;
+            ks2.key_lines[new_edit][0] = b']';
+            ks2.key_lines[new_edit][1] = 0;
+            ks2.key_linepos = 1;
+        }
+
+        // SAFETY: CLS is a console.rs static mut, not yet wrapped
+        unsafe {
             if CLS.state == ConnState::Disconnected {
                 scr_update_screen(); // force an update
             }
-            return;
         }
+        return;
+    }
 
-        // Tab completion
-        if key == K_TAB {
-            complete_command();
-            return;
+    // Tab completion — must drop ks before calling complete_command which acquires ks()
+    if key == K_TAB {
+        drop(ks);
+        complete_command();
+        return;
+    }
+
+    // Left arrow
+    if key == K_LEFTARROW || key == K_KP_LEFTARROW
+        || (key == b'h' as i32 && ks.keydown[K_CTRL as usize])
+    {
+        if ks.key_linepos > 1 {
+            let edit = ks.edit_line as usize;
+            ks.key_linepos = char_offset(&ks.key_lines[edit], ks.key_linepos - 1) as i32;
         }
+        return;
+    }
 
-        // Left arrow
-        if key == K_LEFTARROW || key == K_KP_LEFTARROW
-            || (key == b'h' as i32 && KEYDOWN[K_CTRL as usize])
-        {
-            if KEY_LINEPOS > 1 {
-                KEY_LINEPOS = char_offset(&KEY_LINES[EDIT_LINE as usize], KEY_LINEPOS - 1) as i32;
-            }
-            return;
-        }
-
-        // Backspace
-        if key == K_BACKSPACE {
-            if KEY_LINEPOS > 1 {
-                let line = &mut KEY_LINES[EDIT_LINE as usize];
-                let pos = KEY_LINEPOS as usize;
-                let len = key_line_len(line);
-                if pos <= len {
-                    for i in (pos - 1)..len {
-                        line[i] = if i + 1 < MAXCMDLINE { line[i + 1] } else { 0 };
-                    }
-                }
-                KEY_LINEPOS -= 1;
-            }
-            return;
-        }
-
-        // Delete
-        if key == K_DEL {
-            let line = &mut KEY_LINES[EDIT_LINE as usize];
-            let pos = KEY_LINEPOS as usize;
-            let len = key_line_len(line);
-            if pos < len {
-                for i in pos..len {
-                    line[i] = if i + 1 < MAXCMDLINE { line[i + 1] } else { 0 };
+    // Backspace
+    if key == K_BACKSPACE {
+        if ks.key_linepos > 1 {
+            let edit = ks.edit_line as usize;
+            let pos = ks.key_linepos as usize;
+            let len = key_line_len(&ks.key_lines[edit]);
+            if pos <= len {
+                for i in (pos - 1)..len {
+                    ks.key_lines[edit][i] = if i + 1 < MAXCMDLINE { ks.key_lines[edit][i + 1] } else { 0 };
                 }
             }
-            return;
+            ks.key_linepos -= 1;
         }
+        return;
+    }
 
-        // Insert toggle
-        if key == K_INS {
-            KEY_INSERT = !KEY_INSERT;
-            return;
-        }
-
-        // Right arrow
-        if key == K_RIGHTARROW {
-            let line = &mut KEY_LINES[EDIT_LINE as usize];
-            let len = key_line_len(line);
-            if len == KEY_LINEPOS as usize {
-                // mattx86: right arrow key fix
-                let prev_line = (EDIT_LINE + 31) & 31;
-                let prev_len = key_line_len(&KEY_LINES[prev_line as usize]);
-                if prev_len >= KEY_LINEPOS as usize {
-                    return;
-                }
-                line[KEY_LINEPOS as usize] =
-                    KEY_LINES[prev_line as usize][KEY_LINEPOS as usize];
-                KEY_LINEPOS += 1;
-                if (KEY_LINEPOS as usize) < MAXCMDLINE {
-                    line[KEY_LINEPOS as usize] = 0;
-                }
-            } else {
-                KEY_LINEPOS = char_offset(line, KEY_LINEPOS + 1) as i32;
+    // Delete
+    if key == K_DEL {
+        let edit = ks.edit_line as usize;
+        let pos = ks.key_linepos as usize;
+        let len = key_line_len(&ks.key_lines[edit]);
+        if pos < len {
+            for i in pos..len {
+                ks.key_lines[edit][i] = if i + 1 < MAXCMDLINE { ks.key_lines[edit][i + 1] } else { 0 };
             }
-            return;
         }
+        return;
+    }
 
-        // Up arrow — history
-        if key == K_UPARROW || key == K_KP_UPARROW
-            || (key == b'p' as i32 && KEYDOWN[K_CTRL as usize])
-        {
-            loop {
-                HISTORY_LINE = (HISTORY_LINE - 1) & 31;
-                if HISTORY_LINE == EDIT_LINE || KEY_LINES[HISTORY_LINE as usize][1] != 0 {
-                    break;
-                }
-            }
-            if HISTORY_LINE == EDIT_LINE {
-                HISTORY_LINE = (EDIT_LINE + 1) & 31;
-            }
-            KEY_LINES[EDIT_LINE as usize] = KEY_LINES[HISTORY_LINE as usize];
-            KEY_LINEPOS = key_line_len(&KEY_LINES[EDIT_LINE as usize]) as i32;
-            return;
-        }
+    // Insert toggle
+    if key == K_INS {
+        ks.key_insert = !ks.key_insert;
+        return;
+    }
 
-        // Down arrow — history
-        if key == K_DOWNARROW || key == K_KP_DOWNARROW
-            || (key == b'n' as i32 && KEYDOWN[K_CTRL as usize])
-        {
-            if HISTORY_LINE == EDIT_LINE {
+    // Right arrow
+    if key == K_RIGHTARROW {
+        let edit = ks.edit_line as usize;
+        let len = key_line_len(&ks.key_lines[edit]);
+        if len == ks.key_linepos as usize {
+            // mattx86: right arrow key fix
+            let prev_line = ((ks.edit_line + 31) & 31) as usize;
+            let prev_len = key_line_len(&ks.key_lines[prev_line]);
+            if prev_len >= ks.key_linepos as usize {
                 return;
             }
-            loop {
-                HISTORY_LINE = (HISTORY_LINE + 1) & 31;
-                if HISTORY_LINE == EDIT_LINE || KEY_LINES[HISTORY_LINE as usize][1] != 0 {
-                    break;
-                }
+            let lp = ks.key_linepos as usize;
+            let prev_char = ks.key_lines[prev_line][lp];
+            ks.key_lines[edit][lp] = prev_char;
+            ks.key_linepos += 1;
+            if (ks.key_linepos as usize) < MAXCMDLINE {
+                let lp2 = ks.key_linepos as usize;
+                ks.key_lines[edit][lp2] = 0;
             }
-            if HISTORY_LINE == EDIT_LINE {
-                KEY_LINES[EDIT_LINE as usize][0] = b']';
-                KEY_LINES[EDIT_LINE as usize][1] = 0;
-                KEY_LINEPOS = 1;
-            } else {
-                KEY_LINES[EDIT_LINE as usize] = KEY_LINES[HISTORY_LINE as usize];
-                KEY_LINEPOS = key_line_len(&KEY_LINES[EDIT_LINE as usize]) as i32;
+        } else {
+            ks.key_linepos = char_offset(&ks.key_lines[edit], ks.key_linepos + 1) as i32;
+        }
+        return;
+    }
+
+    // Up arrow -- history
+    if key == K_UPARROW || key == K_KP_UPARROW
+        || (key == b'p' as i32 && ks.keydown[K_CTRL as usize])
+    {
+        loop {
+            ks.history_line = (ks.history_line - 1) & 31;
+            if ks.history_line == ks.edit_line || ks.key_lines[ks.history_line as usize][1] != 0 {
+                break;
             }
+        }
+        if ks.history_line == ks.edit_line {
+            ks.history_line = (ks.edit_line + 1) & 31;
+        }
+        let hist = ks.history_line as usize;
+        let edit = ks.edit_line as usize;
+        ks.key_lines[edit] = ks.key_lines[hist];
+        ks.key_linepos = key_line_len(&ks.key_lines[edit]) as i32;
+        return;
+    }
+
+    // Down arrow -- history
+    if key == K_DOWNARROW || key == K_KP_DOWNARROW
+        || (key == b'n' as i32 && ks.keydown[K_CTRL as usize])
+    {
+        if ks.history_line == ks.edit_line {
             return;
         }
+        loop {
+            ks.history_line = (ks.history_line + 1) & 31;
+            if ks.history_line == ks.edit_line || ks.key_lines[ks.history_line as usize][1] != 0 {
+                break;
+            }
+        }
+        if ks.history_line == ks.edit_line {
+            let edit = ks.edit_line as usize;
+            ks.key_lines[edit][0] = b']';
+            ks.key_lines[edit][1] = 0;
+            ks.key_linepos = 1;
+        } else {
+            let hist = ks.history_line as usize;
+            let edit = ks.edit_line as usize;
+            ks.key_lines[edit] = ks.key_lines[hist];
+            ks.key_linepos = key_line_len(&ks.key_lines[edit]) as i32;
+        }
+        return;
+    }
 
+    {
+        let mut state = cs();
         // Page up / mouse wheel up
         if key == K_PGUP || key == K_KP_PGUP || key == K_MWHEELUP {
-            CON.display -= 3;
+            state.con.display -= 3;
             return;
         }
 
         // Page down / mouse wheel down
         if key == K_PGDN || key == K_KP_PGDN || key == K_MWHEELDOWN {
-            CON.display += 3;
-            if CON.display > CON.current {
-                CON.display = CON.current;
+            state.con.display += 3;
+            if state.con.display > state.con.current {
+                state.con.display = state.con.current;
             }
             return;
         }
 
         // Home
         if key == K_HOME || key == K_KP_HOME {
-            if KEYDOWN[K_CTRL as usize] {
-                CON.display = CON.current - CON.totallines + 10;
+            if ks.keydown[K_CTRL as usize] {
+                state.con.display = state.con.current - state.con.totallines + 10;
             } else {
-                KEY_LINEPOS = 1;
+                ks.key_linepos = 1;
             }
             return;
         }
 
         // End
         if key == K_END || key == K_KP_END {
-            if KEYDOWN[K_CTRL as usize] {
-                CON.display = CON.current;
+            if ks.keydown[K_CTRL as usize] {
+                state.con.display = state.con.current;
             } else {
-                KEY_LINEPOS = key_line_len(&KEY_LINES[EDIT_LINE as usize]) as i32;
+                let edit = ks.edit_line as usize;
+                ks.key_linepos = key_line_len(&ks.key_lines[edit]) as i32;
             }
             return;
         }
+    }
 
-        // Non-printable
-        if !(32..=127).contains(&key) {
-            return;
+    // Non-printable
+    if !(32..=127).contains(&key) {
+        return;
+    }
+
+    // Insert character
+    if (ks.key_linepos as usize) < MAXCMDLINE - 1 {
+        let edit = ks.edit_line as usize;
+
+        if ks.key_insert {
+            let mut i = key_line_len(&ks.key_lines[edit]);
+            if i == 254 {
+                i -= 1;
+            }
+            while i >= ks.key_linepos as usize {
+                if i + 1 < MAXCMDLINE {
+                    ks.key_lines[edit][i + 1] = ks.key_lines[edit][i];
+                }
+                if i == 0 {
+                    break;
+                }
+                i -= 1;
+            }
         }
 
-        // Insert character
-        if (KEY_LINEPOS as usize) < MAXCMDLINE - 1 {
-            let line = &mut KEY_LINES[EDIT_LINE as usize];
-
-            if KEY_INSERT {
-                let mut i = key_line_len(line);
-                if i == 254 {
-                    i -= 1;
-                }
-                while i >= KEY_LINEPOS as usize {
-                    if i + 1 < MAXCMDLINE {
-                        line[i + 1] = line[i];
-                    }
-                    if i == 0 {
-                        break;
-                    }
-                    i -= 1;
-                }
-            }
-
-            let old = line[KEY_LINEPOS as usize];
-            line[KEY_LINEPOS as usize] = key as u8;
-            KEY_LINEPOS += 1;
-            if old == 0 && (KEY_LINEPOS as usize) < MAXCMDLINE {
-                line[KEY_LINEPOS as usize] = 0;
-            }
+        let lp = ks.key_linepos as usize;
+        let old = ks.key_lines[edit][lp];
+        ks.key_lines[edit][lp] = key as u8;
+        ks.key_linepos += 1;
+        if old == 0 && (ks.key_linepos as usize) < MAXCMDLINE {
+            let lp2 = ks.key_linepos as usize;
+            ks.key_lines[edit][lp2] = 0;
         }
     }
 }
@@ -669,129 +757,136 @@ pub fn key_console(mut key: i32) {
 
 /// Handle key input in message (chat) mode.
 pub fn key_message(key: i32) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        if key == K_ENTER || key == K_KP_ENTER {
-            match CHAT_TYPE {
-                CT_PERSON => cbuf_add_text("say_person "),
-                CT_TELL => cbuf_add_text("tell "),
-                CT_TEAM => cbuf_add_text("say_team \""),
-                _ => cbuf_add_text("say \""),
-            }
+    let mut ks = ks();
 
-            let chat_str: String = CHAT_BUFFER[..CHAT_BUFFERLEN as usize]
-                .iter()
-                .take_while(|&&b| b != 0)
-                .map(|&b| b as char)
-                .collect();
-            cbuf_add_text(&chat_str);
-
-            if CHAT_TYPE != CT_PERSON && CHAT_TYPE != CT_TELL {
-                cbuf_add_text("\"");
-            }
-            cbuf_add_text("\n");
-
-            CLS.key_dest = KeyDest::Game;
-            CHAT_BUFFERLEN = 0;
-            CHAT_BUFFER[0] = 0;
-            CHAT_BACKEDIT = 0;
-            return;
+    if key == K_ENTER || key == K_KP_ENTER {
+        match ks.chat_type {
+            CT_PERSON => cbuf_add_text("say_person "),
+            CT_TELL => cbuf_add_text("tell "),
+            CT_TEAM => cbuf_add_text("say_team \""),
+            _ => cbuf_add_text("say \""),
         }
 
-        if key == K_ESCAPE {
-            CLS.key_dest = KeyDest::Game;
-            CHAT_BUFFERLEN = 0;
-            CHAT_BUFFER[0] = 0;
-            CHAT_BACKEDIT = 0;
-            return;
-        }
+        let chat_str: String = ks.chat_buffer[..ks.chat_bufferlen as usize]
+            .iter()
+            .take_while(|&&b| b != 0)
+            .map(|&b| b as char)
+            .collect();
+        cbuf_add_text(&chat_str);
 
-        if key == K_BACKSPACE {
-            if CHAT_BUFFERLEN > 0 {
-                if CHAT_BACKEDIT != 0 {
-                    let start = (CHAT_BUFFERLEN - CHAT_BACKEDIT - 1) as usize;
-                    if CHAT_BUFFERLEN - CHAT_BACKEDIT == 0 {
-                        return;
-                    }
-                    for i in start..CHAT_BUFFERLEN as usize {
-                        CHAT_BUFFER[i] = if i + 1 < MAXCMDLINE { CHAT_BUFFER[i + 1] } else { 0 };
-                    }
-                    CHAT_BUFFERLEN -= 1;
-                    CHAT_BUFFER[CHAT_BUFFERLEN as usize] = 0;
-                } else {
-                    CHAT_BUFFERLEN -= 1;
-                    CHAT_BUFFER[CHAT_BUFFERLEN as usize] = 0;
+        if ks.chat_type != CT_PERSON && ks.chat_type != CT_TELL {
+            cbuf_add_text("\"");
+        }
+        cbuf_add_text("\n");
+
+        // SAFETY: CLS is a console.rs static mut, not yet wrapped
+        unsafe { CLS.key_dest = KeyDest::Game; }
+        ks.chat_bufferlen = 0;
+        ks.chat_buffer[0] = 0;
+        ks.chat_backedit = 0;
+        return;
+    }
+
+    if key == K_ESCAPE {
+        // SAFETY: CLS is a console.rs static mut, not yet wrapped
+        unsafe { CLS.key_dest = KeyDest::Game; }
+        ks.chat_bufferlen = 0;
+        ks.chat_buffer[0] = 0;
+        ks.chat_backedit = 0;
+        return;
+    }
+
+    if key == K_BACKSPACE {
+        if ks.chat_bufferlen > 0 {
+            if ks.chat_backedit != 0 {
+                let start = (ks.chat_bufferlen - ks.chat_backedit - 1) as usize;
+                if ks.chat_bufferlen - ks.chat_backedit == 0 {
+                    return;
                 }
+                for i in start..ks.chat_bufferlen as usize {
+                    ks.chat_buffer[i] = if i + 1 < MAXCMDLINE { ks.chat_buffer[i + 1] } else { 0 };
+                }
+                ks.chat_bufferlen -= 1;
+                let idx = ks.chat_bufferlen as usize;
+                ks.chat_buffer[idx] = 0;
+            } else {
+                ks.chat_bufferlen -= 1;
+                let idx = ks.chat_bufferlen as usize;
+                ks.chat_buffer[idx] = 0;
             }
-            return;
         }
+        return;
+    }
 
-        if key == K_DEL {
-            if CHAT_BUFFERLEN > 0 && CHAT_BACKEDIT > 0 {
-                let start = (CHAT_BUFFERLEN - CHAT_BACKEDIT) as usize;
-                for i in start..CHAT_BUFFERLEN as usize {
-                    CHAT_BUFFER[i] = if i + 1 < MAXCMDLINE { CHAT_BUFFER[i + 1] } else { 0 };
-                }
-                CHAT_BACKEDIT -= 1;
-                CHAT_BUFFERLEN -= 1;
-                CHAT_BUFFER[CHAT_BUFFERLEN as usize] = 0;
+    if key == K_DEL {
+        if ks.chat_bufferlen > 0 && ks.chat_backedit > 0 {
+            let start = (ks.chat_bufferlen - ks.chat_backedit) as usize;
+            for i in start..ks.chat_bufferlen as usize {
+                ks.chat_buffer[i] = if i + 1 < MAXCMDLINE { ks.chat_buffer[i + 1] } else { 0 };
             }
-            return;
+            ks.chat_backedit -= 1;
+            ks.chat_bufferlen -= 1;
+            let idx = ks.chat_bufferlen as usize;
+            ks.chat_buffer[idx] = 0;
         }
+        return;
+    }
 
-        if key == K_LEFTARROW {
-            if CHAT_BUFFERLEN > 0 {
-                CHAT_BACKEDIT += 1;
-                if CHAT_BACKEDIT > CHAT_BUFFERLEN {
-                    CHAT_BACKEDIT = CHAT_BUFFERLEN;
-                }
-                if CHAT_BACKEDIT < 0 {
-                    CHAT_BACKEDIT = 0;
-                }
+    if key == K_LEFTARROW {
+        if ks.chat_bufferlen > 0 {
+            ks.chat_backedit += 1;
+            if ks.chat_backedit > ks.chat_bufferlen {
+                ks.chat_backedit = ks.chat_bufferlen;
             }
-            return;
-        }
-
-        if key == K_RIGHTARROW {
-            if CHAT_BUFFERLEN > 0 {
-                CHAT_BACKEDIT -= 1;
-                if CHAT_BACKEDIT > CHAT_BUFFERLEN {
-                    CHAT_BACKEDIT = CHAT_BUFFERLEN;
-                }
-                if CHAT_BACKEDIT < 0 {
-                    CHAT_BACKEDIT = 0;
-                }
+            if ks.chat_backedit < 0 {
+                ks.chat_backedit = 0;
             }
-            return;
         }
+        return;
+    }
 
-        // non printable
-        if !(32..=127).contains(&key) {
-            return;
-        }
-        // all full
-        if CHAT_BUFFERLEN as usize == MAXCMDLINE - 1 {
-            return;
-        }
-
-        if CHAT_BACKEDIT != 0 {
-            // insert character
-            let mut i = CHAT_BUFFERLEN as usize;
-            let insert_pos = (CHAT_BUFFERLEN - CHAT_BACKEDIT) as usize;
-            while i > insert_pos {
-                if i < MAXCMDLINE {
-                    CHAT_BUFFER[i] = CHAT_BUFFER[i - 1];
-                }
-                i -= 1;
+    if key == K_RIGHTARROW {
+        if ks.chat_bufferlen > 0 {
+            ks.chat_backedit -= 1;
+            if ks.chat_backedit > ks.chat_bufferlen {
+                ks.chat_backedit = ks.chat_bufferlen;
             }
-            CHAT_BUFFER[insert_pos] = key as u8;
-            CHAT_BUFFERLEN += 1;
-            CHAT_BUFFER[CHAT_BUFFERLEN as usize] = 0;
-        } else {
-            CHAT_BUFFER[CHAT_BUFFERLEN as usize] = key as u8;
-            CHAT_BUFFERLEN += 1;
-            CHAT_BUFFER[CHAT_BUFFERLEN as usize] = 0;
+            if ks.chat_backedit < 0 {
+                ks.chat_backedit = 0;
+            }
         }
+        return;
+    }
+
+    // non printable
+    if !(32..=127).contains(&key) {
+        return;
+    }
+    // all full
+    if ks.chat_bufferlen as usize == MAXCMDLINE - 1 {
+        return;
+    }
+
+    if ks.chat_backedit != 0 {
+        // insert character
+        let mut i = ks.chat_bufferlen as usize;
+        let insert_pos = (ks.chat_bufferlen - ks.chat_backedit) as usize;
+        while i > insert_pos {
+            if i < MAXCMDLINE {
+                ks.chat_buffer[i] = ks.chat_buffer[i - 1];
+            }
+            i -= 1;
+        }
+        ks.chat_buffer[insert_pos] = key as u8;
+        ks.chat_bufferlen += 1;
+        let idx = ks.chat_bufferlen as usize;
+        ks.chat_buffer[idx] = 0;
+    } else {
+        let idx = ks.chat_bufferlen as usize;
+        ks.chat_buffer[idx] = key as u8;
+        ks.chat_bufferlen += 1;
+        let idx = ks.chat_bufferlen as usize;
+        ks.chat_buffer[idx] = 0;
     }
 }
 
@@ -849,13 +944,11 @@ pub fn key_set_binding(keynum: i32, binding: &str) {
         return;
     }
 
-    // SAFETY: single-threaded engine
-    unsafe {
-        if binding.is_empty() {
-            KEYBINDINGS[keynum as usize] = None;
-        } else {
-            KEYBINDINGS[keynum as usize] = Some(binding.to_string());
-        }
+    let mut ks = ks();
+    if binding.is_empty() {
+        ks.keybindings[keynum as usize] = None;
+    } else {
+        ks.keybindings[keynum as usize] = Some(binding.to_string());
     }
 }
 
@@ -879,12 +972,10 @@ fn key_unbind_f() {
 }
 
 fn key_unbindall_f() {
+    let mut ks = ks();
     for i in 0..256 {
-        // SAFETY: single-threaded engine
-        unsafe {
-            if KEYBINDINGS[i].is_some() {
-                key_set_binding(i as i32, "");
-            }
+        if ks.keybindings[i].is_some() {
+            ks.keybindings[i] = None;
         }
     }
 }
@@ -900,19 +991,17 @@ fn key_bindlist_f() {
         "*".to_string()
     };
 
+    let ks = ks();
     let mut j = 0;
     let mut k = 0;
     for i in 0..256 {
         let t = key_keynum_to_string(i);
         if !wildcardfit("<*>", &t) {
             if wildcardfit(&s, &t) {
-                // SAFETY: single-threaded engine
-                unsafe {
-                    if let Some(ref binding) = KEYBINDINGS[i as usize] {
-                        com_printf(&format!("{} \"{}\"\n", t, binding));
-                    } else {
-                        com_printf(&format!("{} \"\"\n", t));
-                    }
+                if let Some(ref binding) = ks.keybindings[i as usize] {
+                    com_printf(&format!("{} \"{}\"\n", t, binding));
+                } else {
+                    com_printf(&format!("{} \"\"\n", t));
                 }
                 k += 1;
             }
@@ -942,13 +1031,11 @@ fn key_bind_f() {
     }
 
     if c == 2 {
-        // SAFETY: single-threaded engine
-        unsafe {
-            if let Some(ref binding) = KEYBINDINGS[b as usize] {
-                com_printf(&format!("\"{}\" = \"{}\"\n", cmd_argv(1), binding));
-            } else {
-                com_printf(&format!("\"{}\" is not bound\n", cmd_argv(1)));
-            }
+        let ks = ks();
+        if let Some(ref binding) = ks.keybindings[b as usize] {
+            com_printf(&format!("\"{}\" = \"{}\"\n", cmd_argv(1), binding));
+        } else {
+            com_printf(&format!("\"{}\" is not bound\n", cmd_argv(1)));
         }
         return;
     }
@@ -971,13 +1058,11 @@ fn key_bind_f() {
 
 /// Write all key bindings to a file.
 pub fn key_write_bindings(f: &mut dyn std::io::Write) {
-    // SAFETY: single-threaded engine
-    unsafe {
-        for i in 0..256 {
-            if let Some(ref binding) = KEYBINDINGS[i] {
-                if !binding.is_empty() {
-                    let _ = writeln!(f, "bind {} \"{}\"", key_keynum_to_string(i as i32), binding);
-                }
+    let ks = ks();
+    for i in 0..256 {
+        if let Some(ref binding) = ks.keybindings[i] {
+            if !binding.is_empty() {
+                let _ = writeln!(f, "bind {} \"{}\"", key_keynum_to_string(i as i32), binding);
             }
         }
     }
@@ -989,94 +1074,96 @@ pub fn key_write_bindings(f: &mut dyn std::io::Write) {
 
 /// Initialize the key system.
 pub fn key_init() {
-    // SAFETY: single-threaded engine
-    unsafe {
+    {
+        let mut ks = ks();
+
+        // Initialize key lines
         for i in 0..32 {
-            KEY_LINES[i][0] = b']';
-            KEY_LINES[i][1] = 0;
+            ks.key_lines[i][0] = b']';
+            ks.key_lines[i][1] = 0;
         }
-        KEY_LINEPOS = 1;
+        ks.key_linepos = 1;
 
         // init ascii characters in console mode
         for i in 32..128 {
-            CONSOLEKEYS[i] = true;
+            ks.consolekeys[i] = true;
         }
-        CONSOLEKEYS[K_ENTER as usize] = true;
-        CONSOLEKEYS[K_KP_ENTER as usize] = true;
-        CONSOLEKEYS[K_TAB as usize] = true;
-        CONSOLEKEYS[K_LEFTARROW as usize] = true;
-        CONSOLEKEYS[K_KP_LEFTARROW as usize] = true;
-        CONSOLEKEYS[K_RIGHTARROW as usize] = true;
-        CONSOLEKEYS[K_KP_RIGHTARROW as usize] = true;
-        CONSOLEKEYS[K_UPARROW as usize] = true;
-        CONSOLEKEYS[K_KP_UPARROW as usize] = true;
-        CONSOLEKEYS[K_DOWNARROW as usize] = true;
-        CONSOLEKEYS[K_KP_DOWNARROW as usize] = true;
-        CONSOLEKEYS[K_BACKSPACE as usize] = true;
-        CONSOLEKEYS[K_DEL as usize] = true;
-        CONSOLEKEYS[K_HOME as usize] = true;
-        CONSOLEKEYS[K_KP_HOME as usize] = true;
-        CONSOLEKEYS[K_END as usize] = true;
-        CONSOLEKEYS[K_KP_END as usize] = true;
-        CONSOLEKEYS[K_PGUP as usize] = true;
-        CONSOLEKEYS[K_KP_PGUP as usize] = true;
-        CONSOLEKEYS[K_PGDN as usize] = true;
-        CONSOLEKEYS[K_KP_PGDN as usize] = true;
-        CONSOLEKEYS[K_SHIFT as usize] = true;
-        CONSOLEKEYS[K_INS as usize] = true;
-        CONSOLEKEYS[K_KP_INS as usize] = true;
-        CONSOLEKEYS[K_KP_DEL as usize] = true;
-        CONSOLEKEYS[K_KP_SLASH as usize] = true;
-        CONSOLEKEYS[K_KP_PLUS as usize] = true;
-        CONSOLEKEYS[K_KP_MINUS as usize] = true;
-        CONSOLEKEYS[K_KP_5 as usize] = true;
+        ks.consolekeys[K_ENTER as usize] = true;
+        ks.consolekeys[K_KP_ENTER as usize] = true;
+        ks.consolekeys[K_TAB as usize] = true;
+        ks.consolekeys[K_LEFTARROW as usize] = true;
+        ks.consolekeys[K_KP_LEFTARROW as usize] = true;
+        ks.consolekeys[K_RIGHTARROW as usize] = true;
+        ks.consolekeys[K_KP_RIGHTARROW as usize] = true;
+        ks.consolekeys[K_UPARROW as usize] = true;
+        ks.consolekeys[K_KP_UPARROW as usize] = true;
+        ks.consolekeys[K_DOWNARROW as usize] = true;
+        ks.consolekeys[K_KP_DOWNARROW as usize] = true;
+        ks.consolekeys[K_BACKSPACE as usize] = true;
+        ks.consolekeys[K_DEL as usize] = true;
+        ks.consolekeys[K_HOME as usize] = true;
+        ks.consolekeys[K_KP_HOME as usize] = true;
+        ks.consolekeys[K_END as usize] = true;
+        ks.consolekeys[K_KP_END as usize] = true;
+        ks.consolekeys[K_PGUP as usize] = true;
+        ks.consolekeys[K_KP_PGUP as usize] = true;
+        ks.consolekeys[K_PGDN as usize] = true;
+        ks.consolekeys[K_KP_PGDN as usize] = true;
+        ks.consolekeys[K_SHIFT as usize] = true;
+        ks.consolekeys[K_INS as usize] = true;
+        ks.consolekeys[K_KP_INS as usize] = true;
+        ks.consolekeys[K_KP_DEL as usize] = true;
+        ks.consolekeys[K_KP_SLASH as usize] = true;
+        ks.consolekeys[K_KP_PLUS as usize] = true;
+        ks.consolekeys[K_KP_MINUS as usize] = true;
+        ks.consolekeys[K_KP_5 as usize] = true;
 
         // mattx86: mouse_wheel
-        CONSOLEKEYS[K_MWHEELUP as usize] = true;
-        CONSOLEKEYS[K_MWHEELDOWN as usize] = true;
+        ks.consolekeys[K_MWHEELUP as usize] = true;
+        ks.consolekeys[K_MWHEELDOWN as usize] = true;
 
-        CONSOLEKEYS[b'`' as usize] = false;
-        CONSOLEKEYS[b'~' as usize] = false;
+        ks.consolekeys[b'`' as usize] = false;
+        ks.consolekeys[b'~' as usize] = false;
 
         for i in 0..256 {
-            KEYSHIFT[i] = i as i32;
+            ks.keyshift[i] = i as i32;
         }
         for i in b'a'..=b'z' {
-            KEYSHIFT[i as usize] = (i - b'a' + b'A') as i32;
+            ks.keyshift[i as usize] = (i - b'a' + b'A') as i32;
         }
-        KEYSHIFT[b'1' as usize] = b'!' as i32;
-        KEYSHIFT[b'2' as usize] = b'@' as i32;
-        KEYSHIFT[b'3' as usize] = b'#' as i32;
-        KEYSHIFT[b'4' as usize] = b'$' as i32;
-        KEYSHIFT[b'5' as usize] = b'%' as i32;
-        KEYSHIFT[b'6' as usize] = b'^' as i32;
-        KEYSHIFT[b'7' as usize] = b'&' as i32;
-        KEYSHIFT[b'8' as usize] = b'*' as i32;
-        KEYSHIFT[b'9' as usize] = b'(' as i32;
-        KEYSHIFT[b'0' as usize] = b')' as i32;
-        KEYSHIFT[b'-' as usize] = b'_' as i32;
-        KEYSHIFT[b'=' as usize] = b'+' as i32;
-        KEYSHIFT[b',' as usize] = b'<' as i32;
-        KEYSHIFT[b'.' as usize] = b'>' as i32;
-        KEYSHIFT[b'/' as usize] = b'?' as i32;
-        KEYSHIFT[b';' as usize] = b':' as i32;
-        KEYSHIFT[b'\'' as usize] = b'"' as i32;
-        KEYSHIFT[b'[' as usize] = b'{' as i32;
-        KEYSHIFT[b']' as usize] = b'}' as i32;
-        KEYSHIFT[b'`' as usize] = b'~' as i32;
-        KEYSHIFT[b'\\' as usize] = b'|' as i32;
+        ks.keyshift[b'1' as usize] = b'!' as i32;
+        ks.keyshift[b'2' as usize] = b'@' as i32;
+        ks.keyshift[b'3' as usize] = b'#' as i32;
+        ks.keyshift[b'4' as usize] = b'$' as i32;
+        ks.keyshift[b'5' as usize] = b'%' as i32;
+        ks.keyshift[b'6' as usize] = b'^' as i32;
+        ks.keyshift[b'7' as usize] = b'&' as i32;
+        ks.keyshift[b'8' as usize] = b'*' as i32;
+        ks.keyshift[b'9' as usize] = b'(' as i32;
+        ks.keyshift[b'0' as usize] = b')' as i32;
+        ks.keyshift[b'-' as usize] = b'_' as i32;
+        ks.keyshift[b'=' as usize] = b'+' as i32;
+        ks.keyshift[b',' as usize] = b'<' as i32;
+        ks.keyshift[b'.' as usize] = b'>' as i32;
+        ks.keyshift[b'/' as usize] = b'?' as i32;
+        ks.keyshift[b';' as usize] = b':' as i32;
+        ks.keyshift[b'\'' as usize] = b'"' as i32;
+        ks.keyshift[b'[' as usize] = b'{' as i32;
+        ks.keyshift[b']' as usize] = b'}' as i32;
+        ks.keyshift[b'`' as usize] = b'~' as i32;
+        ks.keyshift[b'\\' as usize] = b'|' as i32;
 
-        MENUBOUND[K_ESCAPE as usize] = true;
+        ks.menubound[K_ESCAPE as usize] = true;
         for i in 0..12 {
-            MENUBOUND[(K_F1 + i) as usize] = true;
+            ks.menubound[(K_F1 + i) as usize] = true;
         }
-
-        // register our functions
-        cmd_add_command("bind", key_bind_f);
-        cmd_add_command("unbind", key_unbind_f);
-        cmd_add_command("unbindall", key_unbindall_f);
-        cmd_add_command("bindlist", key_bindlist_f);
     }
+
+    // register our functions
+    cmd_add_command("bind", key_bind_f);
+    cmd_add_command("unbind", key_unbind_f);
+    cmd_add_command("unbindall", key_unbindall_f);
+    cmd_add_command("bindlist", key_bindlist_f);
 }
 
 // ============================================================
@@ -1086,12 +1173,13 @@ pub fn key_init() {
 /// Called by the system between frames for both key up and key down events.
 /// Should NOT be called during an interrupt!
 pub fn key_event(key: i32, down: bool, time: u32) {
-    // SAFETY: single-threaded engine
+    let mut ks = ks();
+    // SAFETY: console.rs statics (CL, CLS) not yet wrapped
     unsafe {
         // hack for modal presses
-        if KEY_WAITING == -1 {
+        if ks.key_waiting == -1 {
             if down {
-                KEY_WAITING = key;
+                ks.key_waiting = key;
             }
             return;
         }
@@ -1099,7 +1187,7 @@ pub fn key_event(key: i32, down: bool, time: u32) {
         // update auto-repeat status
         if down {
             if key >= 200
-                && KEYBINDINGS[key as usize].is_none()
+                && ks.keybindings[key as usize].is_none()
                 && key != K_MWHEELUP
                 && key != K_MWHEELDOWN
             {
@@ -1109,18 +1197,19 @@ pub fn key_event(key: i32, down: bool, time: u32) {
                 ));
             }
         } else {
-            KEY_REPEATS[key as usize] = 0;
+            ks.key_repeats[key as usize] = 0;
         }
 
         if key == K_SHIFT {
-            SHIFT_DOWN = down;
+            ks.shift_down = down;
         }
 
-        // console key is hardcoded
+        // console key is hardcoded — drop lock before dispatch
         if key == b'`' as i32 || key == b'~' as i32 {
             if !down {
                 return;
             }
+            drop(ks);
             con_toggle_console_f();
             return;
         }
@@ -1136,7 +1225,7 @@ pub fn key_event(key: i32, down: bool, time: u32) {
                 }
             }
 
-        // menu key is hardcoded
+        // menu key is hardcoded — drop lock before dispatch
         if key == K_ESCAPE {
             if !down {
                 return;
@@ -1147,10 +1236,13 @@ pub fn key_event(key: i32, down: bool, time: u32) {
             if CL.frame.playerstate.stats[STAT_LAYOUTS] != 0
                 && CLS.key_dest == KeyDest::Game
             {
+                drop(ks);
                 myq2_common::cmd::cbuf_add_text("cmd putaway\n");
                 return;
             }
-            match CLS.key_dest {
+            let key_dest = CLS.key_dest;
+            drop(ks);
+            match key_dest {
                 KeyDest::Message => {
                     key_message(key);
                 }
@@ -1165,29 +1257,29 @@ pub fn key_event(key: i32, down: bool, time: u32) {
         }
 
         // track if any key is down for BUTTON_ANY
-        KEYDOWN[key as usize] = down;
+        ks.keydown[key as usize] = down;
         if down {
-            if KEY_REPEATS[key as usize] == 1 {
-                ANYKEYDOWN += 1;
+            if ks.key_repeats[key as usize] == 1 {
+                ks.anykeydown += 1;
             }
         } else {
-            ANYKEYDOWN -= 1;
-            if ANYKEYDOWN < 0 {
-                ANYKEYDOWN = 0;
+            ks.anykeydown -= 1;
+            if ks.anykeydown < 0 {
+                ks.anykeydown = 0;
             }
         }
 
         // key up events only generate commands for button commands (leading +)
         if !down {
-            if let Some(ref kb) = KEYBINDINGS[key as usize] {
+            if let Some(ref kb) = ks.keybindings[key as usize] {
                 if kb.starts_with('+') {
                     let cmd = format!("-{} {} {}\n", &kb[1..], key, time);
                     cbuf_add_text(&cmd);
                 }
             }
-            if KEYSHIFT[key as usize] != key {
-                let shifted = KEYSHIFT[key as usize] as usize;
-                if let Some(ref kb) = KEYBINDINGS[shifted] {
+            if ks.keyshift[key as usize] != key {
+                let shifted = ks.keyshift[key as usize] as usize;
+                if let Some(ref kb) = ks.keybindings[shifted] {
                     if kb.starts_with('+') {
                         let cmd = format!("-{} {} {}\n", &kb[1..], key, time);
                         cbuf_add_text(&cmd);
@@ -1198,17 +1290,19 @@ pub fn key_event(key: i32, down: bool, time: u32) {
         }
 
         // if not a consolekey, send to the interpreter
-        if (CLS.key_dest == KeyDest::Menu && MENUBOUND[key as usize])
-            || (CLS.key_dest == KeyDest::Console && !CONSOLEKEYS[key as usize])
+        if (CLS.key_dest == KeyDest::Menu && ks.menubound[key as usize])
+            || (CLS.key_dest == KeyDest::Console && !ks.consolekeys[key as usize])
             || (CLS.key_dest == KeyDest::Game
-                && (CLS.state == ConnState::Active || !CONSOLEKEYS[key as usize]))
+                && (CLS.state == ConnState::Active || !ks.consolekeys[key as usize]))
         {
-            if let Some(ref kb) = KEYBINDINGS[key as usize] {
+            if let Some(ref kb) = ks.keybindings[key as usize] {
                 if kb.starts_with('+') {
                     let cmd = format!("{} {} {}\n", kb, key, time);
                     cbuf_add_text(&cmd);
                 } else {
-                    cbuf_add_text(kb);
+                    let kb_clone = kb.clone();
+                    drop(ks);
+                    cbuf_add_text(&kb_clone);
                     cbuf_add_text("\n");
                 }
             }
@@ -1219,12 +1313,14 @@ pub fn key_event(key: i32, down: bool, time: u32) {
             return;
         }
 
+        // Apply shift, then dispatch — drop lock before dispatch
         let mut key = key;
-        if SHIFT_DOWN {
-            key = KEYSHIFT[key as usize];
+        if ks.shift_down {
+            key = ks.keyshift[key as usize];
         }
-
-        match CLS.key_dest {
+        let key_dest = CLS.key_dest;
+        drop(ks);
+        match key_dest {
             KeyDest::Message => {
                 key_message(key);
             }
@@ -1244,17 +1340,22 @@ pub fn key_event(key: i32, down: bool, time: u32) {
 
 /// Clear all key states.
 pub fn key_clear_states() {
-    // SAFETY: single-threaded engine
-    unsafe {
-        ANYKEYDOWN = 0;
-
-        for i in 0..256 {
-            if KEYDOWN[i] || KEY_REPEATS[i] != 0 {
-                key_event(i as i32, false, 0);
-            }
-            KEYDOWN[i] = false;
-            KEY_REPEATS[i] = 0;
-        }
+    let keys_to_release: Vec<i32>;
+    {
+        let ks = ks();
+        keys_to_release = (0..256)
+            .filter(|&i| ks.keydown[i] || ks.key_repeats[i] != 0)
+            .map(|i| i as i32)
+            .collect();
+    }
+    for key in keys_to_release {
+        key_event(key, false, 0);
+    }
+    let mut ks = ks();
+    ks.anykeydown = 0;
+    for i in 0..256 {
+        ks.keydown[i] = false;
+        ks.key_repeats[i] = 0;
     }
 }
 
@@ -1267,21 +1368,22 @@ pub fn key_is_down(key: i32) -> bool {
     if key < 0 || key >= 256 {
         return false;
     }
-    // SAFETY: single-threaded engine
-    unsafe { KEYDOWN[key as usize] }
+    let ks = ks();
+    ks.keydown[key as usize]
 }
 
 /// Wait for a key press and return it.
 pub fn key_get_key() -> i32 {
-    // SAFETY: single-threaded engine
-    unsafe {
-        KEY_WAITING = -1;
-
-        while KEY_WAITING == -1 {
-            sys_send_key_events();
+    {
+        let mut ks = ks();
+        ks.key_waiting = -1;
+    }
+    loop {
+        sys_send_key_events();
+        let ks = ks();
+        if ks.key_waiting != -1 {
+            return ks.key_waiting;
         }
-
-        KEY_WAITING
     }
 }
 
@@ -1493,23 +1595,27 @@ mod tests {
 
     #[test]
     fn test_key_set_binding_basic() {
-        unsafe {
-            KEYBINDINGS[b'x' as usize] = None;
+        {
+            let mut ks = ks();
+            ks.keybindings[b'x' as usize] = None;
         }
         key_set_binding(b'x' as i32, "+attack");
-        unsafe {
-            assert_eq!(KEYBINDINGS[b'x' as usize].as_deref(), Some("+attack"));
+        {
+            let ks = ks();
+            assert_eq!(ks.keybindings[b'x' as usize].as_deref(), Some("+attack"));
         }
     }
 
     #[test]
     fn test_key_set_binding_empty_clears() {
-        unsafe {
-            KEYBINDINGS[b'y' as usize] = Some("jump".to_string());
+        {
+            let mut ks = ks();
+            ks.keybindings[b'y' as usize] = Some("jump".to_string());
         }
         key_set_binding(b'y' as i32, "");
-        unsafe {
-            assert!(KEYBINDINGS[b'y' as usize].is_none());
+        {
+            let ks = ks();
+            assert!(ks.keybindings[b'y' as usize].is_none());
         }
     }
 
@@ -1525,8 +1631,9 @@ mod tests {
     fn test_key_set_binding_replace() {
         key_set_binding(b'z' as i32, "first");
         key_set_binding(b'z' as i32, "second");
-        unsafe {
-            assert_eq!(KEYBINDINGS[b'z' as usize].as_deref(), Some("second"));
+        {
+            let ks = ks();
+            assert_eq!(ks.keybindings[b'z' as usize].as_deref(), Some("second"));
         }
         // Cleanup
         key_set_binding(b'z' as i32, "");
@@ -1548,18 +1655,23 @@ mod tests {
         // Most keys should not be down by default
         // (may be modified by other tests, but basic sanity)
         // Pick a less-used key index
-        unsafe { KEYDOWN[255] = false; }
+        {
+            let mut ks = ks();
+            ks.keydown[255] = false;
+        }
         assert!(!key_is_down(255));
     }
 
     #[test]
     fn test_key_is_down_after_setting() {
-        unsafe {
-            KEYDOWN[254] = true;
+        {
+            let mut ks = ks();
+            ks.keydown[254] = true;
         }
         assert!(key_is_down(254));
-        unsafe {
-            KEYDOWN[254] = false;
+        {
+            let mut ks = ks();
+            ks.keydown[254] = false;
         }
         assert!(!key_is_down(254));
     }
@@ -1661,9 +1773,10 @@ mod tests {
     #[test]
     fn test_key_write_bindings() {
         // Set up a binding
-        unsafe {
-            KEYBINDINGS[b'q' as usize] = Some("+forward".to_string());
-            KEYBINDINGS[b'w' as usize] = None;
+        {
+            let mut ks = ks();
+            ks.keybindings[b'q' as usize] = Some("+forward".to_string());
+            ks.keybindings[b'w' as usize] = None;
         }
         let mut buf: Vec<u8> = Vec::new();
         key_write_bindings(&mut buf);

@@ -155,11 +155,7 @@ impl TimelineFrameSync {
 
     /// Get submit info for graphics queue with timeline semaphore.
     pub fn graphics_submit_info(&self) -> (vk::Semaphore, u64, u64) {
-        let wait_value = if self.frame_number > 1 {
-            self.frame_number - 1
-        } else {
-            0
-        };
+        let wait_value = self.frame_number.saturating_sub(1);
         let signal_value = self.frame_number;
 
         (self.graphics.handle(), wait_value, signal_value)

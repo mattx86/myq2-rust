@@ -832,7 +832,9 @@ impl CModelContext {
             panic!("Map has too large entity lump");
         }
         self.numentitychars = len;
-        self.map_entitystring = String::from_utf8_lossy(&data[ofs..ofs + len]).to_string();
+        let raw = String::from_utf8_lossy(&data[ofs..ofs + len]).to_string();
+        // BSP entity lumps include trailing null bytes; strip them
+        self.map_entitystring = raw.trim_end_matches('\0').to_string();
     }
 
     // ============================================================
@@ -871,9 +873,23 @@ impl CModelContext {
             return (0, 0);
         }
 
+        // Load file from disk if no buffer provided
+        let loaded;
         let data = match buf {
             Some(d) => d,
-            None => panic!("Couldn't load {}", name),
+            None => {
+                loaded = crate::files::fs_load_file(name);
+                match loaded.as_deref() {
+                    Some(d) => d,
+                    None => {
+                        crate::common::com_error(
+                            crate::q_shared::ERR_DROP,
+                            &format!("Couldn't load {}", name),
+                        );
+                        return (0, 0);
+                    }
+                }
+            }
         };
 
         // Simple checksum (sum of all u32 words)
@@ -1046,11 +1062,21 @@ impl CModelContext {
 
     pub fn inline_model(&self, name: &str) -> &CModel {
         if !name.starts_with('*') {
-            panic!("CM_InlineModel: bad name");
+            crate::common::com_error(crate::q_shared::ERR_DROP, "CM_InlineModel: bad name");
+            return &self.map_cmodels[0];
         }
-        let num: usize = name[1..].parse().expect("CM_InlineModel: bad number");
+        let num: usize = match name[1..].parse() {
+            Ok(n) => n,
+            Err(_) => {
+                crate::common::com_error(crate::q_shared::ERR_DROP,
+                    &format!("CM_InlineModel: bad number parse '{}'", name));
+                return &self.map_cmodels[0];
+            }
+        };
         if num < 1 || num >= self.numcmodels {
-            panic!("CM_InlineModel: bad number");
+            crate::common::com_error(crate::q_shared::ERR_DROP,
+                &format!("CM_InlineModel: bad number {} (numcmodels={})", num, self.numcmodels));
+            return &self.map_cmodels[0];
         }
         &self.map_cmodels[num]
     }

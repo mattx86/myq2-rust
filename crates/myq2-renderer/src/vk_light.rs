@@ -12,24 +12,36 @@ pub const DLIGHT_CUTOFF: f32 = 16.0;
 // DLIGHT_SURFACE_FIX and BETTER_DLIGHT_FALLOFF are defined in vk_local.rs
 
 // ============================================================
-// Module globals
+// Module state — protected by Mutex
 // ============================================================
 
-pub static mut r_dlightframecount: i32 = 0;
+/// All mutable light state grouped into a single struct.
+pub struct LightState {
+    pub r_dlightframecount: i32,
+    pub pointcolor: Vec3,
+    pub lightplane: *const CPlane,
+    pub lightspot: Vec3,
+    pub blocklights: [f32; 34 * 34 * 3],
+    pub temp_stain: DStain,
+}
 
-pub static mut pointcolor: Vec3 = [0.0; 3];
-pub static mut lightplane: *const CPlane = std::ptr::null();
-pub static mut lightspot: Vec3 = [0.0; 3];
+// SAFETY: CPlane pointer is valid for struct lifetime, all access serialized by Mutex.
+unsafe impl Send for LightState {}
 
-static mut S_BLOCKLIGHTS: [f32; 34 * 34 * 3] = [0.0; 34 * 34 * 3];
-
-static mut TEMP_STAIN: DStain = DStain {
-    origin: [0.0; 3],
-    color: [0.0; 3],
-    alpha: 0.0,
-    intensity: 0.0,
-    stain_type: StainType::Subtract,
-};
+static LIGHT_STATE: std::sync::Mutex<LightState> = std::sync::Mutex::new(LightState {
+    r_dlightframecount: 0,
+    pointcolor: [0.0; 3],
+    lightplane: std::ptr::null(),
+    lightspot: [0.0; 3],
+    blocklights: [0.0; 34 * 34 * 3],
+    temp_stain: DStain {
+        origin: [0.0; 3],
+        color: [0.0; 3],
+        alpha: 0.0,
+        intensity: 0.0,
+        stain_type: StainType::Subtract,
+    },
+});
 
 // ============================================================
 // Stain types
@@ -73,7 +85,7 @@ use myq2_common::qfiles::MAXLIGHTMAPS;
 ///
 /// # Safety
 /// Accesses world model surfaces and BSP node tree via raw pointers.
-pub unsafe fn r_mark_lights(light: &DLight, bit: i32, node: *mut MNode) {
+unsafe fn r_mark_lights(light: &DLight, bit: i32, dlight_framecount: i32, node: *mut MNode) {
     if node.is_null() {
         return;
     }
@@ -87,11 +99,11 @@ pub unsafe fn r_mark_lights(light: &DLight, bit: i32, node: *mut MNode) {
     let dist = dot_product(&light.origin, &splitplane.normal) - splitplane.dist;
 
     if dist > light.intensity - DLIGHT_CUTOFF {
-        r_mark_lights(light, bit, node_ref.children[0]);
+        r_mark_lights(light, bit, dlight_framecount, node_ref.children[0]);
         return;
     }
     if dist < -light.intensity + DLIGHT_CUTOFF {
-        r_mark_lights(light, bit, node_ref.children[1]);
+        r_mark_lights(light, bit, dlight_framecount, node_ref.children[1]);
         return;
     }
 
@@ -109,23 +121,23 @@ pub unsafe fn r_mark_lights(light: &DLight, bit: i32, node: *mut MNode) {
                 continue;
             }
 
-            if surf.dlightframe != r_dlightframecount {
+            if surf.dlightframe != dlight_framecount {
                 surf.dlightbits = bit;
-                surf.dlightframe = r_dlightframecount;
+                surf.dlightframe = dlight_framecount;
             } else {
                 surf.dlightbits |= bit;
             }
         } else {
-            if surf.dlightframe != r_dlightframecount {
+            if surf.dlightframe != dlight_framecount {
                 surf.dlightbits = 0;
-                surf.dlightframe = r_dlightframecount;
+                surf.dlightframe = dlight_framecount;
             }
             surf.dlightbits |= bit;
         }
     }
 
-    r_mark_lights(light, bit, node_ref.children[0]);
-    r_mark_lights(light, bit, node_ref.children[1]);
+    r_mark_lights(light, bit, dlight_framecount, node_ref.children[0]);
+    r_mark_lights(light, bit, dlight_framecount, node_ref.children[1]);
 }
 
 /// Push dynamic lights into the BSP tree.
@@ -133,19 +145,24 @@ pub unsafe fn r_mark_lights(light: &DLight, bit: i32, node: *mut MNode) {
 /// # Safety
 /// Accesses global renderer state.
 pub unsafe fn r_push_dlights() {
-    if crate::vk_rmain::VK_DYNAMIC.value == 0.0 {
+    if crate::vk_rmain::rcvars().vk_dynamic.value == 0.0 {
         return;
     }
-    if crate::vk_rmain::VK_FLASHBLEND.value != 0.0 {
+    if crate::vk_rmain::rcvars().vk_flashblend.value != 0.0 {
         return;
     }
 
-    r_dlightframecount = r_framecount + 1;
+    let dlight_framecount = {
+        let mut ls = LIGHT_STATE.lock().unwrap();
+        ls.r_dlightframecount = rfs().r_framecount + 1;
+        ls.r_dlightframecount
+    };
 
-    for i in 0..r_newrefdef.num_dlights {
+    for i in 0..rfs().r_newrefdef.num_dlights {
         r_mark_lights(
-            r_newrefdef.dlight(i as usize),
+            rfs().r_newrefdef.dlight(i as usize),
             1 << i,
+            dlight_framecount,
             r_worldmodel_nodes(),
         );
     }
@@ -159,7 +176,7 @@ pub unsafe fn r_push_dlights() {
 ///
 /// # Safety
 /// Accesses world model BSP data via raw pointers.
-pub unsafe fn recursive_light_point(node: *const MNode, start: &Vec3, end: &Vec3) -> i32 {
+unsafe fn recursive_light_point(ls: &mut LightState, node: *const MNode, start: &Vec3, end: &Vec3) -> i32 {
     if node.is_null() {
         return -1;
     }
@@ -176,7 +193,7 @@ pub unsafe fn recursive_light_point(node: *const MNode, start: &Vec3, end: &Vec3
     let side = if front < 0.0 { 1usize } else { 0usize };
 
     if (back < 0.0) == (front < 0.0) {
-        return recursive_light_point(node_ref.children[side], start, end);
+        return recursive_light_point(ls, node_ref.children[side], start, end);
     }
 
     let frac = front / (front - back);
@@ -187,7 +204,7 @@ pub unsafe fn recursive_light_point(node: *const MNode, start: &Vec3, end: &Vec3
     ];
 
     // go down front side
-    let r = recursive_light_point(node_ref.children[side], start, &mid);
+    let r = recursive_light_point(ls, node_ref.children[side], start, &mid);
     if r >= 0 {
         return r; // hit something
     }
@@ -197,8 +214,8 @@ pub unsafe fn recursive_light_point(node: *const MNode, start: &Vec3, end: &Vec3
     }
 
     // check for impact on this node
-    lightspot = mid;
-    lightplane = node_ref.plane;
+    ls.lightspot = mid;
+    ls.lightplane = node_ref.plane;
 
     let surfaces = r_worldmodel_surfaces();
     for i in 0..node_ref.numsurfaces {
@@ -236,7 +253,7 @@ pub unsafe fn recursive_light_point(node: *const MNode, start: &Vec3, end: &Vec3
         let ds = ds >> 4;
         let dt = dt >> 4;
 
-        pointcolor = [0.0; 3];
+        ls.pointcolor = [0.0; 3];
         if !surf.samples.is_null() {
             let mut lightmap = surf.samples;
             let width = (surf.extents[0] as i32 >> 4) + 1;
@@ -248,16 +265,16 @@ pub unsafe fn recursive_light_point(node: *const MNode, start: &Vec3, end: &Vec3
                     break;
                 }
 
-                let style = &r_newrefdef.lightstyle(surf.styles[maps] as usize);
+                let style = &rfs().r_newrefdef.lightstyle(surf.styles[maps] as usize);
                 let scale = [
-                    crate::vk_rmain::VK_MODULATE_CVAR.value * style.rgb[0],
-                    crate::vk_rmain::VK_MODULATE_CVAR.value * style.rgb[1],
-                    crate::vk_rmain::VK_MODULATE_CVAR.value * style.rgb[2],
+                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[0],
+                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[1],
+                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[2],
                 ];
 
-                pointcolor[0] += *lightmap.offset(0) as f32 * scale[0] * (1.0 / 255.0);
-                pointcolor[1] += *lightmap.offset(1) as f32 * scale[1] * (1.0 / 255.0);
-                pointcolor[2] += *lightmap.offset(2) as f32 * scale[2] * (1.0 / 255.0);
+                ls.pointcolor[0] += *lightmap.offset(0) as f32 * scale[0] * (1.0 / 255.0);
+                ls.pointcolor[1] += *lightmap.offset(1) as f32 * scale[1] * (1.0 / 255.0);
+                ls.pointcolor[2] += *lightmap.offset(2) as f32 * scale[2] * (1.0 / 255.0);
 
                 lightmap = lightmap.offset(
                     (3 * ((surf.extents[0] as i32 >> 4) + 1)
@@ -271,7 +288,7 @@ pub unsafe fn recursive_light_point(node: *const MNode, start: &Vec3, end: &Vec3
 
     // go down back side
     let other_side = if side == 0 { 1 } else { 0 };
-    recursive_light_point(node_ref.children[other_side], &mid, end)
+    recursive_light_point(ls, node_ref.children[other_side], &mid, end)
 }
 
 /// Stain a BSP node recursively.
@@ -438,25 +455,27 @@ pub unsafe fn r_light_point(p: &Vec3, color: &mut Vec3) {
 
     let end = [p[0], p[1], p[2] - 2048.0];
 
-    let r = recursive_light_point(r_worldmodel_nodes() as *const MNode, p, &end);
+    let mut ls = LIGHT_STATE.lock().unwrap();
+    let r = recursive_light_point(&mut ls, r_worldmodel_nodes() as *const MNode, p, &end);
 
     if r == -1 {
         *color = vec3_origin;
     } else {
-        *color = pointcolor;
+        *color = ls.pointcolor;
     }
+    drop(ls);
 
     // add dynamic lights
-    for lnum in 0..r_newrefdef.num_dlights {
-        let dl = &r_newrefdef.dlight(lnum as usize);
-        let dist = vector_subtract(&(*currententity).origin, &dl.origin);
+    for lnum in 0..rfs().r_newrefdef.num_dlights {
+        let dl = &rfs().r_newrefdef.dlight(lnum as usize);
+        let dist = vector_subtract(&(*rfs().currententity).origin, &dl.origin);
         let add = (dl.intensity - vector_length(&dist)) * (1.0 / 256.0);
         if add > 0.0 {
             *color = vector_ma(color, add, &dl.color);
         }
     }
 
-    *color = vector_scale(color, crate::vk_rmain::VK_MODULATE_CVAR.value);
+    *color = vector_scale(color, crate::vk_rmain::rcvars().vk_modulate.value);
 }
 
 // ============================================================
@@ -467,17 +486,17 @@ pub unsafe fn r_light_point(p: &Vec3, color: &mut Vec3) {
 ///
 /// # Safety
 /// Accesses global blocklights buffer and renderer state.
-pub unsafe fn r_add_dynamic_lights(surf: &MSurface) {
+unsafe fn r_add_dynamic_lights(ls: &mut LightState, surf: &MSurface) {
     let smax = (surf.extents[0] as i32 >> 4) + 1;
     let tmax = (surf.extents[1] as i32 >> 4) + 1;
     let tex = &*surf.texinfo;
 
-    for lnum in 0..r_newrefdef.num_dlights {
+    for lnum in 0..rfs().r_newrefdef.num_dlights {
         if surf.dlightbits & (1 << lnum) == 0 {
             continue; // not lit by this light
         }
 
-        let dl = &r_newrefdef.dlight(lnum as usize);
+        let dl = &rfs().r_newrefdef.dlight(lnum as usize);
         let frad = dl.intensity;
         let fdist_plane =
             dot_product(&dl.origin, &(*surf.plane).normal) - (*surf.plane).dist;
@@ -528,18 +547,18 @@ pub unsafe fn r_add_dynamic_lights(surf: &MSurface) {
 
                 if fdist_local < fminlight {
                     if BETTER_DLIGHT_FALLOFF {
-                        S_BLOCKLIGHTS[bl_idx] +=
+                        ls.blocklights[bl_idx] +=
                             (fminlight - fdist_local) * dl.color[0];
-                        S_BLOCKLIGHTS[bl_idx + 1] +=
+                        ls.blocklights[bl_idx + 1] +=
                             (fminlight - fdist_local) * dl.color[1];
-                        S_BLOCKLIGHTS[bl_idx + 2] +=
+                        ls.blocklights[bl_idx + 2] +=
                             (fminlight - fdist_local) * dl.color[2];
                     } else {
-                        S_BLOCKLIGHTS[bl_idx] +=
+                        ls.blocklights[bl_idx] +=
                             (frad_adj - fdist_local) * dl.color[0];
-                        S_BLOCKLIGHTS[bl_idx + 1] +=
+                        ls.blocklights[bl_idx + 1] +=
                             (frad_adj - fdist_local) * dl.color[1];
-                        S_BLOCKLIGHTS[bl_idx + 2] +=
+                        ls.blocklights[bl_idx + 2] +=
                             (frad_adj - fdist_local) * dl.color[2];
                     }
                 }
@@ -556,8 +575,8 @@ pub unsafe fn r_add_dynamic_lights(surf: &MSurface) {
 ///
 /// # Safety
 /// Accesses global blocklights buffer and surface stain data.
-pub unsafe fn r_add_stains(surf: &MSurface) {
-    let scale = [crate::vk_rmain::VK_MODULATE_CVAR.value; 3];
+unsafe fn r_add_stains(ls: &mut LightState, surf: &MSurface) {
+    let scale = [crate::vk_rmain::rcvars().vk_modulate.value; 3];
 
     let smax = (surf.extents[0] as i32 >> 4) + 1;
     let tmax = (surf.extents[1] as i32 >> 4) + 1;
@@ -569,8 +588,8 @@ pub unsafe fn r_add_stains(surf: &MSurface) {
         for _s in 0..smax {
             for i in 0..3 {
                 let stain_val = *stain_ptr.offset(i) as f32 * scale[i as usize];
-                if S_BLOCKLIGHTS[bl_idx + i as usize] > stain_val {
-                    S_BLOCKLIGHTS[bl_idx + i as usize] = stain_val;
+                if ls.blocklights[bl_idx + i as usize] > stain_val {
+                    ls.blocklights[bl_idx + i as usize] = stain_val;
                 }
             }
             bl_idx += 3;
@@ -589,7 +608,7 @@ pub unsafe fn r_set_cache_state(surf: &mut MSurface) {
             break;
         }
         surf.cached_light[maps] =
-            r_newrefdef.lightstyle(surf.styles[maps] as usize).white;
+            rfs().r_newrefdef.lightstyle(surf.styles[maps] as usize).white;
     }
 }
 
@@ -610,7 +629,9 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
     let tmax = (surf.extents[1] as i32 >> 4) + 1;
     let size = (smax * tmax) as usize;
 
-    if size > (std::mem::size_of_val(&S_BLOCKLIGHTS) >> 4) {
+    let mut ls = LIGHT_STATE.lock().unwrap();
+
+    if size > (std::mem::size_of_val(&ls.blocklights) >> 4) {
         vid_printf(ERR_DROP, "Bad s_blocklights size");
         return;
     }
@@ -618,14 +639,14 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
     // set to full bright if no light data
     if surf.samples.is_null() {
         for i in 0..(size * 3) {
-            S_BLOCKLIGHTS[i] = 255.0;
+            ls.blocklights[i] = 255.0;
         }
         // still need to iterate styles for side effects
         for maps in 0..MAXLIGHTMAPS {
             if surf.styles[maps] == 255 {
                 break;
             }
-            let _ = &r_newrefdef.lightstyle(surf.styles[maps] as usize);
+            let _ = &rfs().r_newrefdef.lightstyle(surf.styles[maps] as usize);
         }
         // goto store equivalent — fall through to store section
     } else {
@@ -646,29 +667,29 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
                     break;
                 }
 
-                let style = &r_newrefdef.lightstyle(surf.styles[maps] as usize);
+                let style = &rfs().r_newrefdef.lightstyle(surf.styles[maps] as usize);
                 let scale = [
-                    crate::vk_rmain::VK_MODULATE_CVAR.value * style.rgb[0],
-                    crate::vk_rmain::VK_MODULATE_CVAR.value * style.rgb[1],
-                    crate::vk_rmain::VK_MODULATE_CVAR.value * style.rgb[2],
+                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[0],
+                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[1],
+                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[2],
                 ];
 
                 if scale[0] == 1.0 && scale[1] == 1.0 && scale[2] == 1.0 {
                     let mut bl_idx = 0;
                     for i in 0..size {
-                        S_BLOCKLIGHTS[bl_idx] = *lightmap.add(i * 3) as f32;
-                        S_BLOCKLIGHTS[bl_idx + 1] = *lightmap.add(i * 3 + 1) as f32;
-                        S_BLOCKLIGHTS[bl_idx + 2] = *lightmap.add(i * 3 + 2) as f32;
+                        ls.blocklights[bl_idx] = *lightmap.add(i * 3) as f32;
+                        ls.blocklights[bl_idx + 1] = *lightmap.add(i * 3 + 1) as f32;
+                        ls.blocklights[bl_idx + 2] = *lightmap.add(i * 3 + 2) as f32;
                         bl_idx += 3;
                     }
                 } else {
                     let mut bl_idx = 0;
                     for i in 0..size {
-                        S_BLOCKLIGHTS[bl_idx] =
+                        ls.blocklights[bl_idx] =
                             *lightmap.add(i * 3) as f32 * scale[0];
-                        S_BLOCKLIGHTS[bl_idx + 1] =
+                        ls.blocklights[bl_idx + 1] =
                             *lightmap.add(i * 3 + 1) as f32 * scale[1];
-                        S_BLOCKLIGHTS[bl_idx + 2] =
+                        ls.blocklights[bl_idx + 2] =
                             *lightmap.add(i * 3 + 2) as f32 * scale[2];
                         bl_idx += 3;
                     }
@@ -678,7 +699,7 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
         } else {
             // zero out blocklights
             for i in 0..(size * 3) {
-                S_BLOCKLIGHTS[i] = 0.0;
+                ls.blocklights[i] = 0.0;
             }
 
             for maps in 0..MAXLIGHTMAPS {
@@ -686,32 +707,32 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
                     break;
                 }
 
-                let style = &r_newrefdef.lightstyle(surf.styles[maps] as usize);
+                let style = &rfs().r_newrefdef.lightstyle(surf.styles[maps] as usize);
                 let scale = [
-                    crate::vk_rmain::VK_MODULATE_CVAR.value * style.rgb[0],
-                    crate::vk_rmain::VK_MODULATE_CVAR.value * style.rgb[1],
-                    crate::vk_rmain::VK_MODULATE_CVAR.value * style.rgb[2],
+                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[0],
+                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[1],
+                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[2],
                 ];
 
                 if scale[0] == 1.0 && scale[1] == 1.0 && scale[2] == 1.0 {
                     let mut bl_idx = 0;
                     for i in 0..size {
-                        S_BLOCKLIGHTS[bl_idx] +=
+                        ls.blocklights[bl_idx] +=
                             *lightmap.add(i * 3) as f32;
-                        S_BLOCKLIGHTS[bl_idx + 1] +=
+                        ls.blocklights[bl_idx + 1] +=
                             *lightmap.add(i * 3 + 1) as f32;
-                        S_BLOCKLIGHTS[bl_idx + 2] +=
+                        ls.blocklights[bl_idx + 2] +=
                             *lightmap.add(i * 3 + 2) as f32;
                         bl_idx += 3;
                     }
                 } else {
                     let mut bl_idx = 0;
                     for i in 0..size {
-                        S_BLOCKLIGHTS[bl_idx] +=
+                        ls.blocklights[bl_idx] +=
                             *lightmap.add(i * 3) as f32 * scale[0];
-                        S_BLOCKLIGHTS[bl_idx + 1] +=
+                        ls.blocklights[bl_idx + 1] +=
                             *lightmap.add(i * 3 + 1) as f32 * scale[1];
-                        S_BLOCKLIGHTS[bl_idx + 2] +=
+                        ls.blocklights[bl_idx + 2] +=
                             *lightmap.add(i * 3 + 2) as f32 * scale[2];
                         bl_idx += 3;
                     }
@@ -721,14 +742,14 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
         }
 
         // add all the dynamic lights
-        if surf.dlightframe == r_framecount {
-            r_add_dynamic_lights(surf);
+        if surf.dlightframe == rfs().r_framecount {
+            r_add_dynamic_lights(&mut ls, surf);
         }
 
         // add stains
-        if r_newrefdef.rdflags & RDF_NOWORLDMODEL == 0
-            && !surf.stains.is_null() && crate::vk_rmain::R_STAINMAP.value != 0.0 {
-                r_add_stains(surf);
+        if rfs().r_newrefdef.rdflags & RDF_NOWORLDMODEL == 0
+            && !surf.stains.is_null() && crate::vk_rmain::rcvars().r_stainmap.value != 0.0 {
+                r_add_stains(&mut ls, surf);
             }
     }
 
@@ -742,9 +763,9 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
     if monolightmap == b'0' {
         for _i in 0..tmax {
             for _j in 0..smax {
-                let mut r = S_BLOCKLIGHTS[bl_idx] as i32;
-                let mut g = S_BLOCKLIGHTS[bl_idx + 1] as i32;
-                let mut b = S_BLOCKLIGHTS[bl_idx + 2] as i32;
+                let mut r = ls.blocklights[bl_idx] as i32;
+                let mut g = ls.blocklights[bl_idx + 1] as i32;
+                let mut b = ls.blocklights[bl_idx + 2] as i32;
 
                 if r < 0 { r = 0; }
                 if g < 0 { g = 0; }
@@ -776,9 +797,9 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
     } else {
         for _i in 0..tmax {
             for _j in 0..smax {
-                let mut r = S_BLOCKLIGHTS[bl_idx] as i32;
-                let mut g = S_BLOCKLIGHTS[bl_idx + 1] as i32;
-                let mut b = S_BLOCKLIGHTS[bl_idx + 2] as i32;
+                let mut r = ls.blocklights[bl_idx] as i32;
+                let mut g = ls.blocklights[bl_idx + 1] as i32;
+                let mut b = ls.blocklights[bl_idx + 2] as i32;
 
                 if r < 0 { r = 0; }
                 if g < 0 { g = 0; }
@@ -910,17 +931,19 @@ pub unsafe fn add_stain(
     a: f32,
     stain_type: StainType,
 ) {
-    if crate::vk_rmain::R_STAINMAP.value == 0.0 {
+    if crate::vk_rmain::rcvars().r_stainmap.value == 0.0 {
         return;
     }
 
-    TEMP_STAIN.origin = *org;
-    TEMP_STAIN.color = [r, g, b];
-    TEMP_STAIN.alpha = a;
-    TEMP_STAIN.intensity = intensity;
-    TEMP_STAIN.stain_type = stain_type;
+    let stain = DStain {
+        origin: *org,
+        color: [r, g, b],
+        alpha: a,
+        intensity,
+        stain_type,
+    };
 
-    r_stain_node(&TEMP_STAIN, r_worldmodel_nodes());
+    r_stain_node(&stain, r_worldmodel_nodes());
 }
 
 #[cfg(test)]
@@ -1121,12 +1144,12 @@ mod tests {
     }
 
     // ============================================================
-    // S_BLOCKLIGHTS size
+    // blocklights size
     // ============================================================
 
     #[test]
     fn test_blocklights_array_size() {
-        // S_BLOCKLIGHTS should be 34*34*3 = 3468 floats
+        // blocklights should be 34*34*3 = 3468 floats
         // This matches the maximum lightmap size
         assert_eq!(34 * 34 * 3, 3468);
     }

@@ -549,7 +549,7 @@ impl GpuCullingSystem {
             );
 
             // Dispatch with 64 threads per workgroup
-            let workgroups = (self.object_count + 63) / 64;
+            let workgroups = self.object_count.div_ceil(64);
             ctx.device.cmd_dispatch(cmd, workgroups, 1, 1);
         }
     }

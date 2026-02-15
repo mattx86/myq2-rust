@@ -25,6 +25,7 @@ pub enum VideoCodec {
 
 /// Hardware video decode capabilities.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct VideoDecodeCapabilities {
     /// Whether H.264 decode is supported.
     pub h264_supported: bool,
@@ -40,18 +41,6 @@ pub struct VideoDecodeCapabilities {
     pub max_active_references: u32,
 }
 
-impl Default for VideoDecodeCapabilities {
-    fn default() -> Self {
-        Self {
-            h264_supported: false,
-            h265_supported: false,
-            max_width: 0,
-            max_height: 0,
-            max_dpb_slots: 0,
-            max_active_references: 0,
-        }
-    }
-}
 
 /// Decoded picture buffer slot.
 #[derive(Debug, Clone)]
@@ -303,7 +292,7 @@ impl HwVideoDecoder {
 
     /// Check if a session is active.
     pub fn has_active_session(&self) -> bool {
-        self.session.as_ref().map_or(false, |s| s.initialized)
+        self.session.as_ref().is_some_and(|s| s.initialized)
     }
 
     /// Get session info.

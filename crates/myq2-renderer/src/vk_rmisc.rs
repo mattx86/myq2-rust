@@ -20,12 +20,7 @@ use crate::vk_local::{Image, ImageType,
     qvk_enable, qvk_disable, qvk_color4f,
     VK_TEXTURE_2D, VK_BLEND, VK_REPLACE, PT_MAX,
 };
-use crate::vk_rmain::{
-    R_PARTICLETEXTURE, R_NOTEXTURE, VK_CONFIG, VK_STATE,
-    VK_SWAPINTERVAL, VK_TEXTUREMODE, VK_TEXTUREALPHAMODE, VK_TEXTURESOLIDMODE,
-    VID, VID_GAMMA, vid_printf,
-    VK_SCREENSHOT_FORMAT, VK_SCREENSHOT_QUALITY,
-};
+use crate::vk_rmain::{vid_printf, rcvars, rg};
 use myq2_common::q_shared::PRINT_ALL;
 
 // ============================================================
@@ -54,13 +49,18 @@ pub static NOTEXTURE: [[u8; 16]; 16] = [
 // R_InitParticleTexture
 // ============================================================
 pub fn r_init_particle_texture() {
-    // SAFETY: single-threaded engine access pattern
+    myq2_common::common::com_printf("r_init_particle_texture: *** ENTERED ***\n");
+    // SAFETY: Accesses raw pointers from vk_image functions
     unsafe {
+        myq2_common::common::com_printf("r_init_particle_texture: Getting globals\n");
+        let mut globals = rg();
+        myq2_common::common::com_printf("r_init_particle_texture: Allocating data array\n");
         let mut data = [[[0u8; 4]; 16]; 16];
 
         // ===========================================
         // PARTICLE TEXTURES
         // ===========================================
+        myq2_common::common::com_printf("r_init_particle_texture: Generating particle texture\n");
         for x in 0..16i32 {
             let xx = (x - 8) * (x - 8);
             for y in 0..16i32 {
@@ -80,6 +80,7 @@ pub fn r_init_particle_texture() {
         }
 
         // Try to load named particle textures via Draw_FindPic
+        myq2_common::common::com_printf("r_init_particle_texture: Loading named particle textures\n");
         let particle_names = [
             "particles/default",
             "particles/fire",
@@ -91,16 +92,22 @@ pub fn r_init_particle_texture() {
         for (idx, name) in particle_names.iter().enumerate() {
             let pic = crate::vk_image::draw_find_pic(name);
             if !pic.is_null() {
-                R_PARTICLETEXTURE[idx] = Some((*pic).clone());
+                globals.r_particletexture[idx] = Some((*pic).clone());
             } else {
-                R_PARTICLETEXTURE[idx] = None;
+                globals.r_particletexture[idx] = None;
             }
         }
+        myq2_common::common::com_printf("r_init_particle_texture: Named particle textures loaded\n");
 
         // Fall back to generated texture for any that failed to load
+        myq2_common::common::com_printf("r_init_particle_texture: Creating fallback textures\n");
         let data_flat: Vec<u8> = data.iter().flat_map(|row| row.iter().flat_map(|px| px.iter().copied())).collect();
+        myq2_common::common::com_printf("r_init_particle_texture: data_flat created\n");
+        myq2_common::common::com_printf(&format!("r_init_particle_texture: PT_MAX = {}\n", PT_MAX));
         for x in 0..PT_MAX {
-            if R_PARTICLETEXTURE[x].is_none() {
+            myq2_common::common::com_printf(&format!("r_init_particle_texture: Checking slot {}\n", x));
+            if globals.r_particletexture[x].is_none() {
+                myq2_common::common::com_printf(&format!("r_init_particle_texture: Slot {} is None, calling vk_load_pic\n", x));
                 // In C: vk_load_pic("***particle***", (byte*)data, 16, 16, it_sprite, 32)
                 let pic_ptr = crate::vk_image::vk_load_pic(
                     "***particle***",
@@ -109,15 +116,18 @@ pub fn r_init_particle_texture() {
                     ImageType::Sprite,
                     32,
                 );
+                myq2_common::common::com_printf(&format!("r_init_particle_texture: vk_load_pic returned for slot {}\n", x));
                 if !pic_ptr.is_null() {
-                    R_PARTICLETEXTURE[x] = Some((*pic_ptr).clone());
+                    globals.r_particletexture[x] = Some((*pic_ptr).clone());
                 }
             }
         }
+        myq2_common::common::com_printf("r_init_particle_texture: Fallback loop complete\n");
 
         // ===========================================
         // NO_TEXTURE TEXTURE
         // ===========================================
+        myq2_common::common::com_printf("r_init_particle_texture: Creating no_texture texture\n");
         for x in 0..16usize {
             for y in 0..16usize {
                 data[y][x][0] = NOTEXTURE[x & 3][y & 3] * 255;
@@ -137,8 +147,9 @@ pub fn r_init_particle_texture() {
             img.upload_height = 16;
             img.sh = 1.0;
             img.th = 1.0;
-            R_NOTEXTURE = Some(img);
+            globals.r_notexture = Some(img);
         }
+        myq2_common::common::com_printf("r_init_particle_texture: *** COMPLETE ***\n");
     }
 }
 
@@ -148,14 +159,15 @@ pub fn r_init_particle_texture() {
 // JPEG quality controlled by gl_screenshot_quality cvar (0-100)
 // ============================================================
 pub fn vk_screen_shot_f() {
-    // SAFETY: single-threaded engine access pattern
+    // SAFETY: Accesses vk_local stubs and renderer globals
     unsafe {
+        let globals = rg();
         use std::fs;
         use std::path::Path;
         use image::{ImageBuffer, Rgb, codecs::jpeg::JpegEncoder};
 
         // Determine format from cvar
-        let format_str = VK_SCREENSHOT_FORMAT.string.to_lowercase();
+        let format_str = rcvars().vk_screenshot_format.string.to_lowercase();
         let (ext, format) = match format_str.as_str() {
             "png" => ("png", ScreenshotFormat::Png),
             "jpg" | "jpeg" => ("jpg", ScreenshotFormat::Jpg),
@@ -163,7 +175,7 @@ pub fn vk_screen_shot_f() {
         };
 
         // JPEG quality (0-100), default 85
-        let jpeg_quality = (VK_SCREENSHOT_QUALITY.value as u8).clamp(1, 100);
+        let jpeg_quality = (rcvars().vk_screenshot_quality.value as u8).clamp(1, 100);
 
         // create the scrnshots directory if it doesn't exist
         let gamedir = myq2_common::files::fs_gamedir();
@@ -191,8 +203,8 @@ pub fn vk_screen_shot_f() {
             return;
         }
 
-        let width = VID.width as usize;
-        let height = VID.height as usize;
+        let width = globals.vid.width as usize;
+        let height = globals.vid.height as usize;
         let pixel_count = width * height * 3;
 
         // Read pixels from framebuffer
@@ -200,13 +212,13 @@ pub fn vk_screen_shot_f() {
         qvk_read_pixels(0, 0, width as i32, height as i32, &mut pixels);
 
         // apply gamma correction if necessary
-        let vk_config = VK_CONFIG.as_ref();
+        let vk_config = globals.vk_config.as_ref();
         if vk_config.is_some_and(|c| c.gammaramp != 0) {
             let mut gamma_table = [0u8; 256];
             for i in 0..256 {
                 let v = (255.0
                     * ((i as f64 + 0.5) * 0.0039138943248532289628180039138943)
-                        .powf(VID_GAMMA.value as f64)
+                        .powf(rcvars().vid_gamma.value as f64)
                     + 0.5) as i32;
                 gamma_table[i] = v.clamp(0, 255) as u8;
             }
@@ -330,9 +342,10 @@ fn qvk_read_pixels(x: i32, y: i32, w: i32, h: i32, pixels: &mut [u8]) {
 // vk_strings_f
 // ============================================================
 pub fn vk_strings_f() {
-    // SAFETY: single-threaded engine access pattern
+    // SAFETY: renderer state accessed from main thread only
     unsafe {
-        let vk_config = match VK_CONFIG.as_ref() {
+        let globals = rg();
+        let vk_config = match globals.vk_config.as_ref() {
             Some(c) => c,
             None => {
                 vid_printf(PRINT_ALL, "GL config not initialized\n");
@@ -354,7 +367,7 @@ pub fn vk_strings_f() {
 // vk_set_default_state
 // ============================================================
 pub fn vk_set_default_state() {
-    // SAFETY: single-threaded engine access pattern
+    // SAFETY: renderer state accessed from main thread only
     unsafe {
         qvk_enable(VK_TEXTURE_2D);
 
@@ -367,9 +380,9 @@ pub fn vk_set_default_state() {
 
         qvk_color4f(1.0, 1.0, 1.0, 1.0);
 
-        vk_texture_mode(VK_TEXTUREMODE.string);
-        vk_texture_alpha_mode(VK_TEXTUREALPHAMODE.string);
-        vk_texture_solid_mode(VK_TEXTURESOLIDMODE.string);
+        vk_texture_mode(rcvars().vk_texturemode.string);
+        vk_texture_alpha_mode(rcvars().vk_texturealphamode.string);
+        vk_texture_solid_mode(rcvars().vk_texturesolidmode.string);
 
         vk_tex_env(VK_REPLACE as u32);
 
@@ -381,12 +394,13 @@ pub fn vk_set_default_state() {
 // vk_update_swap_interval
 // ============================================================
 pub fn vk_update_swap_interval() {
-    // SAFETY: single-threaded engine access pattern
+    // SAFETY: Accesses renderer globals
     unsafe {
-        if VK_SWAPINTERVAL.modified {
-            VK_SWAPINTERVAL.modified = false;
+        if rcvars().vk_swapinterval.is_modified() {
+            rcvars().vk_swapinterval.clear_modified();
 
-            let vk_state = match VK_STATE.as_ref() {
+            let globals = rg();
+            let vk_state = match globals.vk_state.as_ref() {
                 Some(s) => s,
                 None => return,
             };

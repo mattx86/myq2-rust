@@ -57,8 +57,10 @@ impl ParticleManager {
             staging: Vec::with_capacity(capacity),
         };
 
-        manager.setup_quad();
-        manager.setup_vao();
+        // FIXME: These hang during initialization - skip for now
+        // TODO: Investigate VAO/VBO binding deadlock
+        // manager.setup_quad();
+        // manager.setup_vao();
 
         manager
     }

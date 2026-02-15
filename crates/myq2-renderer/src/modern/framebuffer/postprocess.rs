@@ -6,7 +6,7 @@
 use ash::vk;
 use super::RenderTarget;
 use crate::modern::geometry::{VertexBuffer, VertexArray};
-use crate::modern::shader::{ShaderManager, ShaderType, PipelineManager, PipelineVariant};
+use crate::modern::shader::{ShaderManager, ShaderType, PipelineManager, PipelineVariant, PostProcessUniforms};
 use crate::modern::gpu_device;
 
 /// SSAO kernel size — number of hemisphere samples.
@@ -254,7 +254,10 @@ impl PostProcessor {
     fn create_ssao_noise_texture(&mut self) {
         // Noise texture stores random tangent-space rotation vectors
         // This breaks up banding artifacts from the fixed kernel
-        gpu_device::with_device(|ctx| {
+        // Use with_device_and_commands_mut to avoid nested mutex deadlock
+        // (with_device + with_commands_mut would lock VK_DEVICE_STATE twice)
+        gpu_device::with_device_and_commands_mut(|ctx, commands| {
+            // SAFETY: Vulkan context is valid and we're on the main thread during init.
             unsafe {
                 let noise_size = 4u32;
                 let pixel_count = (noise_size * noise_size) as usize;
@@ -327,7 +330,7 @@ impl PostProcessor {
                     return;
                 }
 
-                // Upload via staging buffer (reuse the cinematic pattern)
+                // Upload via staging buffer
                 let data_size = noise_data.len();
                 let buffer_info = vk::BufferCreateInfo::default()
                     .size(data_size as vk::DeviceSize)
@@ -360,77 +363,75 @@ impl PostProcessor {
                                     );
                                     ctx.device.unmap_memory(staging_memory);
 
-                                    // Record upload commands
-                                    gpu_device::with_commands_mut(|commands| {
-                                        if let Ok(cmd) = commands.begin_single_time() {
-                                            let copy_region = vk::BufferImageCopy::default()
-                                                .buffer_offset(0)
-                                                .image_subresource(vk::ImageSubresourceLayers {
-                                                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                                                    mip_level: 0,
-                                                    base_array_layer: 0,
-                                                    layer_count: 1,
-                                                })
-                                                .image_extent(vk::Extent3D {
-                                                    width: noise_size,
-                                                    height: noise_size,
-                                                    depth: 1,
-                                                });
+                                    // Record upload commands (commands already available, no nested lock)
+                                    if let Ok(cmd) = commands.begin_single_time() {
+                                        let copy_region = vk::BufferImageCopy::default()
+                                            .buffer_offset(0)
+                                            .image_subresource(vk::ImageSubresourceLayers {
+                                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                                mip_level: 0,
+                                                base_array_layer: 0,
+                                                layer_count: 1,
+                                            })
+                                            .image_extent(vk::Extent3D {
+                                                width: noise_size,
+                                                height: noise_size,
+                                                depth: 1,
+                                            });
 
-                                            // Transition to transfer dst
-                                            let barrier = vk::ImageMemoryBarrier::default()
-                                                .old_layout(vk::ImageLayout::UNDEFINED)
-                                                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                                                .image(image)
-                                                .subresource_range(vk::ImageSubresourceRange {
-                                                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                                                    base_mip_level: 0,
-                                                    level_count: 1,
-                                                    base_array_layer: 0,
-                                                    layer_count: 1,
-                                                })
-                                                .src_access_mask(vk::AccessFlags::empty())
-                                                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+                                        // Transition to transfer dst
+                                        let barrier = vk::ImageMemoryBarrier::default()
+                                            .old_layout(vk::ImageLayout::UNDEFINED)
+                                            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                                            .image(image)
+                                            .subresource_range(vk::ImageSubresourceRange {
+                                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                                base_mip_level: 0,
+                                                level_count: 1,
+                                                base_array_layer: 0,
+                                                layer_count: 1,
+                                            })
+                                            .src_access_mask(vk::AccessFlags::empty())
+                                            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
 
-                                            ctx.device.cmd_pipeline_barrier(
-                                                cmd,
-                                                vk::PipelineStageFlags::TOP_OF_PIPE,
-                                                vk::PipelineStageFlags::TRANSFER,
-                                                vk::DependencyFlags::empty(),
-                                                &[], &[], &[barrier],
-                                            );
+                                        ctx.device.cmd_pipeline_barrier(
+                                            cmd,
+                                            vk::PipelineStageFlags::TOP_OF_PIPE,
+                                            vk::PipelineStageFlags::TRANSFER,
+                                            vk::DependencyFlags::empty(),
+                                            &[], &[], &[barrier],
+                                        );
 
-                                            ctx.device.cmd_copy_buffer_to_image(
-                                                cmd, staging_buffer, image,
-                                                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy_region],
-                                            );
+                                        ctx.device.cmd_copy_buffer_to_image(
+                                            cmd, staging_buffer, image,
+                                            vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy_region],
+                                        );
 
-                                            // Transition to shader read
-                                            let barrier = vk::ImageMemoryBarrier::default()
-                                                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                                                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                                                .image(image)
-                                                .subresource_range(vk::ImageSubresourceRange {
-                                                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                                                    base_mip_level: 0,
-                                                    level_count: 1,
-                                                    base_array_layer: 0,
-                                                    layer_count: 1,
-                                                })
-                                                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                                                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                                        // Transition to shader read
+                                        let barrier = vk::ImageMemoryBarrier::default()
+                                            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                                            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                                            .image(image)
+                                            .subresource_range(vk::ImageSubresourceRange {
+                                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                                base_mip_level: 0,
+                                                level_count: 1,
+                                                base_array_layer: 0,
+                                                layer_count: 1,
+                                            })
+                                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                                            .dst_access_mask(vk::AccessFlags::SHADER_READ);
 
-                                            ctx.device.cmd_pipeline_barrier(
-                                                cmd,
-                                                vk::PipelineStageFlags::TRANSFER,
-                                                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                                                vk::DependencyFlags::empty(),
-                                                &[], &[], &[barrier],
-                                            );
+                                        ctx.device.cmd_pipeline_barrier(
+                                            cmd,
+                                            vk::PipelineStageFlags::TRANSFER,
+                                            vk::PipelineStageFlags::FRAGMENT_SHADER,
+                                            vk::DependencyFlags::empty(),
+                                            &[], &[], &[barrier],
+                                        );
 
-                                            let _ = commands.end_single_time(ctx, cmd);
-                                        }
-                                    });
+                                        let _ = commands.end_single_time(ctx, cmd);
+                                    }
                                 }
                             }
                             ctx.device.free_memory(staging_memory, None);
@@ -587,12 +588,32 @@ impl PostProcessor {
         width: u32,
         height: u32,
     ) {
+        self.execute_pass_with_push_constants(cmd, target, pipeline, pipeline_layout, width, height, None);
+    }
+
+    /// Execute a fullscreen post-processing pass with optional push constants.
+    ///
+    /// When `push_constants` is `Some`, the data is uploaded via
+    /// `vkCmdPushConstants` (fragment stage) after pipeline bind and before draw.
+    fn execute_pass_with_push_constants(
+        &self,
+        cmd: vk::CommandBuffer,
+        target: &RenderTarget,
+        pipeline: vk::Pipeline,
+        pipeline_layout: vk::PipelineLayout,
+        width: u32,
+        height: u32,
+        push_constants: Option<&[u8]>,
+    ) {
         let color_view = match target.color_view() {
             Some(view) => view,
             None => return,
         };
 
         gpu_device::with_device(|ctx| {
+            // SAFETY: Vulkan context is valid. The command buffer is recording and
+            // the pipeline layout matches the push constant range declared at
+            // layout creation time (PostProcessUniforms, 32 bytes, fragment stage).
             unsafe {
                 // Setup color attachment for dynamic rendering
                 let color_attachment = vk::RenderingAttachmentInfo::default()
@@ -622,6 +643,17 @@ impl PostProcessor {
                 // Bind pipeline
                 ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
 
+                // Upload push constants (if any) after pipeline bind, before draw
+                if let Some(data) = push_constants {
+                    ctx.device.cmd_push_constants(
+                        cmd,
+                        pipeline_layout,
+                        vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        data,
+                    );
+                }
+
                 // Set viewport and scissor
                 let viewport = vk::Viewport {
                     x: 0.0,
@@ -646,9 +678,6 @@ impl PostProcessor {
                 ctx.device.cmd_end_rendering(cmd);
             }
         });
-
-        // Suppress unused variable warnings
-        let _ = pipeline_layout;
     }
 
     /// Transition an image layout.
@@ -773,11 +802,7 @@ impl PostProcessor {
         let polyblend_color = polyblend.unwrap_or([0.0; 4]);
         let enable_polyblend = polyblend.is_some() && polyblend_color[3] > 0.0;
         // Hardware gamma (r_hwgamma) disables shader gamma — the OS handles it
-        let enable_gamma = unsafe { crate::vk_rmain::R_HWGAMMA.value == 0.0 };
-        let _ = polyblend_color;
-        let _ = enable_polyblend;
-        let _ = enable_gamma;
-        let _ = gamma;
+        let enable_gamma = crate::vk_rmain::rcvars().r_hwgamma.value == 0.0;
 
         // SSAO Pass
         if self.ssao_enabled {
@@ -980,12 +1005,8 @@ impl PostProcessor {
         }
 
         // Final PostProcess Pass: polyblend overlay + gamma correction
-        // Uses postprocess.frag.glsl which reads u_PolyBlend, u_EnablePolyBlend,
-        // u_Gamma, u_EnableGamma from FragUniforms UBO (set 3, binding 0).
-        // The UBO data (polyblend_color, enable_polyblend, gamma, enable_gamma)
-        // is prepared above and will be uploaded when the PostProcess pipeline
-        // descriptor sets are wired. For now, the shader handles the logic —
-        // the actual vkCmdDraw call will be added when the pipeline is created.
+        // The postprocess fragment shader reads push constants matching
+        // PostProcessUniforms layout (polyblend color/enable, gamma value/enable).
         if enable_polyblend || enable_gamma {
             if let Some(pipeline) = pipelines.get(ShaderType::PostProcess, PipelineVariant::PostProcess) {
                 // Source: output of last enabled pass
@@ -1006,21 +1027,32 @@ impl PostProcessor {
                     );
                 }
 
-                // TODO: Upload PostProcessUniforms UBO with polyblend_color,
-                // enable_polyblend, gamma, enable_gamma before draw call.
-                // The postprocess.frag.glsl FragUniforms layout is:
-                //   vec4  u_PolyBlend       (polyblend_color)
-                //   int   u_EnablePolyBlend  (enable_polyblend as i32)
-                //   float u_Gamma            (gamma)
-                //   int   u_EnableGamma      (enable_gamma as i32)
+                // Build push constants for the postprocess fragment shader
+                let uniforms = PostProcessUniforms {
+                    polyblend_color,
+                    enable_polyblend: if enable_polyblend { 1 } else { 0 },
+                    gamma,
+                    enable_gamma: if enable_gamma { 1 } else { 0 },
+                    _pad: 0,
+                };
 
-                self.execute_pass(
+                // SAFETY: PostProcessUniforms is #[repr(C)] with no padding holes,
+                // so reinterpreting it as a byte slice is well-defined.
+                let push_data: &[u8] = unsafe {
+                    std::slice::from_raw_parts(
+                        &uniforms as *const PostProcessUniforms as *const u8,
+                        std::mem::size_of::<PostProcessUniforms>(),
+                    )
+                };
+
+                self.execute_pass_with_push_constants(
                     cmd,
                     &self.scene_fbo, // Reuse scene FBO as output (will be presented)
                     pipeline.pipeline,
                     pipeline.layout,
                     self.display_width,
                     self.display_height,
+                    Some(push_data),
                 );
             }
         }

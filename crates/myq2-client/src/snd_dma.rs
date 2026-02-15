@@ -1377,9 +1377,7 @@ impl SoundState {
         // Also pre-fetch entity origins since the closure may not be thread-safe
         let channel_data: Vec<_> = (0..MAX_CHANNELS)
             .filter_map(|i| {
-                if self.channels[i].sfx_index.is_none() {
-                    return None;
-                }
+                self.channels[i].sfx_index?;
                 // Pre-fetch entity origin if needed (sequential, before parallel)
                 let entity_origin = if !self.channels[i].fixed_origin {
                     Some(get_entity_origin(self.channels[i].entnum))

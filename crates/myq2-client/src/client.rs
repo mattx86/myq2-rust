@@ -722,6 +722,7 @@ pub struct ClientStatic {
     pub download_name: String,
     pub download_number: i32,
     pub download_type: DlType,
+    pub download_file: Option<std::fs::File>,
     pub download_percent: i32,
 
     // demo recording info must be here, so it isn't cleared on level change
@@ -763,6 +764,7 @@ impl Default for ClientStatic {
             download_name: String::new(),
             download_number: 0,
             download_type: DlType::None,
+            download_file: None,
             download_percent: 0,
             demo_recording: false,
             demo_waiting: false,
@@ -1527,5 +1529,26 @@ mod tests {
         assert_eq!(cs.cmd_time.len(), CMD_BACKUP);
         assert_eq!(cs.predicted_origins.len(), CMD_BACKUP);
     }
+}
+
+// ============================================================
+// Debug accessor functions (for frame loop diagnostics)
+// ============================================================
+
+/// Get the current client connection state as a human-readable string.
+pub fn cls_state_string() -> &'static str {
+    let cls = crate::cl_main::CLS.lock().unwrap();
+    match cls.state {
+        ConnState::Uninitialized => "Uninitialized",
+        ConnState::Disconnected => "Disconnected",
+        ConnState::Connecting => "Connecting",
+        ConnState::Connected => "Connected",
+        ConnState::Active => "Active",
+    }
+}
+
+/// Get the current disable_screen value from ClientStatic.
+pub fn cls_disable_screen() -> f32 {
+    crate::cl_main::CLS.lock().unwrap().disable_screen
 }
 

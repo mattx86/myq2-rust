@@ -1534,7 +1534,10 @@ pub fn client_begin_server_frame(ctx: &mut GameContext, ent_idx: usize) {
         return;
     }
 
-    let ci = ctx.edicts[ent_idx].client.unwrap();
+    let ci = match ctx.edicts[ent_idx].client {
+        Some(ci) => ci,
+        None => return, // no client connected yet (e.g., during settle frames)
+    };
 
     if ctx.deathmatch != 0.0
         && ctx.clients[ci].pers.spectator != ctx.clients[ci].resp.spectator

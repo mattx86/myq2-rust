@@ -222,6 +222,11 @@ pub fn sv_run_think(ent_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLo
 
 /// Two entities have touched, so run their touch functions.
 pub fn sv_impact(e1_idx: usize, trace: &Trace, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
+    // In C Q2, trace.ent always points to a valid edict (at least world = g_edicts[0]).
+    // Guard against negative ent_index which would overflow usize.
+    if trace.ent_index < 0 || (trace.ent_index as usize) >= edicts.len() {
+        return;
+    }
     let e2_idx = trace.ent_index as usize;
 
     if edicts[e1_idx].touch_fn.is_some() && edicts[e1_idx].solid != Solid::Not {
@@ -938,7 +943,9 @@ pub fn g_run_entity(ent_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLo
         crate::dispatch::dispatch_think(idx, ent_idx, edicts, level);
     }
 
-    match edicts[ent_idx].movetype {
+    let mt = edicts[ent_idx].movetype;
+
+    match mt {
         MoveType::Push | MoveType::Stop => {
             sv_physics_pusher(ent_idx, edicts, level);
         }
@@ -955,9 +962,10 @@ pub fn g_run_entity(ent_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLo
             sv_physics_toss(ent_idx, edicts, level);
         }
         _ => {
-            gi_error(&format!("SV_Physics: bad movetype {:?}", edicts[ent_idx].movetype));
+            gi_error(&format!("SV_Physics: bad movetype {:?}", mt));
         }
     }
+
 }
 
 // ============================================================

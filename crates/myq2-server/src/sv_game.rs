@@ -3,6 +3,7 @@
 
 use crate::game_dll::GameDll;
 use crate::game_ffi::{build_game_import, set_ffi_server_context, clear_ffi_server_context};
+use crate::server_game_import::set_server_context;
 use crate::server::*;
 use myq2_common::common::{com_dprintf, com_printf};
 use myq2_common::game_api::{self, edict_t, game_import_t};
@@ -324,7 +325,6 @@ impl GameModule {
 // ============================================================
 
 static GAME_CONTEXT: Mutex<Option<myq2_game::g_local::GameContext>> = Mutex::new(None);
-static IP_FILTER_STATE: Mutex<Option<myq2_game::g_svcmds::IpFilterState>> = Mutex::new(None);
 
 /// Access the global game context. Panics if not initialized.
 pub fn with_game_context<F, R>(f: F) -> R
@@ -395,6 +395,59 @@ pub fn sync_edicts_from_server(ge: &GameExport) {
     }
 }
 
+/// Sync game state from GAME_CONTEXT to the GLOBAL_GAME_CTX used by dispatch wrappers.
+///
+/// In the original C code, game globals are shared memory. In our Rust port, there are
+/// two separate globals: GAME_CONTEXT (in sv_game.rs, the authoritative copy) and
+/// GLOBAL_GAME_CTX (in g_local.rs, used by dispatch.rs wrappers when think/touch
+/// functions are called through the dispatch table with only edicts/level parameters).
+///
+/// This function copies the fields that dispatch wrappers need (items, game, clients,
+/// cvar values, etc.) from GAME_CONTEXT to GLOBAL_GAME_CTX. Must be called before
+/// game_cb_run_frame and game_cb_spawn_entities so dispatch wrappers have current state.
+fn sync_to_global_game_ctx() {
+    // Extract fields under GAME_CONTEXT lock, then release before writing to GLOBAL_GAME_CTX
+    let fields = {
+        let guard = GAME_CONTEXT.lock().unwrap();
+        guard.as_ref().map(|ctx| {
+            // Clone only the fields that dispatch wrappers and entity_adapters read
+            myq2_game::g_local::GameCtx {
+                game: ctx.game.clone(),
+                level: ctx.level.clone(),
+                items: ctx.items.clone(),
+                edicts: ctx.edicts.clone(),
+                clients: ctx.clients.clone(),
+                num_edicts: ctx.num_edicts,
+                max_edicts: ctx.max_edicts,
+                sm_meat_index: ctx.sm_meat_index,
+                snd_fry: ctx.snd_fry,
+                means_of_death: ctx.means_of_death,
+                deathmatch: ctx.deathmatch,
+                coop: ctx.coop,
+                skill: ctx.skill,
+                dmflags: ctx.dmflags,
+                maxclients: ctx.maxclients,
+                maxspectators: ctx.maxspectators,
+                maxentities: ctx.maxentities,
+                sv_gravity: ctx.sv_gravity,
+                sv_maxvelocity: ctx.sv_maxvelocity,
+                sv_cheats: ctx.sv_cheats,
+                item_by_classname: ctx.item_by_classname.clone(),
+                item_by_pickup_name: ctx.item_by_pickup_name.clone(),
+                items_state: ctx.items_state.clone(),
+                entity_by_targetname: ctx.entity_by_targetname.clone(),
+                entity_by_classname: ctx.entity_by_classname.clone(),
+                ..Default::default()
+            }
+        })
+    };
+    // GAME_CONTEXT lock released here
+
+    if let Some(gctx) = fields {
+        myq2_game::g_local::init_global_game_ctx(gctx);
+    }
+}
+
 // ============================================================
 // Re-exports from myq2_game::game (canonical definitions)
 // ============================================================
@@ -458,6 +511,11 @@ pub struct Edict {
     pub clipmask: i32,
     pub owner_index: i32, // index into edicts, -1 = none
 }
+
+// SAFETY: Edict is only accessed through a Mutex in ServerContext.
+// The raw pointer `client` points to GClient data managed by the game module
+// and is only dereferenced on the main game thread.
+unsafe impl Send for Edict {}
 
 impl Default for Edict {
     fn default() -> Self {
@@ -549,6 +607,7 @@ impl GameExport {
     pub fn client_connect_by_index(&mut self, edict_index: i32, userinfo: &str) -> bool {
         if let Some(func) = self.client_connect {
             if let Some(ent) = self.edicts.get_mut(edict_index as usize) {
+                ent.s.number = edict_index; // Ensure index is set for callback
                 return func(ent, userinfo);
             }
         }
@@ -559,6 +618,7 @@ impl GameExport {
     pub fn client_userinfo_changed_by_index(&mut self, edict_index: i32, userinfo: &str) {
         if let Some(func) = self.client_userinfo_changed {
             if let Some(ent) = self.edicts.get_mut(edict_index as usize) {
+                ent.s.number = edict_index; // Ensure index is set for callback
                 func(ent, userinfo);
             }
         }
@@ -975,18 +1035,24 @@ pub fn pf_start_sound(
 
 pub fn sv_shutdown_game_progs(ctx: &mut ServerContext) {
     if let Some(ref game_module) = ctx.game_module {
+        // Dynamic DLL or game_module-based shutdown
         game_module.shutdown();
+    } else if let Some(ref ge) = ctx.ge {
+        // Static game stored in ctx.ge — call shutdown directly
+        if let Some(shutdown_fn) = ge.shutdown {
+            shutdown_fn();
+        }
     } else {
         return;
     }
 
-    // Clear FFI context if we were using dynamic mode
+    // Clear both context pointers (FFI for dynamic, server for static)
     clear_ffi_server_context();
+    crate::server_game_import::clear_server_context();
 
     // Sys_UnloadGame equivalent — drop the game module
     ctx.game_module = None;
 
-    // Legacy ge field for backwards compatibility
     ctx.ge = None;
 }
 
@@ -1007,6 +1073,7 @@ pub fn sv_init_game_progs(ctx: &mut ServerContext) {
 /// * `ctx` - Server context
 /// * `dll_path` - Optional path to game DLL. If None, searches standard paths then falls back to static game.
 pub fn sv_init_game_progs_ex(ctx: &mut ServerContext, dll_path: Option<&str>) {
+    // sv_init_game_progs_ex
     // Unload anything we have now
     if ctx.game_module.is_some() || ctx.ge.is_some() {
         sv_shutdown_game_progs(ctx);
@@ -1060,18 +1127,29 @@ pub fn sv_init_game_progs_ex(ctx: &mut ServerContext, dll_path: Option<&str>) {
 
             ctx.ge = Some(ge);
 
-            ctx.game_module = Some(GameModule::Static {
-                export: ctx.ge.take().unwrap(),
-            });
+            // NOTE: We keep the GameExport in ctx.ge (NOT game_module) for the
+            // static case, because all existing server code accesses ctx.ge
+            // directly. Moving it into GameModule::Static via .take() would
+            // leave ctx.ge = None, breaking sv_begin_f, sv_build_client_frame,
+            // sv_run_game_frame, and dozens of other callsites.
 
-            // Call game Init
-            if let Some(ref module) = ctx.game_module {
-                module.init();
+            // Set the server context pointer so game import callbacks can access it
+            // SAFETY: ctx is valid for the entire duration of game code execution.
+            // The pointer is cleared in sv_shutdown_game_progs.
+            unsafe {
+                set_server_context(ctx as *mut ServerContext);
+            }
+
+            // Call game Init directly via ctx.ge
+            if let Some(ref ge_ref) = ctx.ge {
+                if let Some(init_fn) = ge_ref.init {
+                    init_fn();
+                }
             }
 
             // Sync edicts from game context to server's GameExport
-            if let Some(GameModule::Static { ref mut export }) = ctx.game_module {
-                sync_edicts_to_server(export);
+            if let Some(ref mut ge_ref) = ctx.ge {
+                sync_edicts_to_server(ge_ref);
             }
         }
     }
@@ -1410,7 +1488,6 @@ fn load_game_module_static(ctx: &mut ServerContext) -> GameExport {
 
     // Store globally
     *GAME_CONTEXT.lock().unwrap() = Some(game_ctx);
-    *IP_FILTER_STATE.lock().unwrap() = Some(myq2_game::g_svcmds::IpFilterState::default());
 
     // Build the GameExport with real callback functions
     let mut ge = GameExport::default();
@@ -1434,10 +1511,14 @@ fn load_game_module_static(ctx: &mut ServerContext) -> GameExport {
     ge.write_level = Some(game_cb_write_level);
     ge.read_level = Some(game_cb_read_level);
 
-    // Note: client_connect, client_begin, etc. use Edict references from
-    // the server's edicts vec. These are handled differently — the server
-    // calls them by edict index via GameExport helper methods. For now
-    // we leave them as None and the existing by-index helpers handle dispatch.
+    // Wire client callbacks — these use ent.s.number to get the edict index,
+    // then dispatch to the game module via the global GAME_CONTEXT.
+    ge.client_connect = Some(game_cb_client_connect);
+    ge.client_begin = Some(game_cb_client_begin);
+    ge.client_userinfo_changed = Some(game_cb_client_userinfo_changed);
+    ge.client_disconnect = Some(game_cb_client_disconnect);
+    ge.client_command = Some(game_cb_client_command);
+    ge.client_think = Some(game_cb_client_think);
 
     ge
 }
@@ -1449,6 +1530,10 @@ fn load_game_module_static(ctx: &mut ServerContext) -> GameExport {
 
 fn game_cb_init() {
     with_game_context(|ctx| {
+        // Initialize items first so init_game and spawn_entities can use them
+        myq2_game::g_items::init_items(ctx);
+        ctx.build_item_indices();
+
         use myq2_game::g_save::SaveContext;
         let mut save_ctx = SaveContext {
             game: &mut ctx.game,
@@ -1460,62 +1545,38 @@ fn game_cb_init() {
         };
         myq2_game::g_save::init_game(&mut save_ctx);
     });
+    // Sync to GLOBAL_GAME_CTX so dispatch wrappers can access items, game state, etc.
+    sync_to_global_game_ctx();
 }
 
 fn game_cb_shutdown() {
     // Drop the game context
     *GAME_CONTEXT.lock().unwrap() = None;
-    *IP_FILTER_STATE.lock().unwrap() = None;
 }
 
 fn game_cb_spawn_entities(mapname: &str, entstring: &str, spawnpoint: &str) {
+    // Sync to GLOBAL_GAME_CTX so entity_adapters and dispatch wrappers have current state
+    sync_to_global_game_ctx();
     with_game_context(|ctx| {
         myq2_game::g_spawn::spawn_entities(ctx, mapname, entstring, spawnpoint);
     });
+    // Re-sync after spawn to capture any changes made during entity spawning
+    sync_to_global_game_ctx();
 }
 
 fn game_cb_run_frame() {
-    // Delegate to the full G_RunFrame implementation in myq2_game::g_main.
-    // This handles entity thinking, physics, AI, intermission, and DM rules.
-    // Note: g_main::GameContext and g_spawn::GameContext are different types;
-    // a unified GameContext will be needed to wire this up. For now, this is
-    // a no-op placeholder matching the callback signature.
-    with_game_context(|_ctx| {
-        // Will call myq2_game::g_main::g_run_frame once GameContext types are unified.
+    // Sync to GLOBAL_GAME_CTX so dispatch wrappers have current game state
+    sync_to_global_game_ctx();
+    with_game_context(|ctx| {
+        myq2_game::g_main::g_run_frame(ctx);
     });
 }
 
 fn game_cb_server_command() {
-    // server_command requires g_main::GameContext which is a different type from
-    // g_spawn::GameContext. The IP filter commands (addip, removeip, listip, writeip)
-    // only need the IpFilterState and game_import functions, not the full game context.
-    // For now we handle the common case — a full bridge to g_main::GameContext would
-    // require unifying the game context types.
-    let argv: Vec<String> = {
-        let argc = myq2_common::cmd::cmd_argc();
-        (0..argc).map(myq2_common::cmd::cmd_argv).collect()
-    };
-
-    if argv.is_empty() {
-        return;
-    }
-
-    // Handle the most common server commands directly
-    let cmd = argv[0].as_str();
-    match cmd {
-        "addip" | "removeip" | "listip" | "writeip" => {
-            // These only need IpFilterState — we can dispatch directly
-            // For now, print that the command was received
-            myq2_game::game_import::gi_dprintf(
-                &format!("ServerCommand: {} (IP filter commands not fully wired yet)\n", cmd)
-            );
-        }
-        _ => {
-            myq2_game::game_import::gi_dprintf(
-                &format!("Unknown server game command: {}\n", cmd)
-            );
-        }
-    }
+    // In C, ServerCommand() uses gi.argv(1) to get the sub-command.
+    // cmd_argv(0) = "sv", cmd_argv(1) = sub-command (e.g. "addip").
+    let cmd = myq2_common::cmd::cmd_argv(1);
+    myq2_game::g_svcmds::server_command(&cmd);
 }
 
 fn game_cb_write_game(filename: &str, autosave: bool) {
@@ -1575,6 +1636,54 @@ fn game_cb_read_level(filename: &str) {
             items: &ctx.items,
         };
         myq2_game::g_save::read_level(&mut save_ctx, filename);
+    });
+}
+
+fn game_cb_client_connect(ent: &mut Edict, userinfo: &str) -> bool {
+    let ent_idx = ent.s.number as usize;
+    with_game_context(|ctx| {
+        let (accepted, _info) = myq2_game::p_client::client_connect(ctx, ent_idx, userinfo);
+        accepted
+    })
+}
+
+fn game_cb_client_begin(ent: &mut Edict) {
+    let ent_idx = ent.s.number as usize;
+    with_game_context(|ctx| {
+        myq2_game::p_client::client_begin(ctx, ent_idx);
+    });
+}
+
+fn game_cb_client_userinfo_changed(ent: &mut Edict, userinfo: &str) {
+    let ent_idx = ent.s.number as usize;
+    with_game_context(|ctx| {
+        myq2_game::p_client::client_userinfo_changed(ctx, ent_idx, userinfo);
+    });
+}
+
+fn game_cb_client_disconnect(ent: &mut Edict) {
+    let ent_idx = ent.s.number as usize;
+    with_game_context(|ctx| {
+        myq2_game::p_client::client_disconnect(ctx, ent_idx);
+    });
+}
+
+fn game_cb_client_command(ent: &mut Edict) {
+    let ent_idx = ent.s.number as usize;
+    with_game_context(|ctx| {
+        // Build argv from the command system
+        let argc = myq2_common::cmd::cmd_argc();
+        let argv: Vec<String> = (0..argc).map(myq2_common::cmd::cmd_argv).collect();
+        let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+        let args = myq2_common::cmd::cmd_args();
+        myq2_game::g_cmds::client_command(ctx, ent_idx, &argv_refs, &args);
+    });
+}
+
+fn game_cb_client_think(ent: &mut Edict, cmd: &UserCmd) {
+    let ent_idx = ent.s.number as usize;
+    with_game_context(|ctx| {
+        myq2_game::p_client::client_think(ctx, ent_idx, cmd);
     });
 }
 

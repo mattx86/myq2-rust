@@ -963,10 +963,10 @@ pub fn sp_monster_mutant(self_ent: &mut Edict, ctx: &mut GameContext) {
     self_ent.monsterinfo.walk_fn = Some(crate::dispatch::MWALK_MUTANT);
     self_ent.monsterinfo.run_fn = Some(crate::dispatch::MRUN_MUTANT);
     self_ent.monsterinfo.dodge_fn = None;
-    self_ent.monsterinfo.attack_fn = None;      // mutant_jump not yet wired as MATTACK
+    self_ent.monsterinfo.attack_fn = Some(crate::dispatch::MATTACK_MUTANT);
     self_ent.monsterinfo.melee_fn = Some(crate::dispatch::MMELEE_MUTANT);
     self_ent.monsterinfo.sight_fn = Some(crate::dispatch::MSIGHT_MUTANT);
-    self_ent.monsterinfo.search_fn = None;      // mutant_search not in dispatch tables
+    self_ent.monsterinfo.search_fn = Some(crate::dispatch::MSEARCH_MUTANT);
     self_ent.monsterinfo.idle_fn = Some(crate::dispatch::MIDLE_MUTANT);
     self_ent.monsterinfo.checkattack_fn = Some(crate::dispatch::MCHECKATTACK_MUTANT);
 

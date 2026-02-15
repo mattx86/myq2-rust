@@ -205,7 +205,7 @@ impl DescriptorBufferLayout {
     fn query_layout_size(ctx: &super::context::VulkanContext, layout: vk::DescriptorSetLayout) -> u64 {
         // Get function pointer for vkGetDescriptorSetLayoutSizeEXT
         let fp = unsafe {
-            let name = std::ffi::CStr::from_bytes_with_nul_unchecked(b"vkGetDescriptorSetLayoutSizeEXT\0");
+            let name = c"vkGetDescriptorSetLayoutSizeEXT";
             ctx.instance.get_device_proc_addr(ctx.device.handle(), name.as_ptr())
         };
 
@@ -224,7 +224,7 @@ impl DescriptorBufferLayout {
     /// Query binding offset.
     fn query_binding_offset(ctx: &super::context::VulkanContext, layout: vk::DescriptorSetLayout, binding: u32) -> u64 {
         let fp = unsafe {
-            let name = std::ffi::CStr::from_bytes_with_nul_unchecked(b"vkGetDescriptorSetLayoutBindingOffsetEXT\0");
+            let name = c"vkGetDescriptorSetLayoutBindingOffsetEXT";
             ctx.instance.get_device_proc_addr(ctx.device.handle(), name.as_ptr())
         };
 
@@ -467,7 +467,7 @@ pub fn cmd_bind_descriptor_buffers(
     }
 
     let fp = unsafe {
-        let name = std::ffi::CStr::from_bytes_with_nul_unchecked(b"vkCmdBindDescriptorBuffersEXT\0");
+        let name = c"vkCmdBindDescriptorBuffersEXT";
         ctx.instance.get_device_proc_addr(ctx.device.handle(), name.as_ptr())
     };
 
@@ -499,7 +499,7 @@ pub fn cmd_set_descriptor_buffer_offsets(
     offsets: &[vk::DeviceSize],
 ) {
     let fp = unsafe {
-        let name = std::ffi::CStr::from_bytes_with_nul_unchecked(b"vkCmdSetDescriptorBufferOffsetsEXT\0");
+        let name = c"vkCmdSetDescriptorBufferOffsetsEXT";
         ctx.instance.get_device_proc_addr(ctx.device.handle(), name.as_ptr())
     };
 

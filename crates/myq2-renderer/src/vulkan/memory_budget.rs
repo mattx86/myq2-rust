@@ -54,6 +54,7 @@ impl HeapBudget {
 
 /// Memory budget capabilities.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct MemoryBudgetCapabilities {
     /// Whether memory budget extension is supported.
     pub supported: bool,
@@ -61,14 +62,6 @@ pub struct MemoryBudgetCapabilities {
     pub heap_count: u32,
 }
 
-impl Default for MemoryBudgetCapabilities {
-    fn default() -> Self {
-        Self {
-            supported: false,
-            heap_count: 0,
-        }
-    }
-}
 
 /// Memory budget manager.
 pub struct MemoryBudgetManager {

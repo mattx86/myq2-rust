@@ -1,10 +1,8 @@
 //! BSP world geometry management
 //!
 //! Batches BSP surfaces into VBOs grouped by texture.
-//! Uses parallel processing for batch construction.
 
 use super::{VertexBuffer, IndexBuffer, VertexArray};
-use rayon::prelude::*;
 
 /// Vertex format for BSP world surfaces.
 ///
@@ -33,6 +31,11 @@ impl BspVertex {
         }
     }
 }
+
+/// Translucent surface flag (33% opacity).
+pub const SURF_TRANS33: u32 = 0x20;
+/// Translucent surface flag (66% opacity).
+pub const SURF_TRANS66: u32 = 0x40;
 
 /// Per-surface draw information for PVS culling.
 #[derive(Clone, Debug)]
@@ -98,76 +101,102 @@ impl BspGeometryManager {
 
     /// Build geometry from BSP surfaces.
     ///
-    /// This should be called at level load time.
+    /// This should be called at level load time. Sorts indices by texture so
+    /// that same-texture surfaces are contiguous, enabling correct batching.
     pub fn build(&mut self, vertices: &[BspVertex], indices: &[u32], surfaces: Vec<SurfaceDrawInfo>) {
         // Upload vertex data
         self.vbo.upload(vertices, 0);
         self.vertex_count = vertices.len() as u32;
 
-        // Upload index data
-        self.ibo.upload_u32(indices, 0);
-        self.index_count = indices.len() as u32;
+        // Sort surfaces by texture_id (opaque first, then alpha), then rebuild
+        // index buffer in that order so same-texture surfaces are contiguous.
+        let mut sorted_order: Vec<usize> = (0..surfaces.len()).collect();
+        sorted_order.sort_by_key(|&i| {
+            let is_alpha = surfaces[i].flags & (SURF_TRANS33 | SURF_TRANS66) != 0;
+            (is_alpha, surfaces[i].texture_id)
+        });
 
-        // Store surface info
-        self.surfaces = surfaces;
+        let mut sorted_indices: Vec<u32> = Vec::with_capacity(indices.len());
+        let mut sorted_surfaces: Vec<SurfaceDrawInfo> = Vec::with_capacity(surfaces.len());
 
-        // Build texture batches
+        for &orig_idx in &sorted_order {
+            let surf = &surfaces[orig_idx];
+            let new_first = sorted_indices.len() as u32;
+
+            // Copy this surface's indices into the sorted buffer
+            let start = surf.first_index as usize;
+            let end = start + surf.index_count as usize;
+            if end <= indices.len() {
+                sorted_indices.extend_from_slice(&indices[start..end]);
+            }
+
+            sorted_surfaces.push(SurfaceDrawInfo {
+                first_index: new_first,
+                index_count: surf.index_count,
+                texture_id: surf.texture_id,
+                lightmap_id: surf.lightmap_id,
+                flags: surf.flags,
+            });
+        }
+
+        // Upload sorted index data
+        self.ibo.upload_u32(&sorted_indices, 0);
+        self.index_count = sorted_indices.len() as u32;
+
+        // Store sorted surface info
+        self.surfaces = sorted_surfaces;
+
+        // Build texture batches (now contiguous by texture)
         self.build_batches();
 
         // Configure VAO
         self.setup_vao();
 
         self.initialized = true;
+
+        // Diagnostic: log batch statistics
+        let total_batch_indices: u32 = self.batches.iter().map(|b| b.index_count).sum();
+        let alpha_count = self.surfaces.iter()
+            .filter(|s| s.flags & (SURF_TRANS33 | SURF_TRANS66) != 0)
+            .count();
+        eprintln!("BSP build: {} verts, {} indices, {} surfaces ({} opaque, {} alpha), {} batches, {} batch indices",
+            self.vertex_count, self.index_count, self.surfaces.len(),
+            self.surfaces.len() - alpha_count, alpha_count,
+            self.batches.len(), total_batch_indices);
     }
 
     /// Group surfaces into batches by texture.
     ///
-    /// Uses parallel processing to calculate index ranges for each batch.
+    /// Assumes surfaces are sorted by texture_id so same-texture surfaces
+    /// have contiguous index ranges in the index buffer.
     fn build_batches(&mut self) {
-        use std::collections::HashMap;
+        let mut batches: Vec<TextureBatch> = Vec::new();
 
-        // Phase 1: Group surfaces by texture ID (sequential HashMap insertion)
-        let mut batch_map: HashMap<u32, Vec<usize>> = HashMap::new();
         for (i, surface) in self.surfaces.iter().enumerate() {
-            batch_map
-                .entry(surface.texture_id)
-                .or_insert_with(Vec::new)
-                .push(i);
+            // Skip translucent surfaces (drawn separately with alpha blending)
+            if surface.flags & (SURF_TRANS33 | SURF_TRANS66) != 0 {
+                continue;
+            }
+
+            // Extend existing batch if same texture, or start a new one
+            if let Some(last) = batches.last_mut() {
+                if last.texture_id == surface.texture_id {
+                    // Extend: surfaces are contiguous after sorting
+                    last.index_count += surface.index_count;
+                    last.surfaces.push(i);
+                    continue;
+                }
+            }
+
+            // New batch
+            batches.push(TextureBatch {
+                texture_id: surface.texture_id,
+                first_index: surface.first_index,
+                index_count: surface.index_count,
+                surfaces: vec![i],
+            });
         }
 
-        // Phase 2: Calculate batch index ranges in parallel
-        // Collect into Vec first so we can process in parallel
-        let batch_entries: Vec<_> = batch_map.into_iter().collect();
-
-        // Reference to surfaces for parallel closure
-        let surfaces = &self.surfaces;
-
-        // Process each texture group in parallel
-        let mut batches: Vec<TextureBatch> = batch_entries
-            .into_par_iter()
-            .map(|(texture_id, surface_indices)| {
-                // Calculate first index and count for this batch
-                let (first_index, last_index) = surface_indices
-                    .iter()
-                    .fold((u32::MAX, 0u32), |(first, last), &si| {
-                        let surf = &surfaces[si];
-                        (
-                            first.min(surf.first_index),
-                            last.max(surf.first_index + surf.index_count),
-                        )
-                    });
-
-                TextureBatch {
-                    texture_id,
-                    first_index,
-                    index_count: last_index.saturating_sub(first_index),
-                    surfaces: surface_indices,
-                }
-            })
-            .collect();
-
-        // Sort batches by texture ID for consistent rendering order
-        batches.sort_by_key(|b| b.texture_id);
         self.batches = batches;
     }
 
@@ -222,6 +251,24 @@ impl BspGeometryManager {
     /// Get total index count.
     pub fn index_count(&self) -> u32 {
         self.index_count
+    }
+
+    /// Get surface draw info for a range of surfaces (used by brush models).
+    ///
+    /// Returns a slice of SurfaceDrawInfo for surfaces in [first..first+count].
+    pub fn draw_info_for_range(&self, first: usize, count: usize) -> &[SurfaceDrawInfo] {
+        let end = (first + count).min(self.surfaces.len());
+        if first >= self.surfaces.len() {
+            return &[];
+        }
+        &self.surfaces[first..end]
+    }
+
+    /// Get all translucent surfaces (SURF_TRANS33 or SURF_TRANS66).
+    pub fn alpha_surfaces(&self) -> Vec<&SurfaceDrawInfo> {
+        self.surfaces.iter()
+            .filter(|s| s.flags & (SURF_TRANS33 | SURF_TRANS66) != 0)
+            .collect()
     }
 
     /// Clear all geometry.

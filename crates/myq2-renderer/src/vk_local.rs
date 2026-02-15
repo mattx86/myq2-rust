@@ -129,7 +129,6 @@ pub const BACKFACE_EPSILON: f32 = 0.01;
 
 #[repr(C)]
 pub struct VkConfig {
-    pub renderer: i32,
     pub renderer_string: *const u8,
     pub vendor_string: *const u8,
     pub version_string: *const u8,
@@ -194,7 +193,25 @@ impl Default for VkState {
 pub struct CvarRef {
     pub value: f32,
     pub string: &'static str,
-    pub modified: bool,
+    /// Cvar system handle (index) for querying modified state and fresh values.
+    pub handle: usize,
+}
+
+impl CvarRef {
+    /// Check if this cvar has been modified since the last clear.
+    pub fn is_modified(&self) -> bool {
+        myq2_common::cvar::cvar_modified_by_handle(self.handle)
+    }
+
+    /// Clear the modified flag in the cvar system.
+    pub fn clear_modified(&self) {
+        myq2_common::cvar::cvar_clear_modified_by_handle(self.handle);
+    }
+
+    /// Get the current float value from the cvar system (fresh, not snapshot).
+    pub fn fresh_value(&self) -> f32 {
+        myq2_common::cvar::cvar_value_by_handle(self.handle)
+    }
 }
 
 impl Default for CvarRef {
@@ -202,7 +219,7 @@ impl Default for CvarRef {
         Self {
             value: 0.0,
             string: "",
-            modified: false,
+            handle: usize::MAX,
         }
     }
 }
@@ -277,6 +294,28 @@ pub fn qvk_tex_image2d(
     width: i32, height: i32, border: i32,
     format: u32, data_type: u32, data: *const u8,
 ) {
+    // Intercept base mip level (level 0) RGBA uploads for the modern texture store
+
+    if level == 0 && !data.is_null() && target == VK_TEXTURE_2D {
+        // Get currently bound texture
+        let texnum = unsafe {
+            let s = rfs();
+            s.vk_state.currenttextures[s.vk_state.currenttmu as usize]
+        };
+
+        // Convert to RGBA if needed and upload to texture store
+
+        if format == VK_RGBA as u32 && data_type == VK_UNSIGNED_BYTE as u32 {
+            // Already RGBA - can use directly
+            let byte_size = (width * height * 4) as usize;
+            let rgba_slice = unsafe { std::slice::from_raw_parts(data, byte_size) };
+            crate::modern::texture::create_or_update_texture(texnum, rgba_slice, width as u32, height as u32);
+        } else {
+            // Other formats - convert to RGBA first
+            // For now, just log and skip (most textures should be RGBA already)
+        }
+    }
+
     // SAFETY: Delegates to OpenGL; caller must ensure data pointer is valid.
     unsafe { crate::vk_bindings::TexImage2D(target, level, internal_format, width, height, border, format, data_type, data as *const std::ffi::c_void); }
 }
@@ -361,49 +400,75 @@ pub const VK_LUMINANCE8: u32 = 0x8040;
 pub const VK_TEXTURE: u32 = 0x1702;
 
 // ============================================================================
-// Global renderer state (mutable statics — matches C globals)
+// Global renderer state — consolidated into RenderFrameState
 // ============================================================================
 
-// vid — canonical definition in vk_rmain.rs (VID). Use crate::vk_rmain::VID.
+// vid — canonical definition in vk_rmain.rs (RendererGlobals). Use crate::vk_rmain::rg().vid.
 
-pub static mut r_origin: Vec3 = [0.0; 3];
-pub static mut vup: Vec3 = [0.0; 3];
-pub static mut vpn: Vec3 = [0.0; 3];
-pub static mut vright: Vec3 = [0.0; 3];
+/// All mutable renderer frame state consolidated into a single struct.
+/// Replaces the original 24 `static mut` globals with an UnsafeCell-based pattern.
+pub struct RenderFrameState {
+    pub r_origin: Vec3,
+    pub vup: Vec3,
+    pub vpn: Vec3,
+    pub vright: Vec3,
+    pub r_newrefdef: RefDef,
+    pub r_worldmodel: *mut Model,
+    pub currentmodel: *mut Model,
+    pub currententity: *mut Entity,
+    pub r_framecount: i32,
+    pub r_visframecount: i32,
+    pub r_viewcluster: i32,
+    pub r_viewcluster2: i32,
+    pub r_oldviewcluster: i32,
+    pub r_oldviewcluster2: i32,
+    pub c_brush_polys: i32,
+    pub c_alias_polys: i32,
+    pub r_notexture: *mut Image,
+    pub gltextures: [Image; MAX_GLTEXTURES],
+    pub numgltextures: i32,
+    pub vk_state: VkState,
+    pub vk_config: VkConfig,
+    pub vk_tex_solid_format_val: i32,
+    pub vk_tex_alpha_format_val: i32,
+    pub loadmodel: *mut Model,
+}
 
-pub static mut r_newrefdef: RefDef = unsafe { std::mem::zeroed() };
+// SAFETY: RenderFrameState contains raw pointers but all access is through the
+// rfs() accessor on the main rendering thread.
+unsafe impl Send for RenderFrameState {}
+unsafe impl Sync for RenderFrameState {}
 
-pub static mut r_worldmodel: *mut Model = std::ptr::null_mut();
-pub static mut currentmodel: *mut Model = std::ptr::null_mut();
-pub static mut currententity: *mut Entity = std::ptr::null_mut();
+impl RenderFrameState {
+    fn new() -> Self {
+        // SAFETY: zeroed() is valid for POD types, null pointers, zero ints.
+        // We then fix up non-zero defaults.
+        let mut s: Self = unsafe { std::mem::zeroed() };
+        s.vk_tex_solid_format_val = VK_RGB8;
+        s.vk_tex_alpha_format_val = VK_RGBA8;
+        s
+    }
+}
 
-pub static mut r_framecount: i32 = 0;
-pub static mut r_visframecount: i32 = 0;
-pub static mut r_viewcluster: i32 = 0;
-pub static mut r_viewcluster2: i32 = 0;
-pub static mut r_oldviewcluster: i32 = 0;
-pub static mut r_oldviewcluster2: i32 = 0;
+struct RfsCell(std::cell::UnsafeCell<RenderFrameState>);
 
-pub static mut c_brush_polys: i32 = 0;
-pub static mut c_alias_polys: i32 = 0;
+// SAFETY: All access occurs on the main rendering thread.
+unsafe impl Sync for RfsCell {}
 
-pub static mut r_world_matrix: [f32; 16] = [0.0; 16];
+static RFS: std::sync::LazyLock<RfsCell> =
+    std::sync::LazyLock::new(|| RfsCell(std::cell::UnsafeCell::new(RenderFrameState::new())));
 
-pub static mut r_notexture: *mut Image = std::ptr::null_mut();
-
-pub static mut gltextures: [Image; MAX_GLTEXTURES] = unsafe { std::mem::zeroed() };
-pub static mut numgltextures: i32 = 0;
-
-// ============================================================================
-// Cvar refs — canonical definitions in vk_rmain.rs
-// All cvar registration and updates happen there. Use crate::vk_rmain::* directly.
-// ============================================================================
-
-pub static mut vk_state: VkState = unsafe { std::mem::zeroed() };
-pub static mut vk_config: VkConfig = unsafe { std::mem::zeroed() };
-
-pub static mut vk_tex_solid_format_val: i32 = VK_RGB8;
-pub static mut vk_tex_alpha_format_val: i32 = VK_RGBA8;
+/// Access the global renderer frame state.
+///
+/// # Safety
+/// Renderer state is only accessed from the main rendering thread. The UnsafeCell
+/// provides interior mutability for the deep call chains in the rendering pipeline.
+#[inline(always)]
+pub fn rfs() -> &'static mut RenderFrameState {
+    // SAFETY: Single-threaded renderer access pattern. The UnsafeCell allows
+    // interior mutability without requiring a Mutex for the hot rendering path.
+    unsafe { &mut *RFS.0.get() }
+}
 
 // ============================================================================
 // Placeholder GL function stubs (additional)
@@ -442,10 +507,11 @@ pub fn qvk_tex_image_2d(
 
 /// Bind a texture if it's not already bound on the current TMU.
 pub unsafe fn vk_bind(texnum: i32) {
-    if vk_state.currenttextures[vk_state.currenttmu as usize] == texnum {
+    let s = rfs();
+    if s.vk_state.currenttextures[s.vk_state.currenttmu as usize] == texnum {
         return;
     }
-    vk_state.currenttextures[vk_state.currenttmu as usize] = texnum;
+    s.vk_state.currenttextures[s.vk_state.currenttmu as usize] = texnum;
     // SAFETY: Delegates to OpenGL.
     crate::vk_bindings::BindTexture(crate::vk_bindings::TEXTURE_2D, texnum as u32);
 }
@@ -453,11 +519,11 @@ pub unsafe fn vk_bind(texnum: i32) {
 /// Bind a texture on a specific multitexture unit if not already bound.
 pub unsafe fn vk_mbind(target: u32, texnum: i32) {
     let tmu = (target - VK_TEXTURE0) as usize;
-    if vk_state.currenttextures[tmu] == texnum {
+    if rfs().vk_state.currenttextures[tmu] == texnum {
         return;
     }
     vk_select_texture(target);
-    vk_state.currenttextures[tmu] = texnum;
+    rfs().vk_state.currenttextures[tmu] = texnum;
     crate::vk_bindings::BindTexture(crate::vk_bindings::TEXTURE_2D, texnum as u32);
 }
 
@@ -485,10 +551,11 @@ pub unsafe fn vk_enable_multitexture(enable: bool) {
 /// Select a texture unit (VK_TEXTURE0, VK_TEXTURE1, etc.).
 pub unsafe fn vk_select_texture(texture: u32) {
     let tmu = (texture - VK_TEXTURE0) as i32;
-    if tmu == vk_state.currenttmu {
+    let s = rfs();
+    if tmu == s.vk_state.currenttmu {
         return;
     }
-    vk_state.currenttmu = tmu;
+    s.vk_state.currenttmu = tmu;
     // SAFETY: Delegates to OpenGL.
     crate::vk_bindings::ActiveTexture(texture);
     crate::vk_bindings::ClientActiveTexture(texture);
@@ -503,16 +570,23 @@ pub unsafe fn r_cull_box_raw(mins: *const f32, maxs: *const f32) -> bool {
     crate::vk_rmain::r_cull_box(mins_ref, maxs_ref)
 }
 
-pub unsafe fn vk_monolightmap_char() -> u8 {
-    if crate::vk_rmain::VK_MONOLIGHTMAP.string.is_empty() {
+pub fn vk_monolightmap_char() -> u8 {
+    let s = crate::vk_rmain::rcvars().vk_monolightmap.string;
+    if s.is_empty() {
         b'0'
     } else {
-        crate::vk_rmain::VK_MONOLIGHTMAP.string.as_bytes()[0]
+        s.as_bytes()[0]
     }
 }
 
-pub unsafe fn vk_picmip_inc() { crate::vk_rmain::VK_PICMIP.value += 1.0; }
-pub unsafe fn vk_picmip_dec() { crate::vk_rmain::VK_PICMIP.value -= 1.0; }
+pub fn vk_picmip_inc() {
+    let current = crate::vk_rmain::rcvars().vk_picmip.fresh_value();
+    myq2_common::cvar::cvar_set_value("vk_picmip", current + 1.0);
+}
+pub fn vk_picmip_dec() {
+    let current = crate::vk_rmain::rcvars().vk_picmip.fresh_value();
+    myq2_common::cvar::cvar_set_value("vk_picmip", current - 1.0);
+}
 
 pub unsafe fn vk_find_image(name: &str, img_type: ImageType) -> *mut Image {
     crate::vk_image::vk_find_image_impl(name, img_type)
@@ -527,116 +601,128 @@ pub unsafe fn image_has_alpha(img: *mut Image) -> bool {
 }
 
 // World model accessors
-pub unsafe fn r_worldmodel_ptr() -> *mut Model { r_worldmodel }
+pub unsafe fn r_worldmodel_ptr() -> *mut Model { rfs().r_worldmodel }
 pub unsafe fn r_worldmodel_surfaces() -> *mut MSurface {
-    if r_worldmodel.is_null() { std::ptr::null_mut() } else { (*r_worldmodel).surfaces }
+    let wm = rfs().r_worldmodel;
+    if wm.is_null() { std::ptr::null_mut() } else { (*wm).surfaces }
 }
 pub unsafe fn r_worldmodel_nodes() -> *mut MNode {
-    if r_worldmodel.is_null() { std::ptr::null_mut() } else { (*r_worldmodel).nodes }
+    let wm = rfs().r_worldmodel;
+    if wm.is_null() { std::ptr::null_mut() } else { (*wm).nodes }
 }
 pub unsafe fn r_worldmodel_lightdata() -> *mut u8 {
-    if r_worldmodel.is_null() { std::ptr::null_mut() } else { (*r_worldmodel).lightdata }
+    let wm = rfs().r_worldmodel;
+    if wm.is_null() { std::ptr::null_mut() } else { (*wm).lightdata }
 }
 pub unsafe fn r_worldmodel_vis() -> *mut DvisT {
-    if r_worldmodel.is_null() { std::ptr::null_mut() } else { (*r_worldmodel).vis }
+    let wm = rfs().r_worldmodel;
+    if wm.is_null() { std::ptr::null_mut() } else { (*wm).vis }
 }
 pub unsafe fn r_worldmodel_numleafs() -> i32 {
-    if r_worldmodel.is_null() { 0 } else { (*r_worldmodel).numleafs }
+    let wm = rfs().r_worldmodel;
+    if wm.is_null() { 0 } else { (*wm).numleafs }
 }
 pub unsafe fn r_worldmodel_numnodes() -> i32 {
-    if r_worldmodel.is_null() { 0 } else { (*r_worldmodel).numnodes }
+    let wm = rfs().r_worldmodel;
+    if wm.is_null() { 0 } else { (*wm).numnodes }
 }
 pub unsafe fn r_worldmodel_leaf(i: i32) -> &'static mut MLeaf {
-    &mut *(*r_worldmodel).leafs.offset(i as isize)
+    &mut *(*rfs().r_worldmodel).leafs.offset(i as isize)
 }
 pub unsafe fn r_worldmodel_node(i: i32) -> *mut MNode {
-    (*r_worldmodel).nodes.offset(i as isize)
+    (*rfs().r_worldmodel).nodes.offset(i as isize)
 }
 
 // Current model accessors
 pub unsafe fn currentmodel_nummodelsurfaces() -> i32 {
-    if currentmodel.is_null() { 0 } else { (*currentmodel).nummodelsurfaces }
+    let cm = rfs().currentmodel;
+    if cm.is_null() { 0 } else { (*cm).nummodelsurfaces }
 }
 pub unsafe fn currentmodel_firstmodelsurface() -> i32 {
-    if currentmodel.is_null() { 0 } else { (*currentmodel).firstmodelsurface }
+    let cm = rfs().currentmodel;
+    if cm.is_null() { 0 } else { (*cm).firstmodelsurface }
 }
 pub unsafe fn currentmodel_firstnode() -> i32 {
-    if currentmodel.is_null() { 0 } else { (*currentmodel).firstnode }
+    let cm = rfs().currentmodel;
+    if cm.is_null() { 0 } else { (*cm).firstnode }
 }
 pub unsafe fn currentmodel_node(idx: i32) -> *mut MNode {
-    (*currentmodel).nodes.offset(idx as isize)
+    (*rfs().currentmodel).nodes.offset(idx as isize)
 }
 pub unsafe fn currentmodel_surface(idx: i32) -> *mut MSurface {
-    (*currentmodel).surfaces.offset(idx as isize)
+    (*rfs().currentmodel).surfaces.offset(idx as isize)
 }
 pub unsafe fn currentmodel_radius() -> f32 {
-    if currentmodel.is_null() { 0.0 } else { (*currentmodel).radius }
+    let cm = rfs().currentmodel;
+    if cm.is_null() { 0.0 } else { (*cm).radius }
 }
 pub unsafe fn currentmodel_mins() -> Vec3 {
-    if currentmodel.is_null() { [0.0; 3] } else { (*currentmodel).mins }
+    let cm = rfs().currentmodel;
+    if cm.is_null() { [0.0; 3] } else { (*cm).mins }
 }
 pub unsafe fn currentmodel_maxs() -> Vec3 {
-    if currentmodel.is_null() { [0.0; 3] } else { (*currentmodel).maxs }
+    let cm = rfs().currentmodel;
+    if cm.is_null() { [0.0; 3] } else { (*cm).maxs }
 }
 pub unsafe fn currentmodel_surfedge(idx: i32) -> i32 {
-    *(*currentmodel).surfedges.offset(idx as isize)
+    *(*rfs().currentmodel).surfedges.offset(idx as isize)
 }
 pub unsafe fn currentmodel_vertex_position(idx: i32) -> Vec3 {
-    (*(*currentmodel).vertexes.offset(idx as isize)).position
+    (*(*rfs().currentmodel).vertexes.offset(idx as isize)).position
 }
 pub unsafe fn currentmodel_edge_v(edge_idx: i32, v: usize) -> i32 {
-    (*(*currentmodel).edges.offset(edge_idx as isize)).v[v] as i32
+    (*(*rfs().currentmodel).edges.offset(edge_idx as isize)).v[v] as i32
 }
 
 // Load model accessors (used during surface subdivision)
-pub static mut loadmodel: *mut Model = std::ptr::null_mut();
 
 pub unsafe fn loadmodel_surfedge(idx: i32) -> i32 {
-    *(*loadmodel).surfedges.offset(idx as isize)
+    *(*rfs().loadmodel).surfedges.offset(idx as isize)
 }
 pub unsafe fn loadmodel_vertex_position(idx: i32) -> Vec3 {
-    (*(*loadmodel).vertexes.offset(idx as isize)).position
+    (*(*rfs().loadmodel).vertexes.offset(idx as isize)).position
 }
 pub unsafe fn loadmodel_edge_v(edge_idx: i32, v: usize) -> i32 {
-    (*(*loadmodel).edges.offset(edge_idx as isize)).v[v] as i32
+    (*(*rfs().loadmodel).edges.offset(edge_idx as isize)).v[v] as i32
 }
 
 // GL state accessors
-pub unsafe fn vk_state_lightmap_textures() -> i32 { vk_state.lightmap_textures }
-pub unsafe fn vk_state_inverse_intensity() -> f32 { vk_state.inverse_intensity }
-pub unsafe fn vk_state_num_tmu() -> i32 { vk_state.num_tmu }
-pub unsafe fn set_lightmap_textures(val: i32) { vk_state.lightmap_textures = val; }
+pub unsafe fn vk_state_lightmap_textures() -> i32 { rfs().vk_state.lightmap_textures }
+pub unsafe fn vk_state_inverse_intensity() -> f32 { rfs().vk_state.inverse_intensity }
+pub unsafe fn vk_state_num_tmu() -> i32 { rfs().vk_state.num_tmu }
+pub unsafe fn set_lightmap_textures(val: i32) { rfs().vk_state.lightmap_textures = val; }
 pub unsafe fn set_current_textures(t0: i32, t1: i32) {
-    vk_state.currenttextures[0] = t0;
-    vk_state.currenttextures[1] = t1;
+    let s = rfs();
+    s.vk_state.currenttextures[0] = t0;
+    s.vk_state.currenttextures[1] = t1;
 }
 pub unsafe fn set_current_textures_all(val: i32) {
-    for t in vk_state.currenttextures.iter_mut() { *t = val; }
+    for t in rfs().vk_state.currenttextures.iter_mut() { *t = val; }
 }
-pub unsafe fn vk_config_mtexcombine() -> bool { vk_config.mtexcombine != 0 }
-pub unsafe fn vk_tex_solid_format() -> i32 { vk_tex_solid_format_val }
-pub unsafe fn vk_tex_alpha_format() -> i32 { vk_tex_alpha_format_val }
+pub unsafe fn vk_config_mtexcombine() -> bool { rfs().vk_config.mtexcombine != 0 }
+pub unsafe fn vk_tex_solid_format() -> i32 { rfs().vk_tex_solid_format_val }
+pub unsafe fn vk_tex_alpha_format() -> i32 { rfs().vk_tex_alpha_format_val }
 
 // Multitexture query
 pub unsafe fn has_multitexture() -> bool {
     // In the C code this checks qglSelectTextureSGIS || qglActiveTextureARB.
     // Without GL extension function pointers, use num_tmu > 1 as a proxy.
-    vk_state.num_tmu > 1
+    rfs().vk_state.num_tmu > 1
 }
 pub unsafe fn has_mtex_coord() -> bool {
     // In the C code this checks qglMTexCoord2fSGIS != NULL.
     // Without GL extension function pointers, use num_tmu > 1 as a proxy.
-    vk_state.num_tmu > 1
+    rfs().vk_state.num_tmu > 1
 }
 
 // Texture array accessors
-pub unsafe fn num_vk_textures() -> i32 { numgltextures }
+pub unsafe fn num_vk_textures() -> i32 { rfs().numgltextures }
 pub unsafe fn vk_texture_at(i: i32) -> *mut Image {
-    &mut gltextures[i as usize]
+    &mut rfs().gltextures[i as usize]
 }
 
 // Fog density accessor
-pub unsafe fn fog_density() -> f32 { crate::vk_rmain::FOG_DENSITY }
+pub fn fog_density() -> f32 { crate::vk_rmain::rg().fog_density }
 
 // RefDef accessors — lightstyle() and dlight() are defined on RefRefDef in myq2-common.
 
@@ -645,7 +731,7 @@ pub unsafe fn fog_density() -> f32 { crate::vk_rmain::FOG_DENSITY }
 /// # Safety
 /// Accesses global r_worldmodel pointer. Caller must ensure model is loaded.
 pub unsafe fn mod_cluster_pvs(cluster: i32) -> *const u8 {
-    crate::vk_model::mod_cluster_pvs_raw(cluster, r_worldmodel) as *const u8
+    crate::vk_model::mod_cluster_pvs_raw(cluster, rfs().r_worldmodel) as *const u8
 }
 
 // ============================================================================

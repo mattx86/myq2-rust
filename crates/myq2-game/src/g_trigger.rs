@@ -643,7 +643,6 @@ pub fn sp_trigger_monsterjump(ctx: &mut GameContext, self_idx: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::g_local::*;
     use crate::game::Solid;
 
     fn init_test_gi() {

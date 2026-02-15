@@ -59,16 +59,21 @@ pub struct ShaderManager {
 impl ShaderManager {
     /// Create a new shader manager and compile all shaders.
     pub fn new() -> Result<Self, RenderError> {
+        myq2_common::common::com_printf("ShaderManager::new: *** ENTERED ***\n");
         let mut manager = Self {
             programs: HashMap::new(),
         };
+        myq2_common::common::com_printf("ShaderManager::new: Calling load_all_shaders()\n");
         manager.load_all_shaders()?;
+        myq2_common::common::com_printf("ShaderManager::new: load_all_shaders() returned\n");
         Ok(manager)
     }
 
     /// Load and compile all shader programs.
     fn load_all_shaders(&mut self) -> Result<(), RenderError> {
+        myq2_common::common::com_printf("ShaderManager::load_all_shaders: *** ENTERED ***\n");
         // World shader
+        myq2_common::common::com_printf("ShaderManager::load_all_shaders: Creating World shader\n");
         self.programs.insert(
             ShaderType::World,
             ShaderProgram::from_source(WORLD_VERT, WORLD_FRAG)?,

@@ -27,6 +27,18 @@ use crate::cl_scrn::ScrState;
 use crate::cl_tent::TEntState;
 use crate::snd_dma::SoundState;
 
+/// Actions that must be deferred until after all locks from the
+/// `cl_parse_server_message` wrapper are released.  Executing `cbuf_execute()`
+/// or trigger commands while holding CL/CLS/etc. locks causes same-thread
+/// re-entrancy deadlocks because command handlers also lock CL/CLS.
+#[derive(Debug)]
+pub enum DeferredAction {
+    /// Run `cbuf_execute()` — flushes previously stuffed text commands.
+    CbufExecute,
+    /// Run `cl_trigger_change_map()` — user-configured changemap command.
+    TriggerChangeMap,
+}
+
 /// Bundles all mutable state contexts needed during server message parsing.
 /// This avoids passing many individual parameters through the call chain.
 pub struct ParseContext<'a> {
@@ -38,6 +50,8 @@ pub struct ParseContext<'a> {
     /// Projectile subsystem state. Used for parsing and rendering projectile entities
     /// via the compact bit-packed protocol (originally #if 0'd in vanilla Q2).
     pub proj_state: &'a mut crate::cl_ents::ProjectileState,
+    /// Actions to execute after all locks are released (avoids re-entrancy deadlocks).
+    pub deferred_actions: Vec<DeferredAction>,
 }
 
 use crate::cl_ents::ClientCallbacks;
@@ -51,41 +65,59 @@ pub struct FrameCallbacks<'a> {
     pub tent: &'a mut TEntState,
     pub sound: &'a mut SoundState,
     pub cl_time: f32,
+    pub realtime: i32,
 }
 
 impl<'a> ClientCallbacks for FrameCallbacks<'a> {
     fn cl_entity_event(&mut self, ent: &EntityState) {
         use myq2_common::q_shared::{EV_ITEM_RESPAWN, EV_PLAYER_TELEPORT, EV_FOOTSTEP, EV_FALLSHORT, EV_FALL, EV_FALLFAR};
+        // Call sound methods directly on self.sound (already borrowed) instead of
+        // cl_s_register_sound/cl_s_start_sound which lock SOUND_STATE and CL,
+        // causing deadlocks when called from the parse wrapper.
+        let loader = |n: &str| myq2_common::files::fs_load_file(n);
+        let cl_time_i = self.cl_time as i32;
         match ent.event {
             x if x == EV_ITEM_RESPAWN => {
-                let sfx = crate::cl_main::cl_s_register_sound("items/respawn1.wav");
-                crate::cl_main::cl_s_start_sound(Some(&ent.origin), ent.number, CHAN_WEAPON, sfx, 1.0, ATTN_IDLE, 0.0);
+                let sfx = self.sound.s_register_sound("items/respawn1.wav", &loader).unwrap_or(0);
+                if sfx > 0 {
+                    self.sound.s_start_sound(Some(ent.origin), ent.number, CHAN_WEAPON, sfx, 1.0, ATTN_IDLE, 0.0, cl_time_i);
+                }
                 self.fx.cl_item_respawn_particles(&ent.origin, self.cl_time);
             }
             x if x == EV_PLAYER_TELEPORT => {
-                let sfx = crate::cl_main::cl_s_register_sound("misc/tele1.wav");
-                crate::cl_main::cl_s_start_sound(Some(&ent.origin), ent.number, CHAN_WEAPON, sfx, 1.0, ATTN_IDLE, 0.0);
+                let sfx = self.sound.s_register_sound("misc/tele1.wav", &loader).unwrap_or(0);
+                if sfx > 0 {
+                    self.sound.s_start_sound(Some(ent.origin), ent.number, CHAN_WEAPON, sfx, 1.0, ATTN_IDLE, 0.0, cl_time_i);
+                }
                 self.fx.cl_teleport_particles(&ent.origin, self.cl_time);
             }
             x if x == EV_FOOTSTEP => {
                 let cl_footsteps = myq2_common::cvar::cvar_variable_value("cl_footsteps");
                 if cl_footsteps != 0.0 {
                     let idx = (rand::random::<u32>() & 3) as usize;
-                    let sfx = self.tent.cl_sfx_footsteps[idx];
-                    crate::cl_main::cl_s_start_sound(None, ent.number, CHAN_BODY, sfx, 1.0, ATTN_NORM, 0.0);
+                    let sfx = self.tent.cl_sfx_footsteps[idx] as usize;
+                    if sfx > 0 {
+                        self.sound.s_start_sound(None, ent.number, CHAN_BODY, sfx, 1.0, ATTN_NORM, 0.0, cl_time_i);
+                    }
                 }
             }
             x if x == EV_FALLSHORT => {
-                let sfx = crate::cl_main::cl_s_register_sound("player/land1.wav");
-                crate::cl_main::cl_s_start_sound(None, ent.number, CHAN_AUTO, sfx, 1.0, ATTN_NORM, 0.0);
+                let sfx = self.sound.s_register_sound("player/land1.wav", &loader).unwrap_or(0);
+                if sfx > 0 {
+                    self.sound.s_start_sound(None, ent.number, CHAN_AUTO, sfx, 1.0, ATTN_NORM, 0.0, cl_time_i);
+                }
             }
             x if x == EV_FALL => {
-                let sfx = crate::cl_main::cl_s_register_sound("*fall2.wav");
-                crate::cl_main::cl_s_start_sound(None, ent.number, CHAN_AUTO, sfx, 1.0, ATTN_NORM, 0.0);
+                let sfx = self.sound.s_register_sound("*fall2.wav", &loader).unwrap_or(0);
+                if sfx > 0 {
+                    self.sound.s_start_sound(None, ent.number, CHAN_AUTO, sfx, 1.0, ATTN_NORM, 0.0, cl_time_i);
+                }
             }
             x if x == EV_FALLFAR => {
-                let sfx = crate::cl_main::cl_s_register_sound("*fall1.wav");
-                crate::cl_main::cl_s_start_sound(None, ent.number, CHAN_AUTO, sfx, 1.0, ATTN_NORM, 0.0);
+                let sfx = self.sound.s_register_sound("*fall1.wav", &loader).unwrap_or(0);
+                if sfx > 0 {
+                    self.sound.s_start_sound(None, ent.number, CHAN_AUTO, sfx, 1.0, ATTN_NORM, 0.0, cl_time_i);
+                }
             }
             _ => {}
         }
@@ -94,10 +126,7 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
         self.fx.cl_teleporter_particles(ent, self.cl_time);
     }
     fn add_stain(&mut self, org: &Vec3, intensity: f32, r: f32, g: f32, b: f32, a: f32, stain_type: StainType) {
-        // SAFETY: single-threaded engine, RENDERER_FNS set at startup
-        unsafe {
-            (crate::console::RENDERER_FNS.r_add_stain)(org, intensity, r, g, b, a, stain_type as i32);
-        }
+        (crate::console::renderer_fns().r_add_stain)(org, intensity, r, g, b, a, stain_type as i32);
     }
     fn shownet(&self, _s: &str) {
         // Debug output handled at call site
@@ -106,16 +135,8 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
         // Handled via cl_main wrapper
     }
     fn cl_check_prediction_error(&mut self) {
-        crate::cl_main::with_cl_cls(|cl, cls| {
-            let cl_predict = myq2_common::cvar::cvar_variable_value("cl_predict");
-            let cl_showmiss = myq2_common::cvar::cvar_variable_value("cl_showmiss");
-            crate::cl_pred::cl_check_prediction_error(
-                cl,
-                cls.netchan.incoming_acknowledged,
-                cl_predict,
-                cl_showmiss,
-            );
-        });
+        // No-op: called directly in cl_ents::cl_parse_frame using already-available
+        // cl/cls parameters to avoid re-locking CL/CLS from within the parse wrapper.
     }
     fn v_add_entity(&mut self, ent: &Entity) {
         crate::cl_main::with_view_state(|view| {
@@ -259,23 +280,27 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
     fn cl_add_dlights(&mut self) {
         let mut view = crate::cl_main::VIEW_STATE.lock().unwrap();
 
-        // === Extend dlight lifetimes during packet loss ===
-        // This prevents lights from abruptly disappearing when packets are dropped
-        let (packet_loss_frames, lerpfrac, current_time) = {
+        // Read CL fields once — CL Mutex is NOT held by callers.
+        // CLS IS held by console::cl_add_entities, so we must NOT lock it here.
+        // Use self.realtime (passed from caller which already holds CLS).
+        let (packet_loss_frames, lerpfrac, current_time, weapon_pred) = {
             let cl = crate::cl_main::CL.lock().unwrap();
-            if cl.packet_loss_frames > 0 {
-                // Extend dlights by 200ms per packet loss detection
-                // (extension is capped internally to prevent infinite lights)
-                self.fx.cl_extend_dlights_for_packet_loss(self.cl_time, 200.0);
-            } else {
-                // Reset extended dlights when packets resume
-                self.fx.cl_reset_extended_dlights();
-            }
-            (cl.packet_loss_frames, cl.lerpfrac, cl.time)
+            (
+                cl.packet_loss_frames,
+                cl.lerpfrac,
+                cl.time,
+                cl.smoothing.weapon_prediction.clone(),
+            )
         };
 
+        // === Extend dlight lifetimes during packet loss ===
+        if packet_loss_frames > 0 {
+            self.fx.cl_extend_dlights_for_packet_loss(self.cl_time, 200.0);
+        } else {
+            self.fx.cl_reset_extended_dlights();
+        }
+
         // Add standard dlights from fx system with per-entity smoothing
-        // This provides smoother light position and radius transitions
         {
             let mut cl = crate::cl_main::CL.lock().unwrap();
             self.fx.cl_add_dlights_smoothed(
@@ -289,11 +314,11 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
         }
 
         // Add predicted weapon effects as dlights
-        let cl = crate::cl_main::CL.lock().unwrap();
-        let cls = crate::cl_main::CLS.lock().unwrap();
+        // Note: CLS is already held by the caller (console::cl_add_entities),
+        // so we use self.realtime passed from the caller instead of locking CLS.
         self.fx.cl_add_predicted_weapon_effects(
-            &cl.smoothing.weapon_prediction,
-            cls.realtime,
+            &weapon_pred,
+            self.realtime,
             |org, intensity, r, g, b| {
                 crate::cl_view::v_add_light(&mut view, org, intensity, r, g, b);
             },
@@ -312,12 +337,12 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
         });
     }
     fn cl_play_footstep(&mut self, origin: &Vec3, _entity_num: i32) {
-        // Play a predicted footstep sound at the given position
-        // Use random footstep sound (0-3)
+        // Play a predicted footstep sound at the given position.
+        // Use self.sound directly to avoid re-locking SOUND_STATE.
         let idx = (rand::random::<usize>()) % 4;
-        let sfx = self.tent.cl_sfx_footsteps[idx];
-        if sfx != 0 {
-            crate::cl_main::cl_s_start_sound(Some(origin), 0, 0, sfx, 1.0, 1.0, 0.0);
+        let sfx = self.tent.cl_sfx_footsteps[idx] as usize;
+        if sfx > 0 {
+            self.sound.s_start_sound(Some(*origin), 0, 0, sfx, 1.0, 1.0, 0.0, self.cl_time as i32);
         }
     }
 }
@@ -382,7 +407,6 @@ pub fn msg_read_dir(msg: &mut SizeBuf, dir: &mut Vec3) {
 use myq2_common::common::com_server_state;
 use myq2_common::files::fs_gamedir;
 use myq2_common::cmd::cbuf_add_text;
-use myq2_common::cmd::cbuf_execute;
 use myq2_common::cvar::cvar_set;
 use crate::console::{r_register_model, r_register_skin, draw_find_pic, cm_inline_model};
 use crate::cl_main::{cl_request_next_download, cl_write_demo_message};
@@ -447,8 +471,9 @@ pub fn cl_parse_tent_dispatch(
     fx: &mut ClFxState,
     cl: &ClientState,
     net_message: &mut SizeBuf,
+    sound: &mut SoundState,
 ) {
-    crate::cl_tent::cl_parse_tent(tent, fx, cl, net_message);
+    crate::cl_tent::cl_parse_tent(tent, fx, cl, net_message, sound);
 }
 
 // ============================================================
@@ -576,8 +601,7 @@ pub fn cl_check_or_download_file(
     match fs::OpenOptions::new().read(true).write(true).open(&name) {
         Ok(mut fp) => {
             let len = fp.seek(SeekFrom::End(0)).unwrap_or(0) as i32;
-            // Note: original stores FILE* in cls.download; Rust version doesn't have that field.
-            // Download file handle management will be handled when full download system is wired up.
+            cls.download_file = Some(fp);
 
             com_printf(&format!("Resuming {}\n", cls.download_name));
             msg_write_byte(&mut cls.netchan.message, ClcOps::StringCmd as i32);
@@ -587,6 +611,16 @@ pub fn cl_check_or_download_file(
             );
         }
         Err(_) => {
+            match fs::File::create(&name) {
+                Ok(fp) => {
+                    cls.download_file = Some(fp);
+                }
+                Err(e) => {
+                    com_printf(&format!("Couldn't create {}: {}\n", name, e));
+                    return true;
+                }
+            }
+
             com_printf(&format!("Downloading {}\n", cls.download_name));
             msg_write_byte(&mut cls.netchan.message, ClcOps::StringCmd as i32);
             msg_write_string(
@@ -648,7 +682,7 @@ pub fn cl_register_sounds(cl: &mut ClientState, sound: &mut SoundState, tent: &m
         cl.sound_precache[i] = sound.s_register_sound(&cl.configstrings[CS_SOUNDS + i], &crate::snd_dma::snd_load_file).unwrap_or(0) as i32;
         crate::console::sys_send_key_events();
     }
-    sound.s_end_registration(&crate::snd_dma::snd_load_file);
+    sound.s_end_registration(crate::snd_dma::snd_load_file);
 }
 
 // ============================================================
@@ -666,16 +700,20 @@ pub fn cl_parse_download(cls: &mut ClientStatic, net_message: &mut SizeBuf) {
         return;
     }
 
-    // File I/O for download is simplified here; original uses cls.download FILE* field.
-    // The full download pipeline will be connected when the file transfer system is wired up.
-
-    net_message.readcount += size;
+    // Read download data and write to temp file
+    let data = msg_read_data(net_message, size as usize);
+    if let Some(ref mut f) = cls.download_file {
+        let _ = f.write_all(&data);
+    }
 
     if percent != 100 {
         cls.download_percent = percent;
         msg_write_byte(&mut cls.netchan.message, ClcOps::StringCmd as i32);
         cls.netchan.message.print("nextdl");
     } else {
+        // Close file before renaming
+        cls.download_file = None;
+
         let oldn = cl_download_filename(&cls.download_tempname);
         let newn = cl_download_filename(&cls.download_name);
         if fs::rename(&oldn, &newn).is_err() {
@@ -711,16 +749,19 @@ pub fn cl_parse_zdownload(cls: &mut ClientStatic, net_message: &mut SizeBuf) {
                 compressed_size, uncompressed_size, percent
             ));
 
-            // File I/O for download is simplified here; original uses cls.download FILE* field.
-            // The full download pipeline will be connected when the file transfer system is wired up.
-            // In a full implementation, we'd write `decompressed` to the download file.
-            let _ = decompressed; // Placeholder for actual file write
+            // Write decompressed data to download temp file
+            if let Some(ref mut f) = cls.download_file {
+                let _ = f.write_all(&decompressed);
+            }
 
             if percent != 100 {
                 cls.download_percent = percent;
                 msg_write_byte(&mut cls.netchan.message, ClcOps::StringCmd as i32);
                 cls.netchan.message.print("nextdl");
             } else {
+                // Close file before renaming
+                cls.download_file = None;
+
                 let oldn = cl_download_filename(&cls.download_tempname);
                 let newn = cl_download_filename(&cls.download_name);
                 if fs::rename(&oldn, &newn).is_err() {
@@ -747,13 +788,13 @@ pub fn cl_parse_server_data(
     cl: &mut ClientState,
     cls: &mut ClientStatic,
     net_message: &mut SizeBuf,
-    // cinematic playback not yet wired through here; see scr_play_cinematic call below
+    deferred_actions: &mut Vec<DeferredAction>,
 ) {
     com_dprintf("Serverdata packet received.\n");
 
-    // Execute change map trigger command (R1Q2/Q2Pro feature)
-    // Called before clearing state, so commands can access current map info
-    crate::cl_main::cl_trigger_change_map();
+    // Defer change map trigger — running cbuf_execute while CL/CLS locks are held
+    // would deadlock because command handlers also lock CL/CLS.
+    deferred_actions.push(DeferredAction::TriggerChangeMap);
 
     cl_clear_state(cl);
     cls.state = ConnState::Connected;
@@ -1137,8 +1178,10 @@ fn cl_parse_decompressed_cmd(
         }
 
         x if x == SvcOps::ServerData as i32 => {
-            cbuf_execute();
-            cl_parse_server_data(cl, cls, net_message);
+            // Defer cbuf_execute — running it here while holding CL/CLS locks
+            // would deadlock because command handlers also lock CL/CLS.
+            ctx.deferred_actions.push(DeferredAction::CbufExecute);
+            cl_parse_server_data(cl, cls, net_message, &mut ctx.deferred_actions);
         }
 
         x if x == SvcOps::ConfigString as i32 => {
@@ -1154,7 +1197,7 @@ fn cl_parse_decompressed_cmd(
         }
 
         x if x == SvcOps::TempEntity as i32 => {
-            cl_parse_tent_dispatch(ctx.tent, ctx.fx, cl, net_message);
+            cl_parse_tent_dispatch(ctx.tent, ctx.fx, cl, net_message, ctx.sound);
         }
 
         x if x == SvcOps::MuzzleFlash as i32 => {
@@ -1182,6 +1225,7 @@ fn cl_parse_decompressed_cmd(
                 tent: ctx.tent,
                 sound: ctx.sound,
                 cl_time: cl.time as f32,
+                realtime: cls.realtime,
             };
             crate::cl_ents::cl_parse_frame(
                 cl,
@@ -1329,8 +1373,9 @@ pub fn cl_parse_server_message(
             }
 
             x if x == SvcOps::ServerData as i32 => {
-                cbuf_execute();
-                cl_parse_server_data(cl, cls, net_message);
+                // Defer cbuf_execute — same deadlock avoidance as the main path.
+                ctx.deferred_actions.push(DeferredAction::CbufExecute);
+                cl_parse_server_data(cl, cls, net_message, &mut ctx.deferred_actions);
             }
 
             x if x == SvcOps::ConfigString as i32 => {
@@ -1346,7 +1391,7 @@ pub fn cl_parse_server_message(
             }
 
             x if x == SvcOps::TempEntity as i32 => {
-                cl_parse_tent_dispatch(ctx.tent, ctx.fx, cl, net_message);
+                cl_parse_tent_dispatch(ctx.tent, ctx.fx, cl, net_message, ctx.sound);
             }
 
             x if x == SvcOps::MuzzleFlash as i32 => {
@@ -1379,6 +1424,7 @@ pub fn cl_parse_server_message(
                     tent: ctx.tent,
                     sound: ctx.sound,
                     cl_time: cl.time as f32,
+                    realtime: cls.realtime,
                 };
                 crate::cl_ents::cl_parse_frame(
                     cl,

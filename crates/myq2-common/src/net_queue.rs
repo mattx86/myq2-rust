@@ -45,7 +45,7 @@ impl PacketQueue {
     ///
     /// # Arguments
     /// * `capacity` - Maximum number of packets that can be queued.
-    ///                When full, new packets are dropped (producer never blocks).
+    ///   When full, new packets are dropped (producer never blocks).
     pub fn new(capacity: usize) -> Self {
         let (sender, receiver) = bounded(capacity);
         Self { sender, receiver }
