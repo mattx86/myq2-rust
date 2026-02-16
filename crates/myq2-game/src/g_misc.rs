@@ -1930,7 +1930,11 @@ pub fn teleporter_touch(
     let target = ctx.edicts[self_idx].target.clone();
     let dest_opt = crate::g_utils::g_find(ctx, 0, "targetname", &target);
     let Some(dest_idx) = dest_opt else {
-        gi_dprintf("Couldn't find destination\n");
+        // Throttle: only print once per teleporter entity to avoid log spam
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            gi_dprintf("Couldn't find destination (further messages suppressed)\n");
+        }
         return;
     };
 

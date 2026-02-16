@@ -179,6 +179,10 @@ impl ApplicationHandler for Q2App {
                 sys_win::handle_mouse_button(button, state, time);
             }
 
+            WindowEvent::CursorMoved { position, .. } => {
+                sys_win::handle_cursor_moved(position.x, position.y);
+            }
+
             WindowEvent::MouseWheel { delta, .. } => {
                 sys_win::handle_mouse_wheel(delta, time);
             }
@@ -222,9 +226,20 @@ impl ApplicationHandler for Q2App {
         _device_id: DeviceId,
         event: DeviceEvent,
     ) {
-        // Handle raw mouse motion for FPS controls
-        if let DeviceEvent::MouseMotion { delta } = event {
-            sys_win::handle_mouse_motion(delta.0, delta.1);
+        let time = sys_win::sys_milliseconds() as u32;
+        match event {
+            // Handle raw mouse motion for FPS controls
+            DeviceEvent::MouseMotion { delta } => {
+                sys_win::handle_mouse_motion(delta.0, delta.1);
+            }
+            // Handle mouse buttons via raw device input to bypass window manager.
+            // WindowEvent::MouseInput can interact with title bar (minimize/maximize)
+            // when the cursor isn't properly locked. DeviceEvent::Button always fires
+            // regardless of cursor grab mode.
+            DeviceEvent::Button { button, state } => {
+                sys_win::handle_device_mouse_button(button, state, time);
+            }
+            _ => {}
         }
     }
 
@@ -232,12 +247,17 @@ impl ApplicationHandler for Q2App {
         // Called after all events have been processed
         if self.initialized {
             // Check if minimized or dedicated - sleep to avoid busy-waiting
-            {
-                let minimized = *sys_win::MINIMIZED.lock().unwrap();
-                let dedicated = myq2_common::cvar::cvar_variable_value("dedicated") != 0.0;
-                if minimized || dedicated {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            let minimized = *sys_win::MINIMIZED.lock().unwrap();
+            let dedicated = myq2_common::cvar::cvar_variable_value("dedicated") != 0.0;
+            if minimized || dedicated {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                // Ensure the render loop stays alive by always requesting a redraw.
+                // Without this, the RedrawRequested → run_frame → request_redraw chain
+                // breaks after minimize/restore (no one re-kicks the loop).
+                platform_register::with_platform(|s| {
+                    s.vk_imp.request_redraw();
+                });
             }
 
             // Update frame time

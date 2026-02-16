@@ -50,13 +50,13 @@ pub fn init_texture_store(descriptor_set_layout: vk::DescriptorSetLayout) {
     }).flatten();
 
     if let Some(store) = store {
-        *TEXTURE_STORE.lock().unwrap() = Some(store);
+        *TEXTURE_STORE.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
     }
 }
 
 /// Shutdown and release all texture store resources.
 pub fn shutdown_texture_store() {
-    let store = TEXTURE_STORE.lock().unwrap().take();
+    let store = TEXTURE_STORE.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(store) = store {
         gpu_device::with_device(|ctx| {
             // SAFETY: Vulkan context is valid, called from main thread.
@@ -69,26 +69,22 @@ pub fn shutdown_texture_store() {
 /// Called from `vk_upload32()` to intercept texture uploads.
 /// Uses lazy descriptor creation to avoid lock contention during init.
 pub fn create_or_update_texture(texnum: i32, rgba_data: &[u8], width: u32, height: u32) {
-    let mut guard = TEXTURE_STORE.lock().unwrap();
+    let mut guard = TEXTURE_STORE.lock().unwrap_or_else(|e| e.into_inner());
     let store = match guard.as_mut() {
         Some(s) => s,
         None => return, // TextureStore not initialized yet
     };
 
-    // If texture already exists with same dimensions, update cached pixels.
-    if let Some(existing) = store.textures.get_mut(&texnum) {
-        if existing.width == width && existing.height == height {
-            // Cache pixels for lazy descriptor creation
-            existing.cached_pixels = Some(rgba_data.to_vec());
-            // Clear descriptor — will be recreated on next draw
-            existing.descriptor_set = None;
-            return;
-        }
-        // Dimensions changed — remove old texture, create new one below
+    // If texture already exists, destroy it and recreate with new pixel data.
+    // This handles both same-dimensions re-uploads (e.g. scrap atlas) and
+    // dimension changes. Recreating avoids issues with uploading to an existing
+    // VkImage during an active render frame (queue_wait_idle conflicts).
+    if store.textures.contains_key(&texnum) {
         let old = store.textures.remove(&texnum).unwrap();
+        let pool = store.descriptor_pool;
         gpu_device::with_device(|ctx| {
             // SAFETY: Vulkan context valid, main thread.
-            unsafe { destroy_vulkan_texture(ctx, &old); }
+            unsafe { destroy_vulkan_texture(ctx, &old, pool); }
         });
     }
 
@@ -118,7 +114,7 @@ pub fn create_or_update_texture(texnum: i32, rgba_data: &[u8], width: u32, heigh
 /// Get the descriptor set for a texnum, for binding during rendering.
 /// Returns None if texture doesn't exist or descriptor hasn't been created yet.
 pub fn get_descriptor_set(texnum: i32) -> Option<vk::DescriptorSet> {
-    TEXTURE_STORE.lock().unwrap().as_ref()
+    TEXTURE_STORE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
         .and_then(|store| store.textures.get(&texnum).and_then(|t| t.descriptor_set))
 }
 
@@ -131,17 +127,11 @@ pub fn ensure_descriptor_set(texnum: i32) -> Option<vk::DescriptorSet> {
     }
 
     // Slow path: need to create descriptor from cached pixels
-    let mut guard = TEXTURE_STORE.lock().unwrap();
-    let store = match guard.as_mut() {
-        Some(s) => s,
-        None => return None,
-    };
+    let mut guard = TEXTURE_STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let store = guard.as_mut()?;
 
     // Get texture and check if it has cached pixels
-    let texture = match store.textures.get_mut(&texnum) {
-        Some(t) => t,
-        None => return None,
-    };
+    let texture = store.textures.get_mut(&texnum)?;
 
     // Already has descriptor? (race condition check)
     if texture.descriptor_set.is_some() {
@@ -224,7 +214,7 @@ pub fn create_descriptor_for_view(
     image_view: vk::ImageView,
     sampler: vk::Sampler,
 ) {
-    let mut guard = TEXTURE_STORE.lock().unwrap();
+    let mut guard = TEXTURE_STORE.lock().unwrap_or_else(|e| e.into_inner());
     let store = match guard.as_mut() {
         Some(s) => s,
         None => return,
@@ -292,13 +282,14 @@ impl TextureStore {
         descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> Option<Self> {
         // Create shared sampler — LINEAR filtering with trilinear mipmapping
+        // BSP world textures tile/repeat across surfaces, so REPEAT is required
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
             .mip_lod_bias(0.0)
             .anisotropy_enable(false)
             .max_anisotropy(1.0)
@@ -318,7 +309,8 @@ impl TextureStore {
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
-            .max_sets(1200);
+            .max_sets(1200)
+            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
 
         let descriptor_pool = match ctx.device.create_descriptor_pool(&pool_info, None) {
             Ok(pool) => pool,
@@ -338,10 +330,11 @@ impl TextureStore {
 
     /// Destroy all resources.
     unsafe fn destroy(self, ctx: &crate::vulkan::context::VulkanContext) {
+        let pool = self.descriptor_pool;
         for tex in self.textures.values() {
-            destroy_vulkan_texture(ctx, tex);
+            destroy_vulkan_texture(ctx, tex, pool);
         }
-        // Descriptor sets are freed when pool is destroyed
+        // Pool itself is also destroyed (frees any remaining descriptor sets)
         ctx.device.destroy_descriptor_pool(self.descriptor_pool, None);
         ctx.device.destroy_sampler(self.sampler, None);
     }
@@ -868,12 +861,17 @@ unsafe fn upload_to_image(
     ctx.device.destroy_buffer(staging_buffer, None);
 }
 
-/// Destroy a single VulkanTexture's GPU resources (descriptor set freed with pool).
+/// Destroy a single VulkanTexture's GPU resources including its descriptor set.
 /// Handles null handles gracefully (for view-only entries from `create_descriptor_for_view`).
 unsafe fn destroy_vulkan_texture(
     ctx: &crate::vulkan::context::VulkanContext,
     tex: &VulkanTexture,
+    descriptor_pool: vk::DescriptorPool,
 ) {
+    // Free descriptor set back to pool (pool created with FREE_DESCRIPTOR_SET flag)
+    if let Some(ds) = tex.descriptor_set {
+        let _ = ctx.device.free_descriptor_sets(descriptor_pool, &[ds]);
+    }
     if tex.view != vk::ImageView::null() {
         ctx.device.destroy_image_view(tex.view, None);
     }

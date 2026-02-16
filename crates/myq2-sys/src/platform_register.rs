@@ -159,35 +159,76 @@ pub fn platform_init() {
         })),
         in_init: Some(Box::new(|| {
             myq2_common::cvar::with_cvar_ctx(|cvars| {
-                let mut input = INPUT_STATE.lock().unwrap();
+                let mut input = INPUT_STATE.lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 crate::in_win::in_init(&mut input, cvars);
             });
         })),
         in_shutdown: Some(Box::new(|| {
             with_platform(|s| {
-                let mut input = INPUT_STATE.lock().unwrap();
+                let mut input = INPUT_STATE.lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 let window = s.vk_imp.window();
                 crate::in_win::in_shutdown(&mut input, window);
             });
         })),
         in_commands: Some(Box::new(|| {
-            let mut input = INPUT_STATE.lock().unwrap();
+            let mut input = INPUT_STATE.lock()
+                .unwrap_or_else(|e| e.into_inner());
             crate::in_win::in_commands(&mut input);
         })),
         in_frame: Some(Box::new(|| {
+            // Read actual client state BEFORE locking other resources
+            // SAFETY: CL/CLS initialized at startup, accessed from main thread
+            let (refresh_prepped, key_dest_is_console_or_menu) = unsafe {
+                use myq2_client::console::{CL, CLS};
+                use myq2_client::client::KeyDest;
+                let rp = CL.refresh_prepped;
+                let kd = matches!(CLS.key_dest, KeyDest::Console | KeyDest::Menu);
+                (rp, kd)
+            };
+
             myq2_common::cvar::with_cvar_ctx(|cvars| {
                 // Get vid_fullscreen from cvars BEFORE locking PLATFORM_STATE
                 // to avoid nested lock attempts
                 let vid_fullscreen = cvars.variable_value("vid_fullscreen");
 
                 with_platform(|s| {
-                    let mut input = INPUT_STATE.lock().unwrap();
+                    let mut input = INPUT_STATE.lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     let window = s.vk_imp.window();
                     crate::in_win::in_frame(
                         &mut input, cvars, window,
-                        true, false, vid_fullscreen,
+                        refresh_prepped, key_dest_is_console_or_menu, vid_fullscreen,
                     );
                 });
+            });
+        })),
+        in_move: Some(Box::new(|cmd, viewangles, in_strafe_state| {
+            myq2_common::cvar::with_cvar_ctx(|cvars| {
+                let mut input = INPUT_STATE.lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let sensitivity = cvars.variable_value("sensitivity") as f32;
+                let m_yaw = cvars.variable_value("m_yaw") as f32;
+                let m_pitch = cvars.variable_value("m_pitch") as f32;
+                let m_forward = cvars.variable_value("m_forward") as f32;
+                let m_side = cvars.variable_value("m_side") as f32;
+                let lookstrafe = cvars.variable_value("lookstrafe") as f32;
+                let freelook = cvars.variable_value("freelook") as f32;
+                crate::in_win::in_move(
+                    &mut input, cmd, cvars, viewangles,
+                    true, // active_app
+                    sensitivity, m_yaw, m_pitch, m_forward, m_side,
+                    in_strafe_state, lookstrafe, freelook,
+                    0,    // in_speed_state (unused)
+                    0.0,  // cl_run_value (unused)
+                    0.0,  // frametime (unused)
+                    0.0,  // cl_forwardspeed_value (unused)
+                    0.0,  // cl_sidespeed_value (unused)
+                    0.0,  // cl_upspeed_value (unused)
+                    0.0,  // cl_pitchspeed_value (unused)
+                    0.0,  // cl_yawspeed_value (unused)
+                );
             });
         })),
         sys_send_key_events: Some(Box::new(|| {

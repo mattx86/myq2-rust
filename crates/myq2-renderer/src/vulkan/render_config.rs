@@ -143,37 +143,37 @@ pub fn init_render_config(ctx: &VulkanContext, r_msaa: i32, r_anisotropy: i32) {
         config.anisotropy_level,
         if config.anisotropy_enabled { "enabled" } else { "disabled" },
     );
-    *RENDER_CONFIG.lock().unwrap() = config;
+    *RENDER_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = config;
 }
 
 /// Update the global render configuration.
 pub fn update_render_config(ctx: &VulkanContext, r_msaa: i32, r_anisotropy: i32) {
-    RENDER_CONFIG.lock().unwrap().update(ctx, r_msaa, r_anisotropy);
+    RENDER_CONFIG.lock().unwrap_or_else(|e| e.into_inner()).update(ctx, r_msaa, r_anisotropy);
 }
 
 /// Get the current render configuration.
 pub fn render_config() -> RenderConfig {
-    *RENDER_CONFIG.lock().unwrap()
+    *RENDER_CONFIG.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Get the current MSAA sample count.
 pub fn msaa_samples() -> vk::SampleCountFlags {
-    RENDER_CONFIG.lock().unwrap().msaa_samples
+    RENDER_CONFIG.lock().unwrap_or_else(|e| e.into_inner()).msaa_samples
 }
 
 /// Check if MSAA is enabled.
 pub fn is_msaa_enabled() -> bool {
-    RENDER_CONFIG.lock().unwrap().msaa_enabled
+    RENDER_CONFIG.lock().unwrap_or_else(|e| e.into_inner()).msaa_enabled
 }
 
 /// Get the current anisotropy level.
 pub fn anisotropy_level() -> f32 {
-    RENDER_CONFIG.lock().unwrap().anisotropy_level
+    RENDER_CONFIG.lock().unwrap_or_else(|e| e.into_inner()).anisotropy_level
 }
 
 /// Check if anisotropic filtering is enabled.
 pub fn is_anisotropy_enabled() -> bool {
-    RENDER_CONFIG.lock().unwrap().anisotropy_enabled
+    RENDER_CONFIG.lock().unwrap_or_else(|e| e.into_inner()).anisotropy_enabled
 }
 
 #[cfg(test)]

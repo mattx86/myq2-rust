@@ -131,8 +131,8 @@ pub struct ModernRenderPath {
     sky_vbo: VertexBuffer,
     /// Sky IBO (temporary, uploaded each frame).
     sky_ibo: IndexBuffer,
-    /// Dynamic light vertices (pos3, generated each frame).
-    dlight_vertices: Vec<[f32; 3]>,
+    /// Dynamic light vertices (pos3 + color3, generated each frame).
+    dlight_vertices: Vec<[f32; 6]>,
     /// Dynamic light indices (generated each frame).
     dlight_indices: Vec<u32>,
     /// Dynamic light push constants (one per light).
@@ -141,6 +141,10 @@ pub struct ModernRenderPath {
     dlight_vbo: VertexBuffer,
     /// Dynamic light IBO (temporary, uploaded each frame).
     dlight_ibo: IndexBuffer,
+    /// Lightmap texture array descriptor set (set 2, binding 0).
+    lightmap_descriptor_set: Option<vk::DescriptorSet>,
+    /// Descriptor pool for the lightmap descriptor set.
+    lightmap_descriptor_pool: Option<vk::DescriptorPool>,
 }
 
 impl ModernRenderPath {
@@ -202,6 +206,8 @@ impl ModernRenderPath {
             dlight_draws: Vec::new(),
             dlight_vbo: VertexBuffer::new(),
             dlight_ibo: IndexBuffer::new(),
+            lightmap_descriptor_set: None,
+            lightmap_descriptor_pool: None,
         }
     }
 
@@ -260,6 +266,110 @@ impl ModernRenderPath {
         &mut self.lightmap_array
     }
 
+    /// Initialize the lightmap texture array GPU resources, upload all layers,
+    /// and create the descriptor set for per-pixel lightmap sampling.
+    pub fn init_lightmap_gpu(&mut self, layers: &[Vec<u8>]) {
+        // Create GPU resources for the lightmap texture array
+        self.lightmap_array.create_gpu_resources();
+
+        if layers.is_empty() {
+            return;
+        }
+
+        // Batch upload all lightmap layers
+        let layer_data: Vec<(u32, Vec<u8>)> = layers.iter()
+            .enumerate()
+            .filter(|(_, data)| !data.is_empty())
+            .map(|(i, data)| (i as u32, data.clone()))
+            .collect();
+
+        if !layer_data.is_empty() {
+            self.lightmap_array.batch_upload_layers(&layer_data);
+            eprintln!("[LIGHTMAP] Uploaded {} lightmap layers to GPU texture array", layer_data.len());
+        }
+
+        // Create descriptor set for the lightmap array at set 2
+        let image_view = match self.lightmap_array.vk_image_view() {
+            Some(v) => v,
+            None => return,
+        };
+        let sampler = match self.lightmap_array.vk_sampler() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let lm_set_layout = match self.pipelines.as_ref().and_then(|pm| pm.lightmap_set_layout()) {
+            Some(l) => l,
+            None => {
+                eprintln!("[LIGHTMAP] No lightmap descriptor set layout available");
+                return;
+            }
+        };
+
+        gpu_device::with_device(|ctx| {
+            // SAFETY: Vulkan context valid, main thread only
+            unsafe {
+                // Create a small descriptor pool for the lightmap set
+                let pool_sizes = [vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                    descriptor_count: 1,
+                }];
+                let pool_info = vk::DescriptorPoolCreateInfo::default()
+                    .pool_sizes(&pool_sizes)
+                    .max_sets(1)
+                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
+
+                let pool = match ctx.device.create_descriptor_pool(&pool_info, None) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("[LIGHTMAP] Failed to create descriptor pool: {:?}", e);
+                        return;
+                    }
+                };
+
+                // Allocate descriptor set
+                let layouts = [lm_set_layout];
+                let alloc_info = vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(pool)
+                    .set_layouts(&layouts);
+
+                let ds = match ctx.device.allocate_descriptor_sets(&alloc_info) {
+                    Ok(sets) => sets[0],
+                    Err(e) => {
+                        eprintln!("[LIGHTMAP] Failed to allocate descriptor set: {:?}", e);
+                        ctx.device.destroy_descriptor_pool(pool, None);
+                        return;
+                    }
+                };
+
+                // Write lightmap texture array to the descriptor set
+                let image_info = vk::DescriptorImageInfo::default()
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image_view(image_view)
+                    .sampler(sampler);
+
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(ds)
+                    .dst_binding(0)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(std::slice::from_ref(&image_info));
+
+                ctx.device.update_descriptor_sets(&[write], &[]);
+
+                self.lightmap_descriptor_set = Some(ds);
+                self.lightmap_descriptor_pool = Some(pool);
+
+                eprintln!("[LIGHTMAP] Descriptor set created for per-pixel lightmap sampling");
+            }
+        });
+    }
+
+    /// Get the lightmap descriptor set (set 2) for rendering.
+    pub fn lightmap_descriptor_set(&self) -> Option<vk::DescriptorSet> {
+        self.lightmap_descriptor_set
+    }
+
     /// Get the 2D draw manager mutably.
     pub fn draw2d_mut(&mut self) -> &mut Draw2DManager {
         &mut self.draw2d
@@ -293,7 +403,7 @@ impl ModernRenderPath {
         // Dot products for translation
         let tx = -(right[0] * vieworg[0] + right[1] * vieworg[1] + right[2] * vieworg[2]);
         let ty = -(up[0] * vieworg[0] + up[1] * vieworg[1] + up[2] * vieworg[2]);
-        let tz = -(forward[0] * vieworg[0] + forward[1] * vieworg[1] + forward[2] * vieworg[2]);
+        let tz = forward[0] * vieworg[0] + forward[1] * vieworg[1] + forward[2] * vieworg[2];
 
         // Column-major
         [
@@ -862,6 +972,12 @@ impl RenderPath for ModernRenderPath {
                 if let Err(e) = pm.create_pipeline(ShaderType::DynamicLight, PipelineVariant::Additive) {
                     eprintln!("Failed to create DynamicLight/Additive pipeline: {}", e);
                 }
+                if let Err(e) = pm.create_pipeline(ShaderType::World, PipelineVariant::Multiplicative) {
+                    eprintln!("Failed to create World/Multiplicative pipeline: {}", e);
+                }
+                if let Err(e) = pm.create_pipeline(ShaderType::Water, PipelineVariant::AlphaBlend) {
+                    eprintln!("Failed to create Water/AlphaBlend pipeline: {}", e);
+                }
                 self.pipelines = Some(pm);
             }
             Err(e) => {
@@ -896,6 +1012,15 @@ impl RenderPath for ModernRenderPath {
         self.bsp_geometry.clear();
         self.alias_models.clear();
         self.lightmap_array.reset_allocation();
+        // Destroy lightmap descriptor resources
+        gpu_device::with_device(|ctx| {
+            unsafe {
+                if let Some(pool) = self.lightmap_descriptor_pool.take() {
+                    ctx.device.destroy_descriptor_pool(pool, None);
+                }
+                self.lightmap_descriptor_set = None;
+            }
+        });
         // Destroy cinematic Vulkan resources
         gpu_device::with_device(|ctx| {
             // SAFETY: Vulkan context is valid and we're on the main thread.
@@ -1004,6 +1129,7 @@ impl RenderPath for ModernRenderPath {
         }
 
         // ========== Setup matrices and uniforms ==========
+
         // Compute view and projection matrices from refdef
         let view = Self::compute_view_matrix(&params.vieworg, &params.viewangles);
         let proj = Self::compute_projection_matrix(params.fov_x, params.fov_y, 4.0, 4096.0);
@@ -1125,7 +1251,6 @@ impl RenderPath for ModernRenderPath {
         // Step 1: Render 3D scene to scene FBO (BSP world + particles)
         if self.scene_rendered {
             self.flush_3d_scene();
-
             // Step 2: Composite scene to swapchain with post-processing (polyblend + gamma)
             self.composite_scene_to_swapchain();
         }
@@ -1408,15 +1533,22 @@ impl RenderPath for ModernRenderPath {
 
             let base_vtx = self.dlight_vertices.len() as u32;
 
+            // Center vertex: bright color (matches original GL vertex color)
+            let center_color = [
+                dl.color[0] * 0.2,
+                dl.color[1] * 0.2,
+                dl.color[2] * 0.2,
+            ];
             // Center vertex: offset slightly toward camera
-            let center = [
+            self.dlight_vertices.push([
                 dl.origin[0] - vpn[0] * rad,
                 dl.origin[1] - vpn[1] * rad,
                 dl.origin[2] - vpn[2] * rad,
-            ];
-            self.dlight_vertices.push(center);
+                center_color[0], center_color[1], center_color[2],
+            ]);
 
             // 17 edge vertices (closed fan: vertex 17 == vertex 1)
+            // Edge vertices are black — rasterizer interpolates smoothly from center
             for j in (0..=16).rev() {
                 let a = (j as f32) / 16.0 * std::f32::consts::TAU;
                 let (sin_a, cos_a) = a.sin_cos();
@@ -1424,6 +1556,7 @@ impl RenderPath for ModernRenderPath {
                     dl.origin[0] + vright[0] * cos_a * rad + vup[0] * sin_a * rad,
                     dl.origin[1] + vright[1] * cos_a * rad + vup[1] * sin_a * rad,
                     dl.origin[2] + vright[2] * cos_a * rad + vup[2] * sin_a * rad,
+                    0.0, 0.0, 0.0, // black at edges
                 ]);
             }
 
@@ -1522,6 +1655,17 @@ impl RenderPath for ModernRenderPath {
             };
             let first_idx = self.sky_indices.len() as u32 - 6;
             self.sky_face_draws.push((texnum, first_idx, 6));
+        }
+
+        // One-time diagnostic for sky rendering
+        static SKY_DIAG_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !self.sky_face_draws.is_empty() && !SKY_DIAG_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("[SKY] draw_sky: {} faces, {} verts, {} indices",
+                self.sky_face_draws.len(), self.sky_vertices.len(), self.sky_indices.len());
+            for (tex_id, first_idx, count) in &self.sky_face_draws {
+                let has_ds = super::texture::ensure_descriptor_set(*tex_id as i32).is_some();
+                eprintln!("[SKY]   texnum={} first={} count={} descriptor_set={}", tex_id, first_idx, count, has_ds);
+            }
         }
     }
 
@@ -2018,7 +2162,9 @@ impl ModernRenderPath {
             return;
         }
 
-        gpu_device::with_device(|ctx| {
+        // Use with_device_and_commands_mut to avoid deadlock — both with_device
+        // and with_commands_mut lock the same VK_DEVICE_STATE mutex.
+        gpu_device::with_device_and_commands_mut(|ctx, commands| {
             unsafe {
                 // Create staging buffer
                 let buffer_info = vk::BufferCreateInfo::default()
@@ -2107,78 +2253,80 @@ impl ModernRenderPath {
                         depth: 1,
                     });
 
-                // Record and submit copy commands
-                gpu_device::with_commands_mut(|commands| {
-                    let cmd = match commands.begin_single_time() {
-                        Ok(c) => c,
-                        Err(_) => return,
-                    };
+                // Record and submit copy commands (commands already available, no nested lock)
+                let cmd = match commands.begin_single_time() {
+                    Ok(c) => c,
+                    Err(_) => {
+                        ctx.device.free_memory(staging_memory, None);
+                        ctx.device.destroy_buffer(staging_buffer, None);
+                        return;
+                    }
+                };
 
-                    // Transition image to TRANSFER_DST
-                    let barrier = vk::ImageMemoryBarrier::default()
-                        .old_layout(vk::ImageLayout::UNDEFINED)
-                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .image(texture)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        })
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+                // Transition image to TRANSFER_DST
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(texture)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
 
-                    ctx.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier],
-                    );
+                ctx.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
 
-                    // Copy buffer to image
-                    ctx.device.cmd_copy_buffer_to_image(
-                        cmd,
-                        staging_buffer,
-                        texture,
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        &[copy_region],
-                    );
+                // Copy buffer to image
+                ctx.device.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buffer,
+                    texture,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[copy_region],
+                );
 
-                    // Transition image to SHADER_READ_ONLY
-                    let barrier = vk::ImageMemoryBarrier::default()
-                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .image(texture)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        })
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                // Transition image to SHADER_READ_ONLY
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(texture)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
 
-                    ctx.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier],
-                    );
+                ctx.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
 
-                    let _ = commands.end_single_time(ctx, cmd);
-                });
+                let _ = commands.end_single_time(ctx, cmd);
 
                 // Clean up staging resources
                 ctx.device.free_memory(staging_memory, None);
@@ -2301,12 +2449,18 @@ impl ModernRenderPath {
             .map(|p| (p.pipeline, p.layout));
 
         let mut alias_draw_entries: Vec<AliasDrawEntry> = Vec::new();
+        let alias_registered_count = self.alias_models.model_count();
         if alias_pipeline_data.is_some() {
+            let mut alias_batch_found = 0u32;
             for batch in self.alias_instanced.batches() {
+                alias_batch_found += 1;
                 let model_id = batch.model_id();
                 let model_buffers = match self.alias_models.get(model_id) {
                     Some(b) => b,
-                    None => continue,
+                    None => {
+                        eprintln!("ALIAS: model_id={:#x} NOT FOUND in alias_models registry", model_id);
+                        continue;
+                    }
                 };
                 let alias_vbo = match model_buffers.vertex_buffer().vk_buffer() {
                     Some(b) => b,
@@ -2370,6 +2524,12 @@ impl ModernRenderPath {
                     });
                 }
             }
+            if alias_batch_found > 0 || alias_registered_count > 0 {
+                eprintln!("ALIAS: pipeline=true, batches_with_instances={}, registered_models={}, draw_entries={}",
+                    alias_batch_found, alias_registered_count, alias_draw_entries.len());
+            }
+        } else if alias_registered_count > 0 {
+            eprintln!("ALIAS: pipeline=NONE, registered_models={}", alias_registered_count);
         }
 
         // Pre-gather alpha surface data
@@ -2389,6 +2549,29 @@ impl ModernRenderPath {
                 (surf.first_index, surf.index_count, alpha, ds)
             })
             .collect();
+
+        // Pre-gather turb (water/lava/slime) surface data
+        let water_pipeline_data = self.pipelines.as_ref()
+            .and_then(|pm| pm.get(ShaderType::Water, PipelineVariant::AlphaBlend))
+            .map(|p| (p.pipeline, p.layout));
+
+        let turb_surface_draws: Vec<(u32, u32, f32, Option<vk::DescriptorSet>)> =
+            self.bsp_geometry.turb_surfaces().iter().map(|surf| {
+                // Turb surfaces with TRANS flags get appropriate alpha, otherwise opaque
+                let alpha = if surf.flags & super::geometry::SURF_TRANS33 != 0 {
+                    0.33_f32
+                } else if surf.flags & super::geometry::SURF_TRANS66 != 0 {
+                    0.66
+                } else {
+                    1.0 // Opaque turb (lava, etc.)
+                };
+                let ds = super::texture::ensure_descriptor_set(surf.texture_id as i32)
+                    .or_else(|| super::texture::ensure_descriptor_set(0));
+                (surf.first_index, surf.index_count, alpha, ds)
+            })
+            .collect();
+        let has_turb = !turb_surface_draws.is_empty() && water_pipeline_data.is_some() && has_bsp;
+        let water_time = self.frame_uniforms.time;
 
         // Pre-gather sprite draw data
         let sprite_pipeline_data = alpha_blend_pipeline_data; // Sprites use World/AlphaBlend
@@ -2442,6 +2625,20 @@ impl ModernRenderPath {
         }).collect::<Vec<_>>();
         let has_dlights = !dlight_verts.is_empty() && dlight_pipeline_data.is_some();
 
+        // Pre-gather detail texture overlay data
+        let detail_pipeline_data = self.pipelines.as_ref()
+            .and_then(|pm| pm.get(ShaderType::World, PipelineVariant::Multiplicative))
+            .map(|p| (p.pipeline, p.layout));
+        let detail_descriptor_set = crate::vk_warp::with_warp_state(|ws| {
+            if ws.detailtexture.is_null() { return None; }
+            // SAFETY: detailtexture is a valid Image pointer loaded during R_Init
+            let texnum = unsafe { (*ws.detailtexture).texnum };
+            super::texture::ensure_descriptor_set(texnum)
+        });
+        let has_detail_overlay = detail_pipeline_data.is_some()
+            && detail_descriptor_set.is_some()
+            && has_bsp;
+
         // Build particle push constants (112 bytes)
         #[repr(C)]
         struct ParticlePushConstants {
@@ -2463,6 +2660,34 @@ impl ModernRenderPath {
             view_origin: self.frame_uniforms.view_origin,
             _pad0: 0.0,
         };
+
+        // Pre-gather lightmap descriptor set for per-pixel sampling (set 2)
+        let lightmap_ds = self.lightmap_descriptor_set;
+
+        // Upload sprite/sky/dlight vertex data BEFORE the with_device closure
+        // to avoid re-entrant deadlock — upload() calls with_device() internally.
+        if has_sprites {
+            self.sprite_vbo.upload(&sprite_verts, 0);
+            self.sprite_ibo.upload_u32(&sprite_indices, 0);
+        }
+        if has_sky {
+            self.sky_vbo.upload(&sky_verts, 0);
+            self.sky_ibo.upload_u32(&sky_idxs, 0);
+        }
+        if has_dlights {
+            // SAFETY: [f32; 6] is 24 bytes (pos3 + color3)
+            unsafe {
+                let dlight_bytes: &[u8] = std::slice::from_raw_parts(
+                    dlight_verts.as_ptr() as *const u8,
+                    dlight_verts.len() * 24,
+                );
+                self.dlight_vbo.upload(std::slice::from_raw_parts(
+                    dlight_bytes.as_ptr() as *const [f32; 6],
+                    dlight_verts.len(),
+                ), 0);
+            }
+            self.dlight_ibo.upload_u32(&dlight_idxs, 0);
+        }
 
         gpu_device::with_device(|ctx| {
             // SAFETY: Vulkan context valid, called from main thread only, within
@@ -2563,19 +2788,27 @@ impl ModernRenderPath {
                         64, alpha_bytes,
                     );
 
+                    // Push overbright scale at offset 68 (4 bytes) — recovers dynamic
+                    // range lost when lightmap values are stored at reduced scale
+                    let overbright = crate::vk_rmain::rcvars().r_overbrightbits.value.max(1.0);
+                    let overbright_bytes: &[u8] = std::slice::from_raw_parts(
+                        &overbright as *const f32 as *const u8, 4,
+                    );
+                    ctx.device.cmd_push_constants(
+                        cmd, world_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        68, overbright_bytes,
+                    );
+
                     ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo_handle], &[0]);
                     ctx.device.cmd_bind_index_buffer(cmd, bsp_ibo_handle, 0, vk::IndexType::UINT32);
 
-                    // One-time diagnostic
-                    static FLUSH_DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                    let fc = FLUSH_DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if fc < 3 {
-                        let total_idx: u32 = bsp_batches.iter().map(|b| b.1).sum();
-                        let ds_count = bsp_batches.iter().filter(|b| b.2.is_some()).count();
-                        eprintln!("flush_3d frame {}: {} batches, {} total indices, {} have descriptors, viewport={}x{}, scene={}x{}",
-                            fc, bsp_batches.len(), total_idx, ds_count,
-                            scene_extent.width, scene_extent.height,
-                            scene_width, scene_height);
+                    // Bind lightmap texture array at set 2 for per-pixel sampling
+                    if let Some(lm_ds) = lightmap_ds {
+                        ctx.device.cmd_bind_descriptor_sets(
+                            cmd, vk::PipelineBindPoint::GRAPHICS,
+                            world_layout, 2, &[lm_ds], &[],
+                        );
                     }
 
                     for &(first_index, index_count, ds) in &bsp_batches {
@@ -2610,6 +2843,115 @@ impl ModernRenderPath {
                             }
                             ctx.device.cmd_draw_indexed(cmd, index_count, 1, first_index, 0, 0);
                         }
+                    }
+                }
+
+                // === Detail Texture Overlay (multiplicative second pass) ===
+                if has_detail_overlay {
+                    let (detail_pipeline, detail_layout) = detail_pipeline_data.unwrap();
+                    let detail_ds = detail_descriptor_set.unwrap();
+
+                    ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, detail_pipeline);
+
+                    // Push MVP (same as world) + alpha=1.0
+                    let mvp_bytes: &[u8] = std::slice::from_raw_parts(
+                        mvp.as_ptr() as *const u8, 64,
+                    );
+                    ctx.device.cmd_push_constants(
+                        cmd, detail_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0, mvp_bytes,
+                    );
+                    let opaque_alpha = 1.0_f32;
+                    let alpha_bytes: &[u8] = std::slice::from_raw_parts(
+                        &opaque_alpha as *const f32 as *const u8, 4,
+                    );
+                    ctx.device.cmd_push_constants(
+                        cmd, detail_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        64, alpha_bytes,
+                    );
+
+                    // Bind detail texture at set 1
+                    ctx.device.cmd_bind_descriptor_sets(
+                        cmd, vk::PipelineBindPoint::GRAPHICS,
+                        detail_layout, 1, &[detail_ds], &[],
+                    );
+
+                    // Re-bind BSP geometry (pipeline change may invalidate state)
+                    let bsp_vbo_handle = bsp_vbo.unwrap();
+                    let bsp_ibo_handle = bsp_ibo.unwrap();
+                    ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo_handle], &[0]);
+                    ctx.device.cmd_bind_index_buffer(cmd, bsp_ibo_handle, 0, vk::IndexType::UINT32);
+
+                    // Redraw all world surfaces with detail texture (multiplicative blend)
+                    for &(first_index, index_count, _) in &bsp_batches {
+                        ctx.device.cmd_draw_indexed(cmd, index_count, 1, first_index, 0, 0);
+                    }
+                }
+
+                // === Water / Turb Surfaces ===
+                if has_turb {
+                    let (water_pipeline, water_layout) = water_pipeline_data.unwrap();
+
+                    ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, water_pipeline);
+
+                    // Re-bind BSP geometry (pipeline change invalidates state)
+                    let bsp_vbo_handle = bsp_vbo.unwrap();
+                    let bsp_ibo_handle = bsp_ibo.unwrap();
+                    ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo_handle], &[0]);
+                    ctx.device.cmd_bind_index_buffer(cmd, bsp_ibo_handle, 0, vk::IndexType::UINT32);
+
+                    // Water push constants: mat4 MVP (64) + float alpha (4) + float time (4) + float scroll (4) = 76 bytes
+                    // Push MVP first (64 bytes)
+                    let mvp_bytes: &[u8] = std::slice::from_raw_parts(
+                        mvp.as_ptr() as *const u8, 64,
+                    );
+                    ctx.device.cmd_push_constants(
+                        cmd, water_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0, mvp_bytes,
+                    );
+
+                    // Push time at offset 68 (4 bytes)
+                    let time_bytes: &[u8] = std::slice::from_raw_parts(
+                        &water_time as *const f32 as *const u8, 4,
+                    );
+                    ctx.device.cmd_push_constants(
+                        cmd, water_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        68, time_bytes,
+                    );
+
+                    // Push scroll=0 at offset 72 (4 bytes)
+                    let scroll: f32 = 0.0;
+                    let scroll_bytes: &[u8] = std::slice::from_raw_parts(
+                        &scroll as *const f32 as *const u8, 4,
+                    );
+                    ctx.device.cmd_push_constants(
+                        cmd, water_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        72, scroll_bytes,
+                    );
+
+                    for &(first_index, index_count, alpha, ds) in &turb_surface_draws {
+                        // Push per-surface alpha at offset 64
+                        let alpha_bytes: &[u8] = std::slice::from_raw_parts(
+                            &alpha as *const f32 as *const u8, 4,
+                        );
+                        ctx.device.cmd_push_constants(
+                            cmd, water_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            64, alpha_bytes,
+                        );
+
+                        if let Some(ds) = ds {
+                            ctx.device.cmd_bind_descriptor_sets(
+                                cmd, vk::PipelineBindPoint::GRAPHICS,
+                                water_layout, 1, &[ds], &[],
+                            );
+                        }
+                        ctx.device.cmd_draw_indexed(cmd, index_count, 1, first_index, 0, 0);
                     }
                 }
 
@@ -2660,10 +3002,6 @@ impl ModernRenderPath {
                     let (sp_pipeline, sp_layout) = sprite_pipeline_data.unwrap();
                     ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, sp_pipeline);
 
-                    // Upload sprite vertex/index data
-                    self.sprite_vbo.upload(&sprite_verts, 0);
-                    self.sprite_ibo.upload_u32(&sprite_indices, 0);
-
                     if let (Some(s_vbo), Some(s_ibo)) = (self.sprite_vbo.vk_buffer(), self.sprite_ibo.vk_buffer()) {
                         ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[s_vbo], &[0]);
                         ctx.device.cmd_bind_index_buffer(cmd, s_ibo, 0, vk::IndexType::UINT32);
@@ -2706,10 +3044,6 @@ impl ModernRenderPath {
                 if has_sky {
                     let (sky_pipeline, sky_layout) = sky_pipeline_data.unwrap();
 
-                    // Upload sky vertex/index data
-                    self.sky_vbo.upload(&sky_verts, 0);
-                    self.sky_ibo.upload_u32(&sky_idxs, 0);
-
                     if let (Some(s_vbo), Some(s_ibo)) = (self.sky_vbo.vk_buffer(), self.sky_ibo.vk_buffer()) {
                         ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, sky_pipeline);
                         ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[s_vbo], &[0]);
@@ -2740,18 +3074,6 @@ impl ModernRenderPath {
                 // === Dynamic Lights ===
                 if has_dlights {
                     let (dl_pipeline, dl_layout) = dlight_pipeline_data.unwrap();
-
-                    // Upload dlight vertex/index data
-                    // SAFETY: [f32; 3] is 12 bytes, same as DlightVertex (pos3)
-                    let dlight_bytes: &[u8] = std::slice::from_raw_parts(
-                        dlight_verts.as_ptr() as *const u8,
-                        dlight_verts.len() * 12,
-                    );
-                    self.dlight_vbo.upload(std::slice::from_raw_parts(
-                        dlight_bytes.as_ptr() as *const [f32; 3],
-                        dlight_verts.len(),
-                    ), 0);
-                    self.dlight_ibo.upload_u32(&dlight_idxs, 0);
 
                     if let (Some(d_vbo), Some(d_ibo)) = (self.dlight_vbo.vk_buffer(), self.dlight_ibo.vk_buffer()) {
                         ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, dl_pipeline);
@@ -2796,6 +3118,25 @@ impl ModernRenderPath {
 
                         ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo_handle], &[0]);
                         ctx.device.cmd_bind_index_buffer(cmd, bsp_ibo_handle, 0, vk::IndexType::UINT32);
+
+                        // Push overbright scale at offset 68 (same value for all alpha surfaces)
+                        let overbright = crate::vk_rmain::rcvars().r_overbrightbits.value.max(1.0);
+                        let overbright_bytes: &[u8] = std::slice::from_raw_parts(
+                            &overbright as *const f32 as *const u8, 4,
+                        );
+                        ctx.device.cmd_push_constants(
+                            cmd, ab_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            68, overbright_bytes,
+                        );
+
+                        // Bind lightmap texture array at set 2 for alpha surfaces
+                        if let Some(lm_ds) = lightmap_ds {
+                            ctx.device.cmd_bind_descriptor_sets(
+                                cmd, vk::PipelineBindPoint::GRAPHICS,
+                                ab_layout, 2, &[lm_ds], &[],
+                            );
+                        }
 
                         for &(first_index, index_count, alpha, ds) in &alpha_surface_draws {
                             // Push per-surface alpha at offset 64
@@ -2977,12 +3318,16 @@ impl ModernRenderPath {
 
                 ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pp_pipeline);
 
-                // Use negative height for Vulkan Y-flip (to match OpenGL Y-up coordinates)
+                // Post-processing blit: use NORMAL viewport (no Y-flip).
+                // The 3D scene was already rendered correctly to the scene FBO with
+                // a Y-flip viewport. The fullscreen triangle's UV mapping (v=0 at top,
+                // v=1 at bottom) is designed for Vulkan's default coordinate system.
+                // Using a Y-flip here would flip the scene texture upside down.
                 let viewport = vk::Viewport {
                     x: 0.0,
-                    y: sc_extent.height as f32,
+                    y: 0.0,
                     width: sc_extent.width as f32,
-                    height: -(sc_extent.height as f32),
+                    height: sc_extent.height as f32,
                     min_depth: 0.0, max_depth: 1.0,
                 };
                 ctx.device.cmd_set_viewport(cmd, 0, &[viewport]);

@@ -439,17 +439,79 @@ pub fn handle_keyboard_input(
 
 /// Process a winit mouse button event.
 pub fn handle_mouse_button(button: MouseButton, state: ElementState, time: u32) {
+    // When mouse is active (grabbed for gameplay), skip WindowEvent::MouseInput
+    // because we handle buttons via DeviceEvent::Button instead (raw input that
+    // bypasses the window manager, preventing title-bar minimize on left-click).
+    let input = crate::in_win::INPUT_STATE.lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if input.mouseactive {
+        return; // Handled by handle_device_mouse_button via DeviceEvent::Button
+    }
+    drop(input);
+
     let pressed = state == ElementState::Pressed;
     if let Some(q2key) = winit_mouse_button_to_q2(button) {
         keys::key_event(q2key, pressed, time);
     }
 }
 
-/// Process a winit mouse motion event.
+/// Process a DeviceEvent::Button (raw mouse button input).
+/// Maps device button IDs (1=left, 2=middle, 3=right, 4=back, 5=forward)
+/// to Quake 2 key constants. Preferred over WindowEvent::MouseInput during
+/// gameplay because raw input bypasses the window manager (no title-bar clicks).
+pub fn handle_device_mouse_button(button: u32, state: ElementState, time: u32) {
+    let q2key = match button {
+        1 => keys::K_MOUSE1,  // Left
+        3 => keys::K_MOUSE2,  // Right
+        2 => keys::K_MOUSE3,  // Middle
+        4 => keys::K_MOUSE4,  // Back / XButton1
+        5 => keys::K_MOUSE5,  // Forward / XButton2
+        _ => return,
+    };
+    let pressed = state == ElementState::Pressed;
+    keys::key_event(q2key, pressed, time);
+}
+
+/// Process a winit DeviceEvent::MouseMotion event (raw input — preferred for FPS games).
 pub fn handle_mouse_motion(delta_x: f64, delta_y: f64) {
-    let mut input = crate::in_win::INPUT_STATE.lock().unwrap();
-    input.mx_accum += delta_x as i32;
-    input.my_accum += delta_y as i32;
+    // Use unwrap_or_else to recover from poisoned mutex (e.g., panic in qcommon_frame
+    // was caught by catch_unwind but left INPUT_STATE poisoned). Without this, a
+    // poisoned mutex would crash the event loop on the next mouse motion event.
+    let mut input = crate::in_win::INPUT_STATE.lock()
+        .unwrap_or_else(|e| e.into_inner());
+    input.raw_input_works = true;
+    input.mx_accum += delta_x; // f64, no truncation
+    input.my_accum += delta_y;
+}
+
+/// Process a winit WindowEvent::CursorMoved event (fallback if DeviceEvent::MouseMotion unavailable).
+pub fn handle_cursor_moved(x: f64, y: f64) {
+    let mut input = crate::in_win::INPUT_STATE.lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // Only use CursorMoved as fallback when DeviceEvent::MouseMotion isn't working
+    if input.raw_input_works {
+        // Still update cursor position for reference, but don't accumulate
+        input.last_cursor_x = x;
+        input.last_cursor_y = y;
+        input.has_cursor_pos = true;
+        return;
+    }
+
+    if input.has_cursor_pos {
+        let dx = x - input.last_cursor_x;
+        let dy = y - input.last_cursor_y;
+
+        // Only accumulate if the delta is reasonable (not a window move / first event)
+        if dx.abs() < 200.0 && dy.abs() < 200.0 {
+            input.mx_accum += dx;
+            input.my_accum += dy;
+        }
+    }
+
+    input.last_cursor_x = x;
+    input.last_cursor_y = y;
+    input.has_cursor_pos = true;
 }
 
 /// Process a winit mouse wheel event.
@@ -459,33 +521,43 @@ pub fn handle_mouse_wheel(delta: MouseScrollDelta, time: u32) {
         MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 10.0, // Approximate
     };
 
-    // Wheel up/down mapped to MOUSE4/MOUSE5 (matches Q2 convention)
+    // Wheel up/down mapped to MWHEELUP/MWHEELDOWN (standard Q2 convention)
+    // K_MOUSE4/K_MOUSE5 are reserved for physical back/forward mouse buttons
     if y > 0.0 {
-        keys::key_event(keys::K_MOUSE4, true, time);
-        keys::key_event(keys::K_MOUSE4, false, time);
+        keys::key_event(keys::K_MWHEELUP, true, time);
+        keys::key_event(keys::K_MWHEELUP, false, time);
     } else if y < 0.0 {
-        keys::key_event(keys::K_MOUSE5, true, time);
-        keys::key_event(keys::K_MOUSE5, false, time);
+        keys::key_event(keys::K_MWHEELDOWN, true, time);
+        keys::key_event(keys::K_MWHEELDOWN, false, time);
     }
 }
 
 /// Handle window focus gained.
+///
+/// Always activates input when focus is gained. The winit `Focused(true)` event
+/// is authoritative — if the window has focus, we should be active regardless of
+/// the `MINIMIZED` flag (which may not have been cleared yet if `Occluded(false)`
+/// arrives after `Focused(true)`).
 pub fn handle_focus_gained() {
-    let minimized = *MINIMIZED.lock().unwrap();
-    let active = !minimized;
+    // Clear minimized flag since we're being focused (implies restored)
+    {
+        let mut m = MINIMIZED.lock().unwrap();
+        *m = false;
+    }
     {
         let mut aa = ACTIVE_APP.lock().unwrap();
-        *aa = if active { 1 } else { 0 };
+        *aa = 1;
     }
     // Key_ClearStates — prevents stuck keys across alt-tab
     keys::key_clear_states();
     // IN_Activate
     {
-        let mut input = crate::in_win::INPUT_STATE.lock().unwrap();
-        crate::in_win::in_activate(&mut input, active);
+        let mut input = crate::in_win::INPUT_STATE.lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::in_win::in_activate(&mut input, true);
     }
     // S_Activate — resume audio
-    myq2_client::cl_main::cl_s_activate(active);
+    myq2_client::cl_main::cl_s_activate(true);
 }
 
 /// Handle window focus lost.
@@ -496,7 +568,8 @@ pub fn handle_focus_lost() {
     }
     keys::key_clear_states();
     {
-        let mut input = crate::in_win::INPUT_STATE.lock().unwrap();
+        let mut input = crate::in_win::INPUT_STATE.lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::in_win::in_activate(&mut input, false);
     }
     // S_Activate — pause audio
@@ -514,17 +587,33 @@ pub fn handle_minimized() {
     }
     keys::key_clear_states();
     {
-        let mut input = crate::in_win::INPUT_STATE.lock().unwrap();
+        let mut input = crate::in_win::INPUT_STATE.lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::in_win::in_activate(&mut input, false);
     }
     // S_Activate — pause audio
     myq2_client::cl_main::cl_s_activate(false);
 }
 
-/// Handle window restored.
+/// Handle window restored from minimized state.
+///
+/// Clears the minimized flag and re-activates input. This ensures input works
+/// even if `Focused(true)` fired before `Occluded(false)`.
 pub fn handle_restored() {
-    let mut m = MINIMIZED.lock().unwrap();
-    *m = false;
+    {
+        let mut m = MINIMIZED.lock().unwrap();
+        *m = false;
+    }
+    {
+        let mut aa = ACTIVE_APP.lock().unwrap();
+        *aa = 1;
+    }
+    {
+        let mut input = crate::in_win::INPUT_STATE.lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::in_win::in_activate(&mut input, true);
+    }
+    myq2_client::cl_main::cl_s_activate(true);
 }
 
 /// Handle window exposed (needs redraw).

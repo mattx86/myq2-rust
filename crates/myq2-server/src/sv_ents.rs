@@ -421,10 +421,26 @@ pub fn sv_fat_pvs(
         }
     }
 
+    // Helper: read a u32 from a PVS slice, treating out-of-bounds bytes as 0.
+    // PVS data is byte-aligned ((numclusters+7)/8 bytes) but callers use 4-byte
+    // aligned access ((numclusters+31)/32 longs). In C, the PVS buffer is 8KB
+    // so reads beyond actual data are safe; here we pad with zeros.
+    #[inline]
+    fn pvs_read_u32(pvs: &[u8], off: usize) -> u32 {
+        let b0 = pvs.get(off).copied().unwrap_or(0);
+        let b1 = pvs.get(off + 1).copied().unwrap_or(0);
+        let b2 = pvs.get(off + 2).copied().unwrap_or(0);
+        let b3 = pvs.get(off + 3).copied().unwrap_or(0);
+        u32::from_le_bytes([b0, b1, b2, b3])
+    }
+
     // copy first cluster's PVS
     let first_pvs = cm.cluster_pvs(unique_clusters[0]);
     let byte_count = (longs as usize) << 2;
-    fatpvs[..byte_count].copy_from_slice(&first_pvs[..byte_count]);
+    // Copy what's available, zero-pad the rest (PVS may be shorter than byte_count)
+    let copy_len = byte_count.min(first_pvs.len());
+    fatpvs[..copy_len].copy_from_slice(&first_pvs[..copy_len]);
+    fatpvs[copy_len..byte_count].fill(0);
 
     if unique_clusters.len() == 1 {
         return; // Only one cluster, no merging needed
@@ -464,13 +480,7 @@ pub fn sv_fat_pvs(
                 }
                 let off = word_idx * 4;
                 for src in &pvs_slices {
-                    let src_val = u32::from_le_bytes([
-                        src[off],
-                        src[off + 1],
-                        src[off + 2],
-                        src[off + 3],
-                    ]);
-                    *dst |= src_val;
+                    *dst |= pvs_read_u32(src, off);
                 }
             }
         });
@@ -479,20 +489,14 @@ pub fn sv_fat_pvs(
         for src in &pvs_slices {
             for j in 0..longs as usize {
                 let off = j * 4;
-                let mut dst_val = u32::from_le_bytes([
+                let dst_val = u32::from_le_bytes([
                     fatpvs[off],
                     fatpvs[off + 1],
                     fatpvs[off + 2],
                     fatpvs[off + 3],
                 ]);
-                let src_val = u32::from_le_bytes([
-                    src[off],
-                    src[off + 1],
-                    src[off + 2],
-                    src[off + 3],
-                ]);
-                dst_val |= src_val;
-                let bytes = dst_val.to_le_bytes();
+                let merged = dst_val | pvs_read_u32(src, off);
+                let bytes = merged.to_le_bytes();
                 fatpvs[off] = bytes[0];
                 fatpvs[off + 1] = bytes[1];
                 fatpvs[off + 2] = bytes[2];
@@ -660,6 +664,12 @@ pub fn sv_build_client_frame(
 ) {
     let clent = &ge.edicts[client.edict_index as usize];
     if clent.client.is_none() {
+        static BCF_WARN: std::sync::Once = std::sync::Once::new();
+        BCF_WARN.call_once(|| {
+            myq2_common::common::com_printf(&format!(
+                "sv_build_client_frame: edict {} has no client, skipping\n",
+                client.edict_index));
+        });
         return; // not in game yet
     }
 
@@ -669,6 +679,14 @@ pub fn sv_build_client_frame(
         let gclient_ptr = clent.client.unwrap();
         &(*gclient_ptr).ps
     };
+
+    static BCF_DEBUG: std::sync::Once = std::sync::Once::new();
+    BCF_DEBUG.call_once(|| {
+        myq2_common::common::com_printf(&format!(
+            "sv_build_client_frame: building frame, ps.pmove.origin=({},{},{}), viewoffset=({},{},{})\n",
+            client_ps.pmove.origin[0], client_ps.pmove.origin[1], client_ps.pmove.origin[2],
+            client_ps.viewoffset[0], client_ps.viewoffset[1], client_ps.viewoffset[2]));
+    });
 
     // this is the frame we are creating
     let frame_index = sv.framenum as usize & (UPDATE_BACKUP as usize - 1);
@@ -702,6 +720,7 @@ pub fn sv_build_client_frame(
     client.frames[frame_index].first_entity = svs.next_client_entities;
 
     let num_edicts = ge.num_edicts as usize;
+
     let client_edict_index = client.edict_index;
     // Determine visible entities - use parallel processing for large entity counts
     let visible_entities: Vec<VisibleEntity> = if num_edicts > PARALLEL_ENTITY_THRESHOLD {
@@ -746,7 +765,7 @@ pub fn sv_build_client_frame(
     };
 
     // Add visible entities to the circular client_entities array (sequential, maintains order)
-    for vis_ent in visible_entities {
+    for vis_ent in &visible_entities {
         let ent = &ge.edicts[vis_ent.entity_index];
         let state_idx = svs.next_client_entities as usize % svs.num_client_entities as usize;
         let mut state = ent.s.clone();
@@ -764,6 +783,7 @@ pub fn sv_build_client_frame(
         svs.next_client_entities += 1;
         client.frames[frame_index].num_entities += 1;
     }
+
 }
 
 /// Save everything in the world out without deltas.

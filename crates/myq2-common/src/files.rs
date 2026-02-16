@@ -336,7 +336,13 @@ impl FsContext {
 
     /// Loads a .pak file, returning a `Pack` on success.
     pub fn load_pack_file(packfile: &str) -> Option<Pack> {
-        let mut f = File::open(packfile).ok()?;
+        let mut f = match File::open(packfile) {
+            Ok(f) => f,
+            Err(e) => {
+                com_printf(&format!("ERROR: Cannot open pak file '{}': {}\n", packfile, e));
+                return None;
+            }
+        };
 
         // Read the header
         let mut header_bytes = [0u8; std::mem::size_of::<DPackHeader>()];
@@ -395,7 +401,6 @@ impl FsContext {
                 .collect()
         };
 
-        com_printf(&format!("Added {} ({} files)\n", packfile, numpackfiles));
         Some(Pack::new(packfile.to_string(), files))
     }
 
@@ -405,7 +410,13 @@ impl FsContext {
 
     /// Loads an uncompressed .zip file (store-only), returning a `Pack` on success.
     pub fn load_zip_file(packfile: &str) -> Option<Pack> {
-        let mut f = File::open(packfile).ok()?;
+        let mut f = match File::open(packfile) {
+            Ok(f) => f,
+            Err(e) => {
+                com_printf(&format!("ERROR: Cannot open zip file '{}': {}\n", packfile, e));
+                return None;
+            }
+        };
 
         let header_size = std::mem::size_of::<DZipHeader>();
         let mut files: Vec<PackFile> = Vec::new();
@@ -458,8 +469,6 @@ impl FsContext {
             f.seek(SeekFrom::Start(next_pos)).ok()?;
         }
 
-        let num = files.len();
-        com_printf(&format!("Added {} ({} files)\n", packfile, num));
         // Note: ZIP parsing must be sequential due to stream position dependencies,
         // but we still use Pack::new() to build the HashMap index for O(1) lookup.
         Some(Pack::new(packfile.to_string(), files))
@@ -561,6 +570,29 @@ impl FsContext {
         let pakfiles = Self::list_files(&findpaks);
         let zipfiles = Self::list_files(&findzips);
 
+        // Merge .pak and .zip lists, sort alphabetically (case-insensitive)
+        // In Quake 2, archives are loaded in order: pak0 < pak1 < pak2 < ...
+        // Later archives override earlier ones (higher priority).
+        let mut all_archives: Vec<_> = pakfiles
+            .into_iter()
+            .map(|p| (p, true)) // true = pak
+            .chain(zipfiles.into_iter().map(|z| (z, false))) // false = zip
+            .collect();
+
+        // Sort by filename (case-insensitive) so pak0 < pak1 < pak2 etc.
+        all_archives.sort_by(|a, b| {
+            a.0.to_lowercase().cmp(&b.0.to_lowercase())
+        });
+
+        // Log discovered archive files in load order
+        if all_archives.is_empty() {
+            com_printf(&format!("No pak/zip files found matching '{}' or '{}'\n", findpaks, findzips));
+        } else {
+            for (path, _) in &all_archives {
+                com_printf(&format!("Found archive: {}\n", path));
+            }
+        }
+
         // Add the directory itself to the search path
         self.search_paths.insert(
             0,
@@ -569,14 +601,6 @@ impl FsContext {
                 pack: None,
             },
         );
-
-        // Load .pak and .zip files in parallel
-        // Combine both lists with a tag indicating the type
-        let all_archives: Vec<_> = pakfiles
-            .iter()
-            .map(|p| (p.as_str(), true)) // true = pak
-            .chain(zipfiles.iter().map(|z| (z.as_str(), false))) // false = zip
-            .collect();
 
         // Parallel load all archives
         let loaded_packs: Vec<Option<Pack>> = all_archives
@@ -590,15 +614,32 @@ impl FsContext {
             })
             .collect();
 
-        // Add loaded packs to search paths (sequential to maintain order)
-        for pack in loaded_packs.into_iter().flatten() {
-            self.search_paths.insert(
-                0,
-                SearchPath {
-                    filename: String::new(),
-                    pack: Some(pack),
-                },
-            );
+        // Add loaded packs to search paths IN ORDER (first archive = lowest priority).
+        // search_paths is searched front-to-back, so later archives must be at front.
+        // We iterate in order and insert each at position 0, which means the LAST
+        // archive ends up at front = highest priority. This matches Quake 2 behavior
+        // where pak2 overrides pak1 overrides pak0.
+        for (i, result) in loaded_packs.into_iter().enumerate() {
+            match result {
+                Some(pack) => {
+                    com_printf(&format!("Added {} ({} files)\n", pack.filename, pack.files.len()));
+                    self.search_paths.insert(
+                        0,
+                        SearchPath {
+                            filename: String::new(),
+                            pack: Some(pack),
+                        },
+                    );
+                }
+                None => {
+                    let path = if i < all_archives.len() {
+                        &all_archives[i].0
+                    } else {
+                        "unknown"
+                    };
+                    com_printf(&format!("WARNING: Failed to load archive: {}\n", path));
+                }
+            }
         }
     }
 

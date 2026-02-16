@@ -1164,6 +1164,48 @@ pub fn key_init() {
     cmd_add_command("unbind", key_unbind_f);
     cmd_add_command("unbindall", key_unbindall_f);
     cmd_add_command("bindlist", key_bindlist_f);
+
+    // Default key bindings (standard Q2 WASD + mouse layout).
+    // These are overridden by config.cfg if it exists.
+    {
+        let mut ks = ks();
+        let defaults: &[(i32, &str)] = &[
+            // Movement
+            (b'w' as i32, "+forward"),
+            (b's' as i32, "+back"),
+            (b'a' as i32, "+moveleft"),
+            (b'd' as i32, "+moveright"),
+            (K_SPACE, "+moveup"),
+            (b'c' as i32, "+movedown"),
+            // Mouse
+            (K_MOUSE1, "+attack"),
+            (K_MOUSE2, "+strafe"),
+            // Weapons
+            (b'1' as i32, "use Blaster"),
+            (b'2' as i32, "use Shotgun"),
+            (b'3' as i32, "use Super Shotgun"),
+            (b'4' as i32, "use Machinegun"),
+            (b'5' as i32, "use Chaingun"),
+            (b'6' as i32, "use Grenades"),
+            (b'7' as i32, "use Grenade Launcher"),
+            (b'8' as i32, "use Rocket Launcher"),
+            (b'9' as i32, "use HyperBlaster"),
+            (b'0' as i32, "use Railgun"),
+            // Other
+            (K_ESCAPE, "togglemenu"),
+            (b'`' as i32, "toggleconsole"),
+            (b'~' as i32, "toggleconsole"),
+            (K_TAB, "inven"),
+            (K_F1, "cmd help"),
+            (b'r' as i32, "+use"),
+            (b't' as i32, "messagemode"),
+        ];
+        for &(key, binding) in defaults {
+            if (0..256).contains(&key) && ks.keybindings[key as usize].is_none() {
+                ks.keybindings[key as usize] = Some(binding.to_string());
+            }
+        }
+    }
 }
 
 // ============================================================

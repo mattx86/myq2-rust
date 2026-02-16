@@ -6,7 +6,8 @@ use super::{VertexBuffer, IndexBuffer, VertexArray};
 
 /// Vertex format for BSP world surfaces.
 ///
-/// Matches the original glpoly_t VERTEXSIZE=7 layout.
+/// Extends the original glpoly_t VERTEXSIZE=7 layout with lightmap layer index
+/// for per-pixel lightmap sampling via GPU texture array.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BspVertex {
@@ -14,24 +15,39 @@ pub struct BspVertex {
     pub position: [f32; 3],
     /// Diffuse texture coordinates.
     pub tex_coord: [f32; 2],
-    /// Lightmap texture coordinates.
+    /// Lightmap texture coordinates (normalized [0,1] within the lightmap block).
     pub lm_coord: [f32; 2],
+    /// Lightmap texture array layer index (-1.0 = no lightmap / full bright).
+    pub lm_layer: f32,
 }
 
 impl BspVertex {
     /// Size of vertex in bytes.
     pub const SIZE: usize = std::mem::size_of::<Self>();
 
-    /// Create a new BSP vertex.
+    /// Create a new BSP vertex with no lightmap (full bright).
     pub fn new(position: [f32; 3], tex_coord: [f32; 2], lm_coord: [f32; 2]) -> Self {
         Self {
             position,
             tex_coord,
             lm_coord,
+            lm_layer: -1.0,
+        }
+    }
+
+    /// Create a new BSP vertex with lightmap layer index for per-pixel sampling.
+    pub fn with_lightmap(position: [f32; 3], tex_coord: [f32; 2], lm_coord: [f32; 2], layer: f32) -> Self {
+        Self {
+            position,
+            tex_coord,
+            lm_coord,
+            lm_layer: layer,
         }
     }
 }
 
+/// Water/lava/slime turbulent surface flag.
+pub const SURF_DRAWTURB: u32 = 0x10;
 /// Translucent surface flag (33% opacity).
 pub const SURF_TRANS33: u32 = 0x20;
 /// Translucent surface flag (66% opacity).
@@ -178,6 +194,11 @@ impl BspGeometryManager {
                 continue;
             }
 
+            // Skip turb surfaces (drawn separately with water shader for animation)
+            if surface.flags & SURF_DRAWTURB != 0 {
+                continue;
+            }
+
             // Extend existing batch if same texture, or start a new one
             if let Some(last) = batches.last_mut() {
                 if last.texture_id == surface.texture_id {
@@ -268,6 +289,13 @@ impl BspGeometryManager {
     pub fn alpha_surfaces(&self) -> Vec<&SurfaceDrawInfo> {
         self.surfaces.iter()
             .filter(|s| s.flags & (SURF_TRANS33 | SURF_TRANS66) != 0)
+            .collect()
+    }
+
+    /// Get all turbulent surfaces (water/lava/slime with SURF_DRAWTURB).
+    pub fn turb_surfaces(&self) -> Vec<&SurfaceDrawInfo> {
+        self.surfaces.iter()
+            .filter(|s| s.flags & SURF_DRAWTURB != 0)
             .collect()
     }
 

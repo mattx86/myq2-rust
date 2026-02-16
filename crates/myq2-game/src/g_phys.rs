@@ -415,7 +415,7 @@ pub fn sv_push_entity(ent_idx: usize, push: &Vec3, edicts: &mut Vec<Edict>, leve
     let trace = gi_trace(&start, &edicts[ent_idx].mins, &edicts[ent_idx].maxs, &end, -1, mask);
 
     edicts[ent_idx].s.origin = vector_copy(&trace.endpos);
-    gi_linkentity(-1);
+    gi_linkentity(ent_idx as i32);
 
     if trace.fraction != 1.0 {
         sv_impact(ent_idx, &trace, edicts, level);
@@ -491,7 +491,7 @@ fn sv_push(pusher_idx: usize, move_vec: &Vec3, amove: &Vec3, edicts: &mut Vec<Ed
     // move the pusher to its final position
     edicts[pusher_idx].s.origin = vector_add(&edicts[pusher_idx].s.origin, &move_clamped);
     edicts[pusher_idx].s.angles = vector_add(&edicts[pusher_idx].s.angles, amove);
-    gi_linkentity(-1);
+    gi_linkentity(pusher_idx as i32);
 
     // see if any solid entities are inside the final position
     let num_edicts = edicts.len();
@@ -713,7 +713,7 @@ pub fn sv_physics_noclip(ent_idx: usize, edicts: &mut Vec<Edict>, level: &mut Le
     let velocity = ent.velocity;
     vector_ma_to(&origin, FRAMETIME, &velocity, &mut ent.s.origin);
 
-    gi_linkentity(-1);
+    gi_linkentity(ent_idx as i32);
 }
 
 // ============================================================
@@ -918,14 +918,14 @@ pub fn sv_physics_step(ent_idx: usize, edicts: &mut Vec<Edict>, level: &mut Leve
         };
         sv_fly_move(ent_idx, edicts, level, FRAMETIME, mask);
 
-        gi_linkentity(-1);
+        gi_linkentity(ent_idx as i32);
         phys_touch_triggers(ent_idx, edicts, level);
         if !edicts[ent_idx].inuse {
             return;
         }
 
         if edicts[ent_idx].groundentity != -1 && !wasonground && hitsound {
-            gi_sound(-1, 0, gi_soundindex("world/land.wav"), 1.0, 1.0, 0.0);
+            gi_sound(ent_idx as i32, 0, gi_soundindex("world/land.wav"), 1.0, 1.0, 0.0);
         }
     }
 

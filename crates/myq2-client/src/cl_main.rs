@@ -6,7 +6,22 @@
 
 use std::fs::File;
 use std::io::{Write, BufWriter};
-use std::sync::{Arc, Mutex, LazyLock};
+use std::sync::{Arc, Mutex, MutexGuard, LazyLock};
+
+/// Lock a Mutex, recovering from poison errors instead of panicking.
+///
+/// In a single-threaded game engine, all panics happen on the main thread.
+/// When a panic occurs while a Mutex is held (e.g., during rendering),
+/// the Mutex becomes "poisoned" and all subsequent .lock().unwrap() calls
+/// panic too, creating an infinite cascade. This helper recovers the guard
+/// from a poisoned Mutex so the game can continue after a non-fatal error.
+pub fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        // Clear the poison so future locks don't keep seeing PoisonError
+        mutex.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 use myq2_common::q_shared::*;
 use myq2_common::common::{
@@ -2408,6 +2423,7 @@ pub fn cl_clear_state() {
     }
 
     // wipe the entire cl structure
+    com_printf("cl_main::cl_clear_state: resetting CL to default\n");
     *CL.lock().unwrap() = crate::client::ClientState::default();
     {
         let mut ents = CL_ENTITIES.lock().unwrap();
@@ -3971,21 +3987,25 @@ pub fn cl_frame(_msec: i32) {
 
     // Decoupled frame processing - render, physics, and network run at different rates.
     // Update timing and get cvar values
-    let mut timing = CL_TIMING.lock().unwrap();
+    // NOTE: cl_frame uses lock_recover() instead of .lock().unwrap() to prevent
+    // PoisonError cascades. If any subsystem panics while holding a Mutex (e.g.,
+    // renderer crash), the Mutex becomes poisoned. Without recovery, every subsequent
+    // frame would also panic, freezing the game forever.
+    let mut timing = lock_recover(&CL_TIMING);
     // Sync cl_async cvar to timing system (0 = legacy sync mode, 1 = decoupled)
-    timing.async_enabled = CL_ASYNC.lock().unwrap().value != 0.0;
+    timing.async_enabled = lock_recover(&CL_ASYNC).value != 0.0;
     let delta = timing.update();
 
-    let r_maxfps = R_MAXFPS.lock().unwrap().value;
-    let cl_maxfps = CL_MAXFPS.lock().unwrap().value;
-    let cl_maxpackets = CL_MAXPACKETS.lock().unwrap().value;
+    let r_maxfps = lock_recover(&R_MAXFPS).value;
+    let cl_maxfps = lock_recover(&CL_MAXFPS).value;
+    let cl_maxpackets = lock_recover(&CL_MAXPACKETS).value;
 
     // Convert delta to milliseconds for compatibility
     let delta_ms = (delta * 1000.0) as i32;
 
     // Update realtime
     {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = lock_recover(&CLS);
         cls.realtime = sys_milliseconds();
     }
 
@@ -4020,8 +4040,8 @@ pub fn cl_frame(_msec: i32) {
     // Update the bandwidth adapter with current network statistics
     // and use adaptive rate if enabled, otherwise use cl_maxpackets
     let adaptive_rate = {
-        let mut cl = CL.lock().unwrap();
-        let cls = CLS.lock().unwrap();
+        let mut cl = lock_recover(&CL);
+        let cls = lock_recover(&CLS);
 
         // Update bandwidth adapter with current network stats
         if cl.smoothing.bandwidth_adapter.enabled {
@@ -4046,7 +4066,7 @@ pub fn cl_frame(_msec: i32) {
     if should_send {
         // Set frametime for command interpolation
         {
-            let mut cls = CLS.lock().unwrap();
+            let mut cls = lock_recover(&CLS);
             cls.frametime = if adaptive_rate > 0.0 {
                 1.0 / adaptive_rate
             } else {
@@ -4058,21 +4078,21 @@ pub fn cl_frame(_msec: i32) {
     // ============================================================
     // PHYSICS: Run at cl_maxfps rate
     // ============================================================
-    let mut timing = CL_TIMING.lock().unwrap();
+    let mut timing = lock_recover(&CL_TIMING);
     let physics_frames = timing.should_physics(cl_maxfps);
     let raw_physics_frametime = timing.physics_frametime(cl_maxfps);
     drop(timing);
 
     // Apply frame time smoothing to reduce jitter from variable frame rates
     let physics_frametime = {
-        let mut cl = CL.lock().unwrap();
+        let mut cl = lock_recover(&CL);
         cl.smoothing.frame_time.add_sample(raw_physics_frametime)
     };
 
     for _ in 0..physics_frames {
         // Update client time
         {
-            let mut cl = CL.lock().unwrap();
+            let mut cl = lock_recover(&CL);
             cl.time += (physics_frametime * 1000.0) as i32;
         }
 
@@ -4083,7 +4103,7 @@ pub fn cl_frame(_msec: i32) {
     // ============================================================
     // RENDER: Run at r_maxfps rate (0 = unlimited)
     // ============================================================
-    let mut timing = CL_TIMING.lock().unwrap();
+    let mut timing = lock_recover(&CL_TIMING);
     let should_render = timing.should_render(r_maxfps);
     drop(timing);
 
@@ -4094,8 +4114,8 @@ pub fn cl_frame(_msec: i32) {
         // Sync stat smoothing enabled state from cvar (R1Q2/Q2Pro feature)
         crate::cl_hud::hud_set_stat_smoothing(cvar_variable_value("hud_stat_smoothing") != 0.0);
         {
-            let cl = CL.lock().unwrap();
-            let cls = CLS.lock().unwrap();
+            let cl = lock_recover(&CL);
+            let cls = lock_recover(&CLS);
             // Update speed meter with player velocity from predicted movement
             let velocity = cl.frame.playerstate.pmove.velocity;
             crate::cl_hud::hud_update_speed(&[velocity[0] as f32 * 0.125, velocity[1] as f32 * 0.125, velocity[2] as f32 * 0.125]);
@@ -4133,7 +4153,7 @@ pub fn cl_frame(_msec: i32) {
         // Update audio before rendering
         // Get sound data from CL, then drop lock before calling s_update to avoid deadlock
         let (vieworg, v_forward, v_right, v_up) = {
-            let cl = CL.lock().unwrap();
+            let cl = lock_recover(&CL);
             (cl.refdef.vieworg, cl.v_forward, cl.v_right, cl.v_up)
         };
         s_update(&vieworg, &v_forward, &v_right, &v_up);
@@ -4141,8 +4161,8 @@ pub fn cl_frame(_msec: i32) {
         // Check for renderer changes
         vid_check_changes();
         {
-            let cl = CL.lock().unwrap();
-            let cls = CLS.lock().unwrap();
+            let cl = lock_recover(&CL);
+            let cls = lock_recover(&CLS);
             if !cl.refresh_prepped && cls.state == crate::client::ConnState::Active {
                 drop(cl);
                 drop(cls);
@@ -4156,7 +4176,7 @@ pub fn cl_frame(_msec: i32) {
         // Update audio after rendering
         // Get sound data from CL, then drop lock before calling s_update to avoid deadlock
         let (vieworg, v_forward, v_right, v_up) = {
-            let cl = CL.lock().unwrap();
+            let cl = lock_recover(&CL);
             (cl.refdef.vieworg, cl.v_forward, cl.v_right, cl.v_up)
         };
         s_update(&vieworg, &v_forward, &v_right, &v_up);
@@ -4167,20 +4187,20 @@ pub fn cl_frame(_msec: i32) {
         scr_run_cinematic();
         scr_run_console();
 
-        CLS.lock().unwrap().framecount += 1;
+        lock_recover(&CLS).framecount += 1;
     }
 
     // Debug timeout handling
     if delta_ms > 5000 {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = lock_recover(&CLS);
         cls.netchan.last_received = sys_milliseconds();
     }
 
     // Stats logging
     if log_stats_value() {
-        let cls = CLS.lock().unwrap();
+        let cls = lock_recover(&CLS);
         if cls.state == crate::client::ConnState::Active {
-            let mut lasttimecalled = LAST_TIME_CALLED.lock().unwrap();
+            let mut lasttimecalled = lock_recover(&LAST_TIME_CALLED);
             if *lasttimecalled == 0 {
                 *lasttimecalled = sys_milliseconds();
             } else {

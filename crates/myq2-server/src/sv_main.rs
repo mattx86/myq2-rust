@@ -882,6 +882,13 @@ pub fn sv_run_game_frame(ctx: &mut ServerContext) {
             ge.run_frame_call();
         }
 
+        // Sync game state back to server edicts (player positions, client pointers, etc.)
+        // Engine-set fields (modelindex, num_clusters) are written back to GAME_CONTEXT
+        // immediately by setmodel/linkentity via GAME_CTX_PTR during the game frame.
+        if let Some(ref mut ge) = ctx.ge {
+            crate::sv_game::sync_edicts_to_server(ge);
+        }
+
         // never get more than one tic behind
         if (ctx.sv.time as i32) < ctx.svs.realtime {
             let sv_showclamp = ctx.cvars.variable_value("showclamp");

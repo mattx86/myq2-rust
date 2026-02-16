@@ -1327,7 +1327,10 @@ pub fn spawn_entities(ctx: &mut GameContext, mapname: &str, entities: &str, spaw
         if first_ent {
             ent_idx = 0; // world entity = g_edicts[0]
             ctx.edicts[0].inuse = true;
-            ctx.num_edicts = 1;
+            // Reserve edict slots 1..maxclients for player entities.
+            // In C: globals.num_edicts was already maxclients+1 from InitGame().
+            // G_Spawn() searches from maxclients+1, so player slots are never reused.
+            ctx.num_edicts = ctx.game.maxclients as i32 + 1;
             first_ent = false;
         } else {
             ent_idx = g_spawn(ctx);

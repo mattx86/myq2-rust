@@ -986,6 +986,10 @@ pub fn put_client_in_server(ctx: &mut GameContext, ent_idx: usize) {
 
     // find a spawn point
     let (spawn_origin, spawn_angles) = select_spawn_point(ctx, ent_idx);
+    crate::game_import::gi_dprintf(&format!(
+        "put_client_in_server: spawn_origin=({},{},{}), spawn_angles=({},{},{})\n",
+        spawn_origin[0], spawn_origin[1], spawn_origin[2],
+        spawn_angles[0], spawn_angles[1], spawn_angles[2]));
 
     let index = ent_idx - 1;
     let client_idx = index; // clients[index]
@@ -1056,6 +1060,12 @@ pub fn put_client_in_server(ctx: &mut GameContext, ent_idx: usize) {
     ctx.clients[client_idx].ps.pmove.origin[1] = (spawn_origin[1] * 8.0) as i16;
     ctx.clients[client_idx].ps.pmove.origin[2] = (spawn_origin[2] * 8.0) as i16;
 
+    crate::game_import::gi_dprintf(&format!(
+        "put_client_in_server: ps.pmove.origin=({},{},{})\n",
+        ctx.clients[client_idx].ps.pmove.origin[0],
+        ctx.clients[client_idx].ps.pmove.origin[1],
+        ctx.clients[client_idx].ps.pmove.origin[2]));
+
     if ctx.deathmatch != 0.0 && DmFlags::from_bits_truncate(ctx.dmflags as i32).intersects(DF_FIXED_FOV) {
         ctx.clients[client_idx].ps.fov = 90.0;
     } else {
@@ -1097,9 +1107,13 @@ pub fn put_client_in_server(ctx: &mut GameContext, ent_idx: usize) {
     ctx.clients[client_idx].ps.viewangles = vector_copy(&ctx.edicts[ent_idx].s.angles);
     ctx.clients[client_idx].v_angle = vector_copy(&ctx.edicts[ent_idx].s.angles);
 
+    // Initialize chase_target to -1 (no target) for all clients.
+    // In C, chase_target is a pointer where NULL=0 means "no target".
+    // In Rust, we use -1 as the "no target" sentinel.
+    ctx.clients[client_idx].chase_target = -1;
+
     // spawn a spectator
     if ctx.clients[client_idx].pers.spectator {
-        ctx.clients[client_idx].chase_target = -1;
         ctx.clients[client_idx].resp.spectator = true;
 
         ctx.edicts[ent_idx].movetype = MoveType::Noclip;
@@ -1159,6 +1173,10 @@ pub fn client_begin_deathmatch(ctx: &mut GameContext, ent_idx: usize) {
 pub fn client_begin(ctx: &mut GameContext, ent_idx: usize) {
     ctx.edicts[ent_idx].client = Some(ent_idx - 1);
 
+    crate::game_import::gi_dprintf(&format!(
+        "client_begin: ent_idx={}, deathmatch={}, inuse={}\n",
+        ent_idx, ctx.deathmatch, ctx.edicts[ent_idx].inuse));
+
     if ctx.deathmatch != 0.0 {
         client_begin_deathmatch(ctx, ent_idx);
         return;
@@ -1166,12 +1184,14 @@ pub fn client_begin(ctx: &mut GameContext, ent_idx: usize) {
 
     // if there is already a body waiting for us (a loadgame), just take it
     if ctx.edicts[ent_idx].inuse {
+        crate::game_import::gi_dprintf("client_begin: taking loadgame path (inuse=true)\n");
         let ci = ctx.edicts[ent_idx].client.unwrap();
         for i in 0..3 {
             ctx.clients[ci].ps.pmove.delta_angles[i] =
                 angle2short(ctx.clients[ci].ps.viewangles[i]) as i16;
         }
     } else {
+        crate::game_import::gi_dprintf("client_begin: new player path, calling put_client_in_server\n");
         g_init_edict(ctx, ent_idx);
         ctx.edicts[ent_idx].classname = "player".to_string();
         let ci = ent_idx - 1;
@@ -1367,13 +1387,29 @@ pub fn client_disconnect(ctx: &mut GameContext, ent_idx: usize) {
 
 /// Converted from: PM_trace
 /// pmove doesn't need to know about passent and contentmask
-pub fn pm_trace(ctx: &GameContext, start: &Vec3, mins: &Vec3, maxs: &Vec3, end: &Vec3) {
+pub fn pm_trace(ctx: &GameContext, start: &Vec3, mins: &Vec3, maxs: &Vec3, end: &Vec3) -> myq2_common::q_shared::Trace {
     let mask = if ctx.edicts[ctx.pm_passent].health > 0 {
         MASK_PLAYERSOLID
     } else {
         MASK_DEADSOLID
     };
-    let _trace = gi_trace(start, mins, maxs, end, ctx.pm_passent as i32, mask);
+    gi_trace(start, mins, maxs, end, ctx.pm_passent as i32, mask)
+}
+
+/// Callbacks struct for server-side pmove execution.
+/// Wraps gi_trace and gi_pointcontents with the correct passent and content mask.
+struct GamePmoveCallbacks {
+    passent: i32,
+    mask: i32,
+}
+
+impl myq2_common::pmove::PmoveCallbacks for GamePmoveCallbacks {
+    fn trace(&self, start: &Vec3, mins: &Vec3, maxs: &Vec3, end: &Vec3) -> myq2_common::q_shared::Trace {
+        gi_trace(start, mins, maxs, end, self.passent, self.mask)
+    }
+    fn pointcontents(&self, point: &Vec3) -> i32 {
+        gi_pointcontents(point)
+    }
 }
 
 /// Converted from: CheckBlock
@@ -1430,37 +1466,84 @@ pub fn client_think(ctx: &mut GameContext, ent_idx: usize, ucmd: &UserCmd) {
 
         ctx.clients[ci].ps.pmove.gravity = ctx.sv_gravity as i16;
 
-        // Pmove integration: set up pmove_t and call gi.Pmove(&pm).
-        // The pmove module (qcommon/pmove.c) processes player movement physics.
-        // Results (origin, velocity, groundentity, waterlevel, etc.) are copied back.
-        // NOTE: Full pmove requires gi_pmove() which calls into myq2_common::pmove.
-        // For now, we set up the inputs and update cmd_angles.
-        let mut pm_s_origin = [0i16; 3];
-        let mut pm_s_velocity = [0i16; 3];
+        // Build PmoveData from client state
+        let mut pm = myq2_common::q_shared::PmoveData::default();
+        pm.s = ctx.clients[ci].ps.pmove;
         for i in 0..3 {
-            pm_s_origin[i] = (ctx.edicts[ent_idx].s.origin[i] * 8.0) as i16;
-            pm_s_velocity[i] = (ctx.edicts[ent_idx].velocity[i] * 8.0) as i16;
+            pm.s.origin[i] = (ctx.edicts[ent_idx].s.origin[i] * 8.0) as i16;
+            pm.s.velocity[i] = (ctx.edicts[ent_idx].velocity[i] * 8.0) as i16;
         }
 
-        // gi.Pmove(&pm) would be called here. The pmove module handles:
-        // - clip movement against world and entities
-        // - stair stepping, swimming, flying
-        // - setting groundentity, waterlevel, watertype
-        // After pmove, results would be: pm.s.origin, pm.s.velocity, pm.viewangles,
-        // pm.groundentity, pm.watertype, pm.waterlevel, pm.cmd, pm.touchents[]
+        // Check if pmove state was changed externally (teleport, etc.)
+        let old = &ctx.clients[ci].old_pmove;
+        if old.pm_type != pm.s.pm_type || old.origin != pm.s.origin
+            || old.velocity != pm.s.velocity || old.pm_flags != pm.s.pm_flags
+            || old.pm_time != pm.s.pm_time || old.gravity != pm.s.gravity
+            || old.delta_angles != pm.s.delta_angles
+        {
+            pm.snapinitial = true;
+        }
 
-        // Update cmd_angles from user command
+        pm.cmd = *ucmd;
+
+        // Create callbacks with correct content mask
+        let mask = if ctx.edicts[ent_idx].health > 0 {
+            MASK_PLAYERSOLID
+        } else {
+            MASK_DEADSOLID
+        };
+        let callbacks = GamePmoveCallbacks {
+            passent: ent_idx as i32,
+            mask,
+        };
+
+        // Save old groundentity for jump sound detection
+        let old_groundentity = ctx.edicts[ent_idx].groundentity;
+
+        // Execute pmove
+        myq2_common::pmove::pmove(&mut pm, &callbacks);
+
+        // Save results of pmove
+        ctx.clients[ci].ps.pmove = pm.s;
+        ctx.clients[ci].old_pmove = pm.s;
+
+        for i in 0..3 {
+            ctx.edicts[ent_idx].s.origin[i] = pm.s.origin[i] as f32 * 0.125;
+            ctx.edicts[ent_idx].velocity[i] = pm.s.velocity[i] as f32 * 0.125;
+        }
+
+        ctx.edicts[ent_idx].mins = pm.mins;
+        ctx.edicts[ent_idx].maxs = pm.maxs;
+
         ctx.clients[ci].resp.cmd_angles[0] = short2angle(ucmd.angles[0]);
         ctx.clients[ci].resp.cmd_angles[1] = short2angle(ucmd.angles[1]);
         ctx.clients[ci].resp.cmd_angles[2] = short2angle(ucmd.angles[2]);
 
-        // Jump sound: played when pmove detects landing (pm.groundentity set, was NULL)
-        // Requires pmove results, deferred until pmove is integrated.
+        // Jump sound: was on ground, now airborne, pressed jump, not in water
+        if old_groundentity >= 0 && pm.groundentity < 0
+            && pm.cmd.upmove >= 10 && pm.waterlevel == 0
+        {
+            gi_sound(ent_idx as i32, CHAN_VOICE, gi_soundindex("*jump1.wav"), 1.0, ATTN_NORM, 0.0);
+            let origin = ctx.edicts[ent_idx].s.origin;
+            crate::p_weapon::player_noise(ctx, ent_idx, &origin, PNOISE_SELF);
+        }
+
+        ctx.edicts[ent_idx].viewheight = pm.viewheight as i32;
+        ctx.edicts[ent_idx].waterlevel = pm.waterlevel;
+        ctx.edicts[ent_idx].watertype = pm.watertype;
+        ctx.edicts[ent_idx].groundentity = pm.groundentity;
+        if pm.groundentity >= 0 && (pm.groundentity as usize) < ctx.edicts.len() {
+            ctx.edicts[ent_idx].groundentity_linkcount =
+                ctx.edicts[pm.groundentity as usize].linkcount;
+        }
 
         if ctx.edicts[ent_idx].deadflag != DEAD_NO {
             ctx.clients[ci].ps.viewangles[ROLL] = 40.0;
             ctx.clients[ci].ps.viewangles[PITCH] = -15.0;
             ctx.clients[ci].ps.viewangles[YAW] = ctx.clients[ci].killer_yaw;
+        } else {
+            ctx.clients[ci].v_angle = pm.viewangles;
+            ctx.clients[ci].ps.viewangles = pm.viewangles;
         }
 
         gi_linkentity(ent_idx as i32);
@@ -1469,8 +1552,27 @@ pub fn client_think(ctx: &mut GameContext, ent_idx: usize, ucmd: &UserCmd) {
             crate::g_utils::g_touch_triggers(ctx, ent_idx);
         }
 
-        // Touch other objects: In C, iterates pm.touchents[] and calls other->touch().
-        // Requires pmove results (pm.numtouch, pm.touchents[]), deferred until pmove is integrated.
+        // Touch other objects from pmove results
+        let numtouch = pm.numtouch as usize;
+        let touchents = pm.touchents;
+        for i in 0..numtouch {
+            let other_idx = touchents[i];
+            if other_idx < 0 { continue; }
+            // Skip duplicates
+            let mut dup = false;
+            for j in 0..i {
+                if touchents[j] == other_idx { dup = true; break; }
+            }
+            if dup { continue; }
+            let other = other_idx as usize;
+            if other < ctx.edicts.len() && ctx.edicts[other].touch_fn.is_some() {
+                crate::dispatch::call_touch(
+                    other, ent_idx,
+                    &mut ctx.edicts, &mut ctx.level,
+                    None, None,
+                );
+            }
+        }
     }
 
     ctx.clients[ci].oldbuttons = ctx.clients[ci].buttons;
@@ -1604,12 +1706,16 @@ pub use crate::dispatch::DIE_BODY_DIE;
 // ============================================================
 
 
-/// Placeholder: initialize an edict.
+/// Initialize an edict — mirrors C G_InitEdict.
+/// Preserves the client field (which is a persistent pointer in C).
 fn g_init_edict(ctx: &mut GameContext, ent_idx: usize) {
     let client = ctx.edicts[ent_idx].client;
     ctx.edicts[ent_idx] = Edict::default();
     ctx.edicts[ent_idx].client = client;
     ctx.edicts[ent_idx].inuse = true;
+    ctx.edicts[ent_idx].classname = "noclass".to_string();
+    ctx.edicts[ent_idx].gravity = 1.0;
+    ctx.edicts[ent_idx].s.number = ent_idx as i32;
 }
 
 /// SP_misc_teleporter_dest — sets up teleporter destination spot entity.

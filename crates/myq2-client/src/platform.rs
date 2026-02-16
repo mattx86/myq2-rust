@@ -29,6 +29,8 @@ pub type InShutdownFn = Box<dyn Fn() + Send>;
 pub type InCommandsFn = Box<dyn Fn() + Send>;
 /// IN_Frame()
 pub type InFrameFn = Box<dyn Fn() + Send>;
+/// IN_Move(cmd, viewangles, in_strafe_state)
+pub type InMoveFn = Box<dyn Fn(&mut myq2_common::q_shared::UserCmd, &mut myq2_common::q_shared::Vec3, i32) + Send>;
 
 /// Sys_SendKeyEvents()
 pub type SysSendKeyEventsFn = Box<dyn Fn() + Send>;
@@ -62,6 +64,7 @@ pub struct ClientPlatformDispatch {
     pub in_shutdown: Option<InShutdownFn>,
     pub in_commands: Option<InCommandsFn>,
     pub in_frame: Option<InFrameFn>,
+    pub in_move: Option<InMoveFn>,
 
     pub sys_send_key_events: Option<SysSendKeyEventsFn>,
     pub sys_app_activate: Option<SysAppActivateFn>,
@@ -131,6 +134,11 @@ pub fn in_commands() {
 pub fn in_frame() {
     let d = dispatch().lock().unwrap();
     if let Some(ref f) = d.in_frame { f(); }
+}
+
+pub fn in_move(cmd: &mut myq2_common::q_shared::UserCmd, viewangles: &mut myq2_common::q_shared::Vec3, in_strafe_state: i32) {
+    let d = dispatch().lock().unwrap();
+    if let Some(ref f) = d.in_move { f(cmd, viewangles, in_strafe_state); }
 }
 
 pub fn sys_send_key_events() {

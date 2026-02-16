@@ -72,7 +72,7 @@ impl Default for Explosion {
 pub struct Beam {
     pub entity: i32,
     pub dest_entity: i32,
-    pub model: i32, // model index, 0 = none
+    pub model: isize, // model handle, 0 = none
     pub endtime: i32,
     pub offset: Vec3,
     pub start: Vec3,
@@ -304,20 +304,20 @@ pub struct TEntState {
     pub cl_sfx_disrexp: i32,
 
     // Model handles (i32, 0 = none)
-    pub cl_mod_explode: i32,
-    pub cl_mod_smoke: i32,
-    pub cl_mod_flash: i32,
-    pub cl_mod_parasite_segment: i32,
-    pub cl_mod_grapple_cable: i32,
-    pub cl_mod_parasite_tip: i32,
-    pub cl_mod_explo4: i32,
-    pub cl_mod_bfg_explo: i32,
-    pub cl_mod_powerscreen: i32,
-    pub cl_mod_plasmaexplo: i32,
-    pub cl_mod_lightning: i32,
-    pub cl_mod_heatbeam: i32,
-    pub cl_mod_monster_heatbeam: i32,
-    pub cl_mod_explo4_big: i32,
+    pub cl_mod_explode: isize,
+    pub cl_mod_smoke: isize,
+    pub cl_mod_flash: isize,
+    pub cl_mod_parasite_segment: isize,
+    pub cl_mod_grapple_cable: isize,
+    pub cl_mod_parasite_tip: isize,
+    pub cl_mod_explo4: isize,
+    pub cl_mod_bfg_explo: isize,
+    pub cl_mod_powerscreen: isize,
+    pub cl_mod_plasmaexplo: isize,
+    pub cl_mod_lightning: isize,
+    pub cl_mod_heatbeam: isize,
+    pub cl_mod_monster_heatbeam: isize,
+    pub cl_mod_explo4_big: isize,
 }
 
 impl Default for TEntState {
@@ -385,7 +385,7 @@ impl TEntState {
 fn s_register_sound(name: &str) -> i32 {
     crate::cl_main::cl_s_register_sound(name)
 }
-fn r_register_model(name: &str) -> i32 { crate::console::r_register_model(name) }
+fn r_register_model(name: &str) -> isize { crate::console::r_register_model(name) }
 fn draw_find_pic(name: &str) -> i32 { crate::console::draw_find_pic(name) }
 
 /// Play a sound using an already-borrowed SoundState (avoids re-locking from parse wrapper).
@@ -555,7 +555,7 @@ pub fn cl_parse_particles(fx: &mut ClFxState, cl: &ClientState, net_message: &mu
 }
 
 /// Parse a beam from network message.
-pub fn cl_parse_beam(ts: &mut TEntState, cl: &ClientState, model: i32, net_message: &mut SizeBuf) -> i32 {
+pub fn cl_parse_beam(ts: &mut TEntState, cl: &ClientState, model: isize, net_message: &mut SizeBuf) -> i32 {
     let ent = msg_read_short(net_message);
     let mut start: Vec3 = [0.0; 3];
     let mut end: Vec3 = [0.0; 3];
@@ -587,7 +587,7 @@ pub fn cl_parse_beam(ts: &mut TEntState, cl: &ClientState, model: i32, net_messa
 }
 
 /// Parse a beam with offset from network message.
-pub fn cl_parse_beam2(ts: &mut TEntState, cl: &ClientState, model: i32, net_message: &mut SizeBuf) -> i32 {
+pub fn cl_parse_beam2(ts: &mut TEntState, cl: &ClientState, model: isize, net_message: &mut SizeBuf) -> i32 {
     let ent = msg_read_short(net_message);
     let mut start: Vec3 = [0.0; 3];
     let mut end: Vec3 = [0.0; 3];
@@ -621,7 +621,7 @@ pub fn cl_parse_beam2(ts: &mut TEntState, cl: &ClientState, model: i32, net_mess
 }
 
 /// Parse a player beam (ROGUE).
-pub fn cl_parse_player_beam(ts: &mut TEntState, cl: &ClientState, mut model: i32, net_message: &mut SizeBuf) -> i32 {
+pub fn cl_parse_player_beam(ts: &mut TEntState, cl: &ClientState, mut model: isize, net_message: &mut SizeBuf) -> i32 {
     let ent = msg_read_short(net_message);
     let mut start: Vec3 = [0.0; 3];
     let mut end: Vec3 = [0.0; 3];
@@ -663,7 +663,7 @@ pub fn cl_parse_player_beam(ts: &mut TEntState, cl: &ClientState, mut model: i32
 }
 
 /// Parse lightning beam.
-pub fn cl_parse_lightning(ts: &mut TEntState, cl: &ClientState, model: i32, net_message: &mut SizeBuf) -> i32 {
+pub fn cl_parse_lightning(ts: &mut TEntState, cl: &ClientState, model: isize, net_message: &mut SizeBuf) -> i32 {
     let src_ent = msg_read_short(net_message);
     let dest_ent = msg_read_short(net_message);
     let mut start: Vec3 = [0.0; 3];

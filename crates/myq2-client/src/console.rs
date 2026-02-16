@@ -158,13 +158,14 @@ pub fn draw_get_pic_size(name: &str) -> (i32, i32) {
 
 // SCR state is now inside ConsoleState (accessed via cs().scr)
 
-/// SCR_BeginLoadingPlaque — wired to cl_scrn using global state.
+/// SCR_BeginLoadingPlaque — delegates to cl_main version to avoid deadlock.
+///
+/// The naive implementation (lock CONSOLE_STATE, call cl_scrn::scr_begin_loading_plaque)
+/// would deadlock because scr_begin_loading_plaque calls com_printf, which calls
+/// con_print, which also needs CONSOLE_STATE — and std::sync::Mutex is not reentrant.
+/// The cl_main version avoids this by using raw pointers for CL/CLS state.
 pub fn scr_begin_loading_plaque() {
-    let mut state = cs();
-    // SAFETY: CL/CLS not yet wrapped
-    unsafe {
-        super::cl_scrn::scr_begin_loading_plaque(&mut state.scr, &mut *CLS_PTR, &mut *CL_PTR);
-    }
+    super::cl_main::scr_begin_loading_plaque();
 }
 
 /// SCR_EndLoadingPlaque — wired to cl_scrn using global CLS state.
@@ -182,29 +183,68 @@ pub fn scr_end_loading_plaque(clear: bool) {
 /// We sync critical connection fields from the Mutexes to the PTRs before rendering
 /// so the screen reflects the true connection state.
 pub fn scr_update_screen() {
-    // Sync connection-critical fields from CLS/CL Mutexes to CLS_PTR/CL_PTR.
-    // The Mutexes hold the authoritative connection state (set by cl_connectionless_packet,
+    // Sync fields between CLS/CL Mutexes and CLS_PTR/CL_PTR.
+    // The Mutexes hold authoritative connection state (set by cl_connectionless_packet,
     // cl_parse_server_message, cl_disconnect, etc.), while CLS_PTR holds UI state
-    // (key_dest set by con_toggle_console_f, etc.).
+    // (key_dest set by con_toggle_console_f, m_force_menu_off, etc.).
     {
-        let cls_mutex = crate::cl_main::CLS.lock().unwrap();
-        let cl_mutex = crate::cl_main::CL.lock().unwrap();
+        let mut cls_mutex = crate::cl_main::lock_recover(&crate::cl_main::CLS);
+        let cl_mutex = crate::cl_main::lock_recover(&crate::cl_main::CL);
 
         // SAFETY: CLS_PTR/CL_PTR initialized at startup, accessed from main thread.
         unsafe {
+            // key_dest: UI code (con_toggle_console_f, m_force_menu_off) writes to CLS_PTR,
+            // so sync FROM raw pointer TO Mutex (CLS_PTR is authoritative for key_dest).
+            cls_mutex.key_dest = (*CLS_PTR).key_dest;
+
             (*CLS_PTR).state = cls_mutex.state;
             (*CLS_PTR).realtime = cls_mutex.realtime;
             (*CLS_PTR).framecount = cls_mutex.framecount;
             (*CLS_PTR).frametime = cls_mutex.frametime;
             (*CLS_PTR).quake_port = cls_mutex.quake_port;
             (*CLS_PTR).disable_screen = cls_mutex.disable_screen;
-            (*CLS_PTR).key_dest = cls_mutex.key_dest;
+            (*CLS_PTR).netchan.incoming_acknowledged = cls_mutex.netchan.incoming_acknowledged;
+            (*CLS_PTR).netchan.outgoing_sequence = cls_mutex.netchan.outgoing_sequence;
+            (*CLS_PTR).demo_playing = cls_mutex.demo_playing;
             (*CL_PTR).refresh_prepped = cl_mutex.refresh_prepped;
             (*CL_PTR).cinematictime = cl_mutex.cinematictime;
             (*CL_PTR).time = cl_mutex.time;
             (*CL_PTR).force_refdef = cl_mutex.force_refdef;
             (*CL_PTR).frame = cl_mutex.frame.clone();
             (*CL_PTR).refdef = cl_mutex.refdef.clone();
+            // View-critical fields for cl_calc_view_values / cl_add_entities
+            (*CL_PTR).predicted_origin = cl_mutex.predicted_origin;
+            (*CL_PTR).predicted_angles = cl_mutex.predicted_angles;
+            (*CL_PTR).prediction_error = cl_mutex.prediction_error;
+            (*CL_PTR).predicted_step = cl_mutex.predicted_step;
+            (*CL_PTR).predicted_step_time = cl_mutex.predicted_step_time;
+            (*CL_PTR).lerpfrac = cl_mutex.lerpfrac;
+            (*CL_PTR).playernum = cl_mutex.playernum;
+            (*CL_PTR).viewangles = cl_mutex.viewangles;
+            (*CL_PTR).frames = cl_mutex.frames.clone();
+            (*CL_PTR).smoothing = cl_mutex.smoothing.clone();
+            (*CL_PTR).packet_loss_frames = cl_mutex.packet_loss_frames;
+            (*CL_PTR).last_valid_frame_time = cl_mutex.last_valid_frame_time;
+            (*CL_PTR).cl_timenudge = cl_mutex.cl_timenudge;
+            (*CL_PTR).cl_extrapolate = cl_mutex.cl_extrapolate;
+            (*CL_PTR).cl_extrapolate_max = cl_mutex.cl_extrapolate_max;
+            (*CL_PTR).cl_anim_continue = cl_mutex.cl_anim_continue;
+            (*CL_PTR).cl_projectile_predict = cl_mutex.cl_projectile_predict;
+            (*CL_PTR).configstrings = cl_mutex.configstrings.clone();
+            (*CL_PTR).model_draw = cl_mutex.model_draw;
+            (*CL_PTR).model_clip = cl_mutex.model_clip;
+            (*CL_PTR).sound_precache = cl_mutex.sound_precache;
+            (*CL_PTR).image_precache = cl_mutex.image_precache;
+            (*CL_PTR).clientinfo = cl_mutex.clientinfo.clone();
+            (*CL_PTR).baseclientinfo = cl_mutex.baseclientinfo.clone();
+            (*CL_PTR).attractloop = cl_mutex.attractloop;
+            (*CL_PTR).servercount = cl_mutex.servercount;
+            (*CL_PTR).sound_prepped = cl_mutex.sound_prepped;
+            (*CL_PTR).v_forward = cl_mutex.v_forward;
+            (*CL_PTR).v_right = cl_mutex.v_right;
+            (*CL_PTR).v_up = cl_mutex.v_up;
+            (*CL_PTR).cmds = cl_mutex.cmds;
+            (*CL_PTR).cmd = cl_mutex.cmd;
         }
     }
 
@@ -429,8 +469,8 @@ pub struct RendererFunctions {
     pub r_render_frame: fn(&super::client::RefDef),
     pub r_begin_registration: fn(&str),
     pub r_end_registration: fn(),
-    pub r_register_model: fn(&str) -> i32,
-    pub r_register_skin: fn(&str) -> i32,
+    pub r_register_model: fn(&str) -> isize,
+    pub r_register_skin: fn(&str) -> isize,
     pub r_set_sky: fn(&str, f32, &[f32; 3]),
     pub r_set_palette_null: fn(),
     pub vk_imp_end_frame: fn(),
@@ -454,8 +494,8 @@ fn noop_r_begin_frame(_separation: f32) {}
 fn noop_r_render_frame(_refdef: &super::client::RefDef) {}
 fn noop_r_begin_registration(_map: &str) {}
 fn noop_r_end_registration() {}
-fn noop_r_register_model(_name: &str) -> i32 { 0 }
-fn noop_r_register_skin(_name: &str) -> i32 { 0 }
+fn noop_r_register_model(_name: &str) -> isize { 0 }
+fn noop_r_register_skin(_name: &str) -> isize { 0 }
 fn noop_r_set_sky(_name: &str, _rotate: f32, _axis: &[f32; 3]) {}
 fn noop_r_set_palette_null() {}
 fn noop_vk_imp_end_frame() {}
@@ -587,12 +627,12 @@ pub fn r_end_registration() {
 }
 
 /// R_RegisterModel — dispatches through renderer function pointer table.
-pub fn r_register_model(name: &str) -> i32 {
+pub fn r_register_model(name: &str) -> isize {
     (renderer_fns().r_register_model)(name)
 }
 
 /// R_RegisterSkin — dispatches through renderer function pointer table.
-pub fn r_register_skin(name: &str) -> i32 {
+pub fn r_register_skin(name: &str) -> isize {
     (renderer_fns().r_register_skin)(name)
 }
 

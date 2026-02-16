@@ -270,6 +270,7 @@ pub fn sv_image_index(ctx: &mut ServerContext, name: &str) -> i32 {
 
 pub fn sv_create_baseline(ctx: &mut ServerContext) {
     let num_edicts = ctx.ge.as_ref().map_or(0, |ge| ge.num_edicts);
+    let mut baseline_count = 0;
     for entnum in 1..num_edicts as usize {
         if let Some(ref mut ge) = ctx.ge {
             if let Some(ent) = ge.edicts.get_mut(entnum) {
@@ -284,6 +285,7 @@ pub fn sv_create_baseline(ctx: &mut ServerContext) {
 
                 if entnum < ctx.sv.baselines.len() {
                     ctx.sv.baselines[entnum] = ent.s.clone();
+                    baseline_count += 1;
                 }
             }
         }
@@ -441,7 +443,9 @@ pub fn sv_spawn_server(
             spawn_fn(&sv_name, &entity_string, &sp);
         }
     }
-    // Sync edicts from game context to server after spawning
+    // Sync edicts from game context to server after spawning.
+    // Engine-set fields (modelindex, num_clusters, etc.) are written back to
+    // GAME_CONTEXT immediately by setmodel/linkentity via GAME_CTX_PTR.
     if let Some(ref mut ge) = ctx.ge {
         crate::sv_game::sync_edicts_to_server(ge);
     }

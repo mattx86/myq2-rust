@@ -248,15 +248,15 @@ pub fn sv_baselines_f(ctx: &mut ServerContext, client_idx: usize) {
 
 /// SV_Begin_f
 pub fn sv_begin_f(ctx: &mut ServerContext, client_idx: usize) {
-    com_dprintf(&format!(
-        "Begin() from {}\n",
-        ctx.svs.clients[client_idx].name
+    com_printf(&format!(
+        "SV_Begin_f: Begin() from {} (client_idx={})\n",
+        ctx.svs.clients[client_idx].name, client_idx
     ));
 
     // handle the case of a level changing while a client was connecting
     let arg1: i32 = cmd_argv(1).parse().unwrap_or(0);
     if arg1 != ctx.svs.spawncount {
-        com_printf("SV_Begin_f from different level\n");
+        com_printf(&format!("SV_Begin_f from different level (arg1={}, spawncount={})\n", arg1, ctx.svs.spawncount));
         sv_new_f(ctx, client_idx);
         return;
     }
@@ -269,7 +269,24 @@ pub fn sv_begin_f(ctx: &mut ServerContext, client_idx: usize) {
         if let Some(begin_fn) = ge.client_begin {
             if let Some(ent) = ge.edicts.get_mut(edict_idx) {
                 ent.s.number = edict_idx as i32; // Ensure index is set for callback
+                com_printf(&format!("SV_Begin_f: calling begin_fn for edict {}\n", edict_idx));
                 begin_fn(ent);
+                com_printf("SV_Begin_f: begin_fn returned\n");
+            }
+        } else {
+            com_printf("SV_Begin_f: WARNING - no client_begin callback!\n");
+        }
+        // Sync game state immediately so the first frame has correct player data
+        crate::sv_game::sync_edicts_to_server(ge);
+
+        // Debug: check if client pointer was synced
+        if let Some(ent) = ge.edicts.get(edict_idx) {
+            com_printf(&format!("SV_Begin_f: after sync, edict {} client={}\n",
+                edict_idx, ent.client.is_some()));
+            if let Some(ptr) = ent.client {
+                let ps = unsafe { &(*ptr).ps };
+                com_printf(&format!("SV_Begin_f: PlayerState origin=({},{},{})\n",
+                    ps.pmove.origin[0], ps.pmove.origin[1], ps.pmove.origin[2]));
             }
         }
     }
@@ -478,6 +495,7 @@ pub fn sv_execute_user_command(ctx: &mut ServerContext, client_idx: usize, s: &s
     cmd_tokenize_string(s, true);
 
     let cmd_name = cmd_argv(0);
+    com_printf(&format!("SV_ExecuteUserCommand: '{}' (full: '{}')\n", cmd_name, s.trim()));
     let mut found = false;
 
     for &(name, func) in UCMDS {

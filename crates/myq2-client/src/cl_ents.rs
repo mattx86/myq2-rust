@@ -79,9 +79,9 @@ pub trait ClientCallbacks {
     fn cl_check_prediction_error(&mut self);
     fn v_add_entity(&mut self, ent: &Entity);
     fn v_add_light(&mut self, org: &Vec3, intensity: f32, r: f32, g: f32, b: f32);
-    fn r_register_model(&self, name: &str) -> i32;
-    fn r_register_skin(&self, name: &str) -> i32;
-    fn get_skin_name(&self, skin: i32) -> Option<String>;
+    fn r_register_model(&self, name: &str) -> isize;
+    fn r_register_skin(&self, name: &str) -> isize;
+    fn get_skin_name(&self, skin: isize) -> Option<String>;
     fn developer_searchpath(&self, who: i32) -> i32;
     fn cl_rocket_trail(&mut self, start: &Vec3, end: &Vec3, old: &mut CEntity);
     fn cl_blaster_trail(&mut self, start: &Vec3, end: &Vec3);
@@ -819,12 +819,24 @@ pub fn cl_parse_frame(
         if cls.state != ConnState::Active {
             cls.state = ConnState::Active;
             cl.force_refdef = true;
+            // Auto-close the console when the map finishes loading
+            cls.key_dest = crate::client::KeyDest::Game;
+            // Also update the raw pointer CLS (authoritative for key_dest)
+            // SAFETY: CLS_PTR is initialized at startup, accessed from main thread
+            unsafe {
+                crate::console::CLS.key_dest = crate::client::KeyDest::Game;
+            }
             // Notify auto-reconnect system of successful connection
             crate::cl_main::cl_auto_reconnect_success();
             cl.predicted_origin[0] = cl.frame.playerstate.pmove.origin[0] as f32 * 0.125;
             cl.predicted_origin[1] = cl.frame.playerstate.pmove.origin[1] as f32 * 0.125;
             cl.predicted_origin[2] = cl.frame.playerstate.pmove.origin[2] as f32 * 0.125;
             cl.predicted_angles = vector_copy(&cl.frame.playerstate.viewangles);
+            com_printf(&format!(
+                "cl_parse_frame: ACTIVE transition, predicted_origin=({:.1},{:.1},{:.1}), ps.pmove.origin=({},{},{})\n",
+                cl.predicted_origin[0], cl.predicted_origin[1], cl.predicted_origin[2],
+                cl.frame.playerstate.pmove.origin[0], cl.frame.playerstate.pmove.origin[1], cl.frame.playerstate.pmove.origin[2]
+            ));
             if cls.disable_servercount != cl.servercount && cl.refresh_prepped {
                 callbacks.scr_end_loading_plaque(true);
             }
@@ -905,7 +917,7 @@ pub fn s_register_sexed_model(
     base: &str,
     configstrings: &[String],
     callbacks: &dyn ClientCallbacks,
-) -> i32 {
+) -> isize {
     // determine what model the client is using
     let mut model = String::new();
     let n = CS_PLAYERSKINS + (ent.number as usize) - 1;
@@ -1737,7 +1749,7 @@ pub fn cl_add_view_weapon(
     ops: &PlayerState,
     cl: &mut ClientState,
     frametime: f32,
-    gun_model_override: i32,
+    gun_model_override: isize,
     gun_frame_override: i32,
     hand_value: i32,
     callbacks: &mut dyn ClientCallbacks,
@@ -1755,6 +1767,16 @@ pub fn cl_add_view_weapon(
     } else {
         gun.model = cl.model_draw[ps.gunindex as usize];
     }
+    // Diagnostic: print viewweapon state once to identify why gun is invisible
+    {
+        static VIEW_WEAPON_DIAG: std::sync::Once = std::sync::Once::new();
+        VIEW_WEAPON_DIAG.call_once(|| {
+            eprintln!("CL_AddViewWeapon: gunindex={}, gun_model_override={:#x}, gun.model={:#x}, model_draw[gunindex]={:#x}",
+                ps.gunindex, gun_model_override, gun.model,
+                if (ps.gunindex as usize) < cl.model_draw.len() { cl.model_draw[ps.gunindex as usize] } else { -1isize });
+        });
+    }
+
     if gun.model == 0 {
         return;
     }
@@ -1861,7 +1883,7 @@ pub fn cl_calc_view_values(
     cl: &mut ClientState,
     cls: &ClientStatic,
     ent_state: &ClientEntState,
-    gun_model_override: i32,
+    gun_model_override: isize,
     gun_frame_override: i32,
     hand_value: i32,
     cl_predict_enabled: bool,
@@ -2046,7 +2068,7 @@ pub fn cl_add_entities(
     cl_timedemo: bool,
     cl_predict_enabled: bool,
     cl_gun_enabled: bool,
-    gun_model_override: i32,
+    gun_model_override: isize,
     gun_frame_override: i32,
     hand_value: i32,
     callbacks: &mut dyn ClientCallbacks,

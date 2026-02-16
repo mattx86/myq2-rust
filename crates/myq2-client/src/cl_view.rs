@@ -56,7 +56,7 @@ pub struct ViewState {
 }
 
 /// Opaque model handle (index or pointer equivalent).
-pub type ModelHandle = i32;
+pub type ModelHandle = isize;
 
 impl Default for ViewState {
     fn default() -> Self {
@@ -497,22 +497,26 @@ pub fn v_render_view(
     if cl.frame.valid && (cl.force_refdef || cl_paused_value() == 0.0) {
         cl.force_refdef = false;
 
-        let mut view = ViewState::default();
-        v_clear_scene(&mut view);
+        // Clear the global VIEW_STATE (entities/particles/lights are added there by callbacks)
+        crate::cl_main::with_view_state(|view| {
+            v_clear_scene(view);
+        });
 
         // build a refresh entity list and calc cl.sim*
         // this also calls CL_CalcViewValues which loads v_forward, etc.
         cl_add_entities(cl);
 
-        if cvar_value_str("cl_testparticles") != 0.0 {
-            v_test_particles(&mut view, cl);
-        }
-        if cvar_value_str("cl_testentities") != 0.0 {
-            v_test_entities(&mut view, cl);
-        }
-        if cvar_value_str("cl_testlights") != 0.0 {
-            v_test_lights(&mut view, cl);
-        }
+        crate::cl_main::with_view_state(|view| {
+            if cvar_value_str("cl_testparticles") != 0.0 {
+                v_test_particles(view, cl);
+            }
+            if cvar_value_str("cl_testentities") != 0.0 {
+                v_test_entities(view, cl);
+            }
+            if cvar_value_str("cl_testlights") != 0.0 {
+                v_test_lights(view, cl);
+            }
+        });
         if cvar_value_str("cl_testblend") != 0.0 {
             cl.refdef.blend[0] = 1.0;
             cl.refdef.blend[1] = 0.5;
@@ -546,28 +550,70 @@ pub fn v_render_view(
 
         cl.refdef.areabits = cl.frame.areabits.to_vec();
 
-        if cl_add_entities_value() == 0.0 {
-            view.r_numentities = 0;
-        }
-        if cl_add_particles_value() == 0.0 {
-            view.r_numparticles = 0;
-        }
-        if cl_add_lights_value() == 0.0 {
-            view.r_numdlights = 0;
-        }
-        if cl_add_blend_value() == 0.0 {
-            cl.refdef.blend = [0.0; 4];
-        }
+        // Read entity/particle/light counts and data from the global VIEW_STATE
+        // (cl_add_entities added them there via callbacks)
+        crate::cl_main::with_view_state(|view| {
+            if cl_add_entities_value() == 0.0 {
+                view.r_numentities = 0;
+            }
+            if cl_add_particles_value() == 0.0 {
+                view.r_numparticles = 0;
+            }
+            if cl_add_lights_value() == 0.0 {
+                view.r_numdlights = 0;
+            }
+            if cl_add_blend_value() == 0.0 {
+                cl.refdef.blend = [0.0; 4];
+            }
 
-        cl.refdef.num_entities = view.r_numentities;
-        cl.refdef.num_particles = view.r_numparticles;
-        cl.refdef.num_dlights = view.r_numdlights;
+            cl.refdef.num_entities = view.r_numentities;
+            cl.refdef.num_particles = view.r_numparticles;
+            cl.refdef.num_dlights = view.r_numdlights;
 
-        cl.refdef.rdflags = cl.frame.playerstate.rdflags;
+            cl.refdef.rdflags = cl.frame.playerstate.rdflags;
 
-        // sort entities for better cache locality
-        let num_ents = cl.refdef.num_entities as usize;
-        view.r_entities[..num_ents].sort_by(entity_cmp_fnc);
+            // sort entities for better cache locality
+            let num_ents = cl.refdef.num_entities as usize;
+            view.r_entities[..num_ents].sort_by(entity_cmp_fnc);
+
+            // Copy entity/particle/light data arrays into the refdef for the renderer
+            cl.refdef.entities = view.r_entities[..num_ents].to_vec();
+            let num_particles = cl.refdef.num_particles as usize;
+            cl.refdef.particles = view.r_particles[..num_particles].to_vec();
+            let num_dlights = cl.refdef.num_dlights as usize;
+            cl.refdef.dlights = view.r_dlights[..num_dlights].to_vec();
+            cl.refdef.lightstyles = view.r_lightstyles.clone();
+        });
+    }
+
+    // DEBUG: Log refdef values once to diagnose view issues
+    {
+        static VIEW_DEBUG: std::sync::Once = std::sync::Once::new();
+        VIEW_DEBUG.call_once(|| {
+            com_printf(&format!(
+                "v_render_view: refdef vieworg=({:.1},{:.1},{:.1}), viewangles=({:.1},{:.1},{:.1}), fov_x={:.1}, fov_y={:.1}\n",
+                cl.refdef.vieworg[0], cl.refdef.vieworg[1], cl.refdef.vieworg[2],
+                cl.refdef.viewangles[0], cl.refdef.viewangles[1], cl.refdef.viewangles[2],
+                cl.refdef.fov_x, cl.refdef.fov_y
+            ));
+            com_printf(&format!(
+                "v_render_view: frame.valid={}, ps.pmove.origin=({},{},{}), ps.viewoffset=({:.1},{:.1},{:.1}), ps.fov={:.1}\n",
+                cl.frame.valid,
+                cl.frame.playerstate.pmove.origin[0], cl.frame.playerstate.pmove.origin[1], cl.frame.playerstate.pmove.origin[2],
+                cl.frame.playerstate.viewoffset[0], cl.frame.playerstate.viewoffset[1], cl.frame.playerstate.viewoffset[2],
+                cl.frame.playerstate.fov
+            ));
+            com_printf(&format!(
+                "v_render_view: predicted_origin=({:.1},{:.1},{:.1}), predicted_angles=({:.1},{:.1},{:.1}), lerpfrac={:.3}\n",
+                cl.predicted_origin[0], cl.predicted_origin[1], cl.predicted_origin[2],
+                cl.predicted_angles[0], cl.predicted_angles[1], cl.predicted_angles[2],
+                cl.lerpfrac
+            ));
+            com_printf(&format!(
+                "v_render_view: refdef size={}x{}, num_entities={}, playernum={}\n",
+                cl.refdef.width, cl.refdef.height, cl.refdef.num_entities, cl.playernum
+            ));
+        });
     }
 
     r_render_frame(&cl.refdef);
@@ -703,7 +749,7 @@ mod tests {
         }
         assert_eq!(view.r_numentities, 5);
         for i in 0..5 {
-            assert_eq!(view.r_entities[i].model, i as i32);
+            assert_eq!(view.r_entities[i].model, i as isize);
         }
     }
 

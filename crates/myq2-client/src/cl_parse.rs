@@ -148,9 +148,9 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
             crate::cl_view::v_add_light(view, org, intensity, r, g, b);
         });
     }
-    fn r_register_model(&self, name: &str) -> i32 { crate::console::r_register_model(name) }
-    fn r_register_skin(&self, name: &str) -> i32 { crate::console::r_register_skin(name) }
-    fn get_skin_name(&self, _skin: i32) -> Option<String> { None } // skin names stored in renderer image table
+    fn r_register_model(&self, name: &str) -> isize { crate::console::r_register_model(name) }
+    fn r_register_skin(&self, name: &str) -> isize { crate::console::r_register_skin(name) }
+    fn get_skin_name(&self, _skin: isize) -> Option<String> { None } // skin names stored in renderer image table
     fn developer_searchpath(&self, who: i32) -> i32 {
         myq2_common::files::with_fs_ctx(|ctx| ctx.developer_searchpath(who)).unwrap_or(0)
     }
@@ -411,7 +411,10 @@ use myq2_common::cvar::cvar_set;
 use crate::console::{r_register_model, r_register_skin, draw_find_pic, cm_inline_model};
 use crate::cl_main::{cl_request_next_download, cl_write_demo_message};
 
-fn cl_clear_state(cl: &mut ClientState) { *cl = ClientState::default(); }
+fn cl_clear_state(cl: &mut ClientState) {
+    myq2_common::common::com_printf("cl_parse: cl_clear_state called (resetting ClientState)\n");
+    *cl = ClientState::default();
+}
 
 /// CL_ParseMuzzleFlash — reads entity index + weapon byte from net_message.
 /// Full dlight/sound effects require sound system wiring; for now we consume
@@ -869,6 +872,7 @@ pub fn cl_parse_baseline(
     if (newnum as usize) < cl_entities.len() {
         let es = &mut cl_entities[newnum as usize].baseline;
         crate::cl_ents::cl_parse_delta(&nullstate, es, newnum, bits, net_message);
+
     }
 }
 
@@ -1193,7 +1197,9 @@ fn cl_parse_decompressed_cmd(
         }
 
         x if x == SvcOps::SpawnBaseline as i32 => {
-            cl_parse_baseline(cl_entities, net_message);
+            // Write baselines to ent_state.cl_entities (used by frame parsing),
+            // NOT to the cl_entities parameter (CL_ENTITIES global, unused for baselines).
+            cl_parse_baseline(&mut ctx.ent_state.cl_entities, net_message);
         }
 
         x if x == SvcOps::TempEntity as i32 => {
@@ -1387,7 +1393,9 @@ pub fn cl_parse_server_message(
             }
 
             x if x == SvcOps::SpawnBaseline as i32 => {
-                cl_parse_baseline(cl_entities, net_message);
+                // Write baselines to ent_state.cl_entities (used by frame parsing),
+                // NOT to the cl_entities parameter (CL_ENTITIES global, unused for baselines).
+                cl_parse_baseline(&mut ctx.ent_state.cl_entities, net_message);
             }
 
             x if x == SvcOps::TempEntity as i32 => {

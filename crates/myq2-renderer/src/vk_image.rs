@@ -30,12 +30,12 @@ static R_RAWPALETTE: Mutex<[u32; 256]> = Mutex::new([0u32; 256]);
 
 /// Read the raw palette.
 pub fn with_rawpalette<R>(f: impl FnOnce(&[u32; 256]) -> R) -> R {
-    f(&R_RAWPALETTE.lock().unwrap())
+    f(&R_RAWPALETTE.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Write the raw palette.
 pub fn set_rawpalette(palette: [u32; 256]) {
-    *R_RAWPALETTE.lock().unwrap() = palette;
+    *R_RAWPALETTE.lock().unwrap_or_else(|e| e.into_inner()) = palette;
 }
 
 /// Gamma and intensity lookup tables, initialized together in vk_init_images().
@@ -109,7 +109,7 @@ static IMAGE_STATE: LazyLock<Mutex<ImageState>> = LazyLock::new(|| {
 });
 
 pub fn imgs() -> std::sync::MutexGuard<'static, ImageState> {
-    IMAGE_STATE.lock().unwrap()
+    IMAGE_STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 // ============================================================
@@ -1012,7 +1012,7 @@ static PIC_RESOLVE_CACHE: OnceLock<Mutex<std::collections::HashMap<String, Optio
 /// Clear the pic resolution cache (call on vid_restart).
 pub fn clear_pic_cache() {
     if let Some(cache) = PIC_RESOLVE_CACHE.get() {
-        cache.lock().unwrap().clear();
+        cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -1026,7 +1026,7 @@ pub unsafe fn draw_find_pic(name: &str) -> *mut Image {
     if !name.starts_with('/') && !name.starts_with('\\') {
         // Check cache first
         {
-            let map = cache.lock().unwrap();
+            let map = cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(resolved) = map.get(name) {
                 return match resolved {
                     Some(full_name) => vk_find_image(full_name, ImageType::Pic),
@@ -1041,11 +1041,11 @@ pub unsafe fn draw_find_pic(name: &str) -> *mut Image {
             let fullname = format!("pics/{}.{}", name, ext);
             let result = vk_find_image(&fullname, ImageType::Pic);
             if !result.is_null() {
-                cache.lock().unwrap().insert(name.to_string(), Some(fullname));
+                cache.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), Some(fullname));
                 return result;
             }
         }
-        cache.lock().unwrap().insert(name.to_string(), None);
+        cache.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), None);
         std::ptr::null_mut()
     } else {
         vk_find_image(&name[1..], ImageType::Pic)

@@ -72,6 +72,9 @@ pub enum PipelineVariant {
     Ui,
     /// Depth test off, depth write off, cull none, no blend. For post-processing.
     PostProcess,
+    /// Depth test on, depth write off, cull none, multiplicative blend (dst_color, zero).
+    /// Used for detail texture overlay pass.
+    Multiplicative,
 }
 
 // ============================================================================
@@ -108,6 +111,8 @@ pub struct PipelineManager {
     descriptor_set_layout: Option<vk::DescriptorSetLayout>,
     /// UI texture descriptor set layout (set 1, binding 0 = COMBINED_IMAGE_SAMPLER).
     ui_texture_set_layout: Option<vk::DescriptorSetLayout>,
+    /// Lightmap texture array descriptor set layout (set 2, binding 0 = sampler2DArray).
+    lightmap_set_layout: Option<vk::DescriptorSetLayout>,
     /// Shared pipeline layout.
     pipeline_layout: Option<vk::PipelineLayout>,
     initialized: bool,
@@ -132,6 +137,7 @@ impl PipelineManager {
             pipelines: HashMap::new(),
             descriptor_set_layout: None,
             ui_texture_set_layout: None,
+            lightmap_set_layout: None,
             pipeline_layout: None,
             initialized: false,
             color_format,
@@ -201,6 +207,22 @@ impl PipelineManager {
                     .map_err(|e| format!("Failed to create UI texture set layout: {:?}", e))?;
                 self.ui_texture_set_layout = Some(ui_tex_layout);
 
+                // Create lightmap texture array descriptor set layout (set 2):
+                // binding 0 = COMBINED_IMAGE_SAMPLER for sampler2DArray
+                let lightmap_binding = [
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                ];
+                let lightmap_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+                    .bindings(&lightmap_binding);
+                let lightmap_layout = ctx.device
+                    .create_descriptor_set_layout(&lightmap_layout_info, None)
+                    .map_err(|e| format!("Failed to create lightmap set layout: {:?}", e))?;
+                self.lightmap_set_layout = Some(lightmap_layout);
+
                 // Create pipeline layout with push constant range covering both
                 // vertex and fragment stages. 128 bytes is the Vulkan guaranteed minimum.
                 // - UI shader: bytes 0-63 = mat4 projection (vertex stage)
@@ -212,8 +234,8 @@ impl PipelineManager {
                 };
                 let push_constant_ranges = [push_constant_range];
 
-                // Set 0 = per-frame/per-object uniforms, Set 1 = UI texture
-                let layouts = [desc_layout, ui_tex_layout];
+                // Set 0 = per-frame/per-object uniforms, Set 1 = diffuse texture, Set 2 = lightmap array
+                let layouts = [desc_layout, ui_tex_layout, lightmap_layout];
                 let layout_info = vk::PipelineLayoutCreateInfo::default()
                     .set_layouts(&layouts)
                     .push_constant_ranges(&push_constant_ranges);
@@ -302,11 +324,11 @@ impl PipelineManager {
                 ];
                 (binding, attrs)
             }
-            ShaderType::World | ShaderType::WorldFlowing | ShaderType::Sky => {
-                // BspVertex: pos3 + tex2 + lm2 = 28 bytes
+            ShaderType::World | ShaderType::WorldFlowing | ShaderType::Sky | ShaderType::Water => {
+                // BspVertex: pos3 + tex2 + lm2 + lm_layer = 32 bytes
                 let binding = vec![vk::VertexInputBindingDescription::default()
                     .binding(0)
-                    .stride(28)
+                    .stride(32)
                     .input_rate(vk::VertexInputRate::VERTEX)];
                 let attrs = vec![
                     vk::VertexInputAttributeDescription::default()
@@ -324,6 +346,11 @@ impl PipelineManager {
                         .location(2)
                         .format(vk::Format::R32G32_SFLOAT)
                         .offset(20),    // lm_coord
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(3)
+                        .format(vk::Format::R32_SFLOAT)
+                        .offset(28),    // lightmap layer index
                 ];
                 (binding, attrs)
             }
@@ -377,10 +404,10 @@ impl PipelineManager {
                 (vec![], vec![])
             }
             ShaderType::Alias | ShaderType::AliasCel => {
-                // AliasVertex: pos3 + oldpos3 + tex2 + normal_index(u8) + pad(3) = 40 bytes
+                // AliasVertex: pos3 + oldpos3 + tex2 + normal_index(u8) + pad(3) = 36 bytes
                 let binding = vec![vk::VertexInputBindingDescription::default()
                     .binding(0)
-                    .stride(40)
+                    .stride(36)
                     .input_rate(vk::VertexInputRate::VERTEX)];
                 let attrs = vec![
                     // location 0: position (vec3)
@@ -411,17 +438,22 @@ impl PipelineManager {
                 (binding, attrs)
             }
             ShaderType::DynamicLight => {
-                // DlightVertex: pos3 = 12 bytes
+                // DlightVertex: pos3 + color3 = 24 bytes
                 let binding = vec![vk::VertexInputBindingDescription::default()
                     .binding(0)
-                    .stride(12)
+                    .stride(24)
                     .input_rate(vk::VertexInputRate::VERTEX)];
                 let attrs = vec![
                     vk::VertexInputAttributeDescription::default()
                         .binding(0)
                         .location(0)
                         .format(vk::Format::R32G32B32_SFLOAT)
-                        .offset(0),
+                        .offset(0),     // position
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(1)
+                        .format(vk::Format::R32G32B32_SFLOAT)
+                        .offset(12),    // color
                 ];
                 (binding, attrs)
             }
@@ -518,7 +550,7 @@ impl PipelineManager {
                 // TODO: Re-enable back-face culling once winding order is verified
                 let (cull_mode, depth_bias_enable) = match variant {
                     PipelineVariant::Opaque => (vk::CullModeFlags::NONE, false),
-                    PipelineVariant::AlphaBlend | PipelineVariant::Additive => {
+                    PipelineVariant::AlphaBlend | PipelineVariant::Additive | PipelineVariant::Multiplicative => {
                         (vk::CullModeFlags::NONE, false)
                     }
                     PipelineVariant::Ui | PipelineVariant::PostProcess => {
@@ -544,7 +576,7 @@ impl PipelineManager {
                 // Depth state based on variant
                 let (depth_test, depth_write) = match variant {
                     PipelineVariant::Opaque => (true, true),
-                    PipelineVariant::AlphaBlend | PipelineVariant::Additive => (true, false),
+                    PipelineVariant::AlphaBlend | PipelineVariant::Additive | PipelineVariant::Multiplicative => (true, false),
                     PipelineVariant::Ui | PipelineVariant::PostProcess => (false, false),
                 };
 
@@ -584,6 +616,18 @@ impl PipelineManager {
                             .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
                             .alpha_blend_op(vk::BlendOp::ADD)
                     }
+                    PipelineVariant::Multiplicative => {
+                        // final = src_color * dst_color (detail texture overlay)
+                        vk::PipelineColorBlendAttachmentState::default()
+                            .color_write_mask(vk::ColorComponentFlags::RGBA)
+                            .blend_enable(true)
+                            .src_color_blend_factor(vk::BlendFactor::DST_COLOR)
+                            .dst_color_blend_factor(vk::BlendFactor::ZERO)
+                            .color_blend_op(vk::BlendOp::ADD)
+                            .src_alpha_blend_factor(vk::BlendFactor::DST_ALPHA)
+                            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+                            .alpha_blend_op(vk::BlendOp::ADD)
+                    }
                 };
 
                 let color_blend_attachments = [color_blend_attachment];
@@ -595,7 +639,7 @@ impl PipelineManager {
                 // 3D variants (Opaque, AlphaBlend, Additive) render to scene_fbo
                 // UI and PostProcess render to swapchain
                 let color_fmt = match variant {
-                    PipelineVariant::Opaque | PipelineVariant::AlphaBlend | PipelineVariant::Additive => {
+                    PipelineVariant::Opaque | PipelineVariant::AlphaBlend | PipelineVariant::Additive | PipelineVariant::Multiplicative => {
                         self.scene_color_format
                     }
                     _ => self.color_format,
@@ -664,6 +708,11 @@ impl PipelineManager {
         self.ui_texture_set_layout
     }
 
+    /// Get the lightmap texture array descriptor set layout (set 2).
+    pub fn lightmap_set_layout(&self) -> Option<vk::DescriptorSetLayout> {
+        self.lightmap_set_layout
+    }
+
     /// Set the scene FBO color format for 3D pipelines.
     pub fn set_scene_format(&mut self, fmt: vk::Format) {
         self.scene_color_format = fmt;
@@ -690,6 +739,9 @@ impl PipelineManager {
                 }
 
                 // Destroy descriptor set layouts
+                if let Some(layout) = self.lightmap_set_layout.take() {
+                    ctx.device.destroy_descriptor_set_layout(layout, None);
+                }
                 if let Some(layout) = self.ui_texture_set_layout.take() {
                     ctx.device.destroy_descriptor_set_layout(layout, None);
                 }
@@ -708,6 +760,7 @@ impl Default for PipelineManager {
             pipelines: HashMap::new(),
             descriptor_set_layout: None,
             ui_texture_set_layout: None,
+            lightmap_set_layout: None,
             pipeline_layout: None,
             initialized: false,
             color_format: vk::Format::R8G8B8A8_UNORM,

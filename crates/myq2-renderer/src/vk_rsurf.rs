@@ -33,6 +33,11 @@ const BACKFACE_EPSILON: f32 = 0.01;
 
 // fogDensity accessed via fog_density() in vk_local
 
+/// Collected lightmap layer data during model loading.
+/// Each entry is the RGBA pixel data for one 128x128 lightmap block (layer).
+/// Index 0 is unused (dynamic lightmap); static layers start at index 1.
+pub static LIGHTMAP_LAYER_DATA: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+
 // ============================================================
 // Lightmap state
 // ============================================================
@@ -78,7 +83,7 @@ static SURFACE_STATE: std::sync::Mutex<SurfaceState> = std::sync::Mutex::new(Sur
 });
 
 fn with_surface_state<R>(f: impl FnOnce(&mut SurfaceState) -> R) -> R {
-    let mut ss = SURFACE_STATE.lock().unwrap();
+    let mut ss = SURFACE_STATE.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut ss)
 }
 
@@ -609,6 +614,16 @@ unsafe fn lm_upload_block(ss: &mut SurfaceState, dynamic: bool) {
             VK_UNSIGNED_BYTE,
             ss.vk_lms.lightmap_buffer.as_ptr(),
         );
+        // Store lightmap layer data for per-vertex baking during BSP geometry build
+        {
+            let layer = ss.vk_lms.current_lightmap_texture as usize;
+            let mut lm_data = LIGHTMAP_LAYER_DATA.lock().unwrap_or_else(|e| e.into_inner());
+            while lm_data.len() <= layer {
+                lm_data.push(Vec::new());
+            }
+            lm_data[layer] = ss.vk_lms.lightmap_buffer.to_vec();
+        }
+
         ss.vk_lms.current_lightmap_texture += 1;
         if ss.vk_lms.current_lightmap_texture == MAX_LIGHTMAPS as i32 {
             vid_printf(ERR_DROP, "LM_UploadBlock() - MAX_LIGHTMAPS exceeded\n");
@@ -719,7 +734,7 @@ pub unsafe fn vk_build_polygon_from_surface(fa: &mut MSurface) {
 /// # Safety
 /// Accesses lightmap allocation state.
 pub unsafe fn vk_create_surface_lightmap(surf: &mut MSurface) {
-    let mut ss = SURFACE_STATE.lock().unwrap();
+    let mut ss = SURFACE_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     if surf.flags & (SURF_DRAWSKY | SURF_DRAWTURB) != 0 {
         return;
@@ -778,7 +793,13 @@ pub unsafe fn vk_create_surface_stainmap(surf: &mut MSurface) {
 /// # Safety
 /// Accesses GL state and lightmap system.
 pub unsafe fn vk_begin_building_lightmaps(_m: *mut Model) {
-    let mut ss = SURFACE_STATE.lock().unwrap();
+    // Clear collected lightmap data from previous level
+    {
+        let mut lm_data = LIGHTMAP_LAYER_DATA.lock().unwrap_or_else(|e| e.into_inner());
+        lm_data.clear();
+    }
+
+    let mut ss = SURFACE_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     for i in 0..BLOCK_WIDTH as usize {
         ss.vk_lms.allocated[i] = 0;
@@ -845,7 +866,7 @@ pub unsafe fn vk_begin_building_lightmaps(_m: *mut Model) {
 /// # Safety
 /// Accesses GL state.
 pub unsafe fn vk_end_building_lightmaps() {
-    let mut ss = SURFACE_STATE.lock().unwrap();
+    let mut ss = SURFACE_STATE.lock().unwrap_or_else(|e| e.into_inner());
     lm_upload_block(&mut ss, false);
     vk_enable_multitexture(false);
 }

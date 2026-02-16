@@ -81,7 +81,7 @@ fn bridge_r_render_frame(refdef: &RefDef) {
                 origin: e.origin,
                 oldorigin: e.oldorigin,
                 angles: e.angles,
-                // SAFETY: model handle is a *mut Model cast to i32 by bridge_r_register_model.
+                // SAFETY: model handle is a *mut Model cast to isize by bridge_r_register_model.
                 // Cast it back; null (0) becomes a null pointer.
                 model: if e.model == 0 { std::ptr::null() } else { e.model as *const myq2_renderer::vk_model_types::Model },
                 frame: e.frame,
@@ -117,22 +117,23 @@ fn bridge_r_end_registration() {
     unsafe { vk_model::r_end_registration(); }
 }
 
-fn bridge_r_register_model(name: &str) -> i32 {
-    // SAFETY: renderer dispatch called from main thread only
-    // Returns non-null pointer as 1, null as 0. The client uses non-zero to
-    // mean "valid handle".
+fn bridge_r_register_model(name: &str) -> isize {
+    // SAFETY: renderer dispatch called from main thread only.
+    // Returns the model pointer as isize (pointer-sized integer).
+    // Null (0) means not found.
     unsafe {
         let ptr = vk_model::r_register_model(name);
-        if ptr.is_null() { 0 } else { ptr as i32 }
+        if ptr.is_null() { 0 } else { ptr as isize }
     }
 }
 
-fn bridge_r_register_skin(name: &str) -> i32 {
-    // SAFETY: renderer dispatch called from main thread only
-    // Returns non-null pointer as 1, null as 0.
+fn bridge_r_register_skin(name: &str) -> isize {
+    // SAFETY: renderer dispatch called from main thread only.
+    // Returns the skin image pointer as isize (pointer-sized integer).
+    // Null (0) means not found.
     unsafe {
         let ptr = vk_image::r_register_skin(name);
-        if ptr.is_null() { 0 } else { ptr as i32 }
+        if ptr.is_null() { 0 } else { ptr as isize }
     }
 }
 

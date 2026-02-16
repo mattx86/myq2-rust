@@ -50,7 +50,10 @@ pub struct LightmapArray {
 impl LightmapArray {
     /// Create a new lightmap array with GPU texture and sampler.
     pub fn new() -> Self {
-        let array = Self {
+        // FIXME: Defer GPU resource creation to avoid deadlock during initialization
+        // GPU resources will be created on first use or during init() phase
+        // TODO: Call create_gpu_resources() after full initialization completes
+        Self {
             texture: None,
             image_view: None,
             sampler: None,
@@ -58,17 +61,14 @@ impl LightmapArray {
             layer_count: 0,
             allocated: vec![[0; BLOCK_WIDTH as usize]; MAX_LIGHTMAPS as usize],
             initialized: false,
-        };
-        // FIXME: Defer GPU resource creation to avoid deadlock during initialization
-        // GPU resources will be created on first use or during init() phase
-        // TODO: Call create_gpu_resources() after full initialization completes
-        // array.create_gpu_resources();
-        array
+        }
     }
 
     /// Create the GPU texture array and sampler.
-    fn create_gpu_resources(&mut self) {
-        gpu_device::with_device(|ctx| {
+    pub fn create_gpu_resources(&mut self) {
+        // Use with_device_and_commands_mut to avoid deadlock — both with_device
+        // and with_commands_mut lock the same VK_DEVICE_STATE mutex.
+        gpu_device::with_device_and_commands_mut(|ctx, commands| {
             // SAFETY: Vulkan context is valid and we're on the main thread.
             unsafe {
                 // Create 2D array image
@@ -186,40 +186,42 @@ impl LightmapArray {
                 self.sampler = Some(sampler);
 
                 // Transition to SHADER_READ_ONLY_OPTIMAL for initial state
-                gpu_device::with_commands_mut(|commands| {
-                    let cmd = match commands.begin_single_time() {
-                        Ok(c) => c,
-                        Err(_) => return,
-                    };
+                // (commands already available, no nested lock)
+                let cmd = match commands.begin_single_time() {
+                    Ok(c) => c,
+                    Err(_) => {
+                        self.initialized = true;
+                        return;
+                    }
+                };
 
-                    let barrier = vk::ImageMemoryBarrier::default()
-                        .old_layout(vk::ImageLayout::UNDEFINED)
-                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .image(texture)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: MAX_LIGHTMAPS,
-                        })
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(texture)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: MAX_LIGHTMAPS,
+                    })
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
 
-                    ctx.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier],
-                    );
+                ctx.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
 
-                    let _ = commands.end_single_time(ctx, cmd);
-                });
+                let _ = commands.end_single_time(ctx, cmd);
 
                 self.initialized = true;
             }
@@ -376,7 +378,9 @@ impl LightmapArray {
         }
 
         // Phase 2 (sequential): GPU upload via staging buffer
-        gpu_device::with_device(|ctx| {
+        // Use with_device_and_commands_mut to avoid deadlock — both with_device
+        // and with_commands_mut lock the same VK_DEVICE_STATE mutex.
+        gpu_device::with_device_and_commands_mut(|ctx, commands| {
             unsafe {
                 // Create staging buffer
                 let buffer_info = vk::BufferCreateInfo::default()
@@ -477,78 +481,80 @@ impl LightmapArray {
 
                 ctx.device.unmap_memory(staging_memory);
 
-                // Record and submit copy commands
-                gpu_device::with_commands_mut(|commands| {
-                    let cmd = match commands.begin_single_time() {
-                        Ok(c) => c,
-                        Err(_) => return,
-                    };
+                // Record and submit copy commands (commands already available, no nested lock)
+                let cmd = match commands.begin_single_time() {
+                    Ok(c) => c,
+                    Err(_) => {
+                        ctx.device.free_memory(staging_memory, None);
+                        ctx.device.destroy_buffer(staging_buffer, None);
+                        return;
+                    }
+                };
 
-                    // Transition image to TRANSFER_DST
-                    let barrier = vk::ImageMemoryBarrier::default()
-                        .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .image(texture)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: MAX_LIGHTMAPS,
-                        })
-                        .src_access_mask(vk::AccessFlags::SHADER_READ)
-                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+                // Transition image to TRANSFER_DST
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(texture)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: MAX_LIGHTMAPS,
+                    })
+                    .src_access_mask(vk::AccessFlags::SHADER_READ)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
 
-                    ctx.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier],
-                    );
+                ctx.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
 
-                    // Copy all regions
-                    ctx.device.cmd_copy_buffer_to_image(
-                        cmd,
-                        staging_buffer,
-                        texture,
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        &copy_regions,
-                    );
+                // Copy all regions
+                ctx.device.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buffer,
+                    texture,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &copy_regions,
+                );
 
-                    // Transition image back to SHADER_READ_ONLY
-                    let barrier = vk::ImageMemoryBarrier::default()
-                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .image(texture)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: MAX_LIGHTMAPS,
-                        })
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                // Transition image back to SHADER_READ_ONLY
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(texture)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: MAX_LIGHTMAPS,
+                    })
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
 
-                    ctx.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier],
-                    );
+                ctx.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
 
-                    let _ = commands.end_single_time(ctx, cmd);
-                });
+                let _ = commands.end_single_time(ctx, cmd);
 
                 // Clean up staging buffer
                 ctx.device.free_memory(staging_memory, None);

@@ -11,6 +11,7 @@ use myq2_common::q_shared::*;
 use myq2_common::qcommon::*;
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 // ============================================================
 // GameModule — supports both static Rust game and dynamic DLL
@@ -164,10 +165,14 @@ impl GameModule {
     }
 
     /// Call ge->ClientBegin(ent_index)
-    pub fn client_begin(&self, ent_index: i32) {
+    pub fn client_begin(&mut self, ent_index: i32) {
         match self {
-            GameModule::Static { .. } => {
-                // Static mode uses the game context's client_begin
+            GameModule::Static { export } => {
+                if let Some(func) = export.client_begin {
+                    if let Some(ent) = export.edicts.get_mut(ent_index as usize) {
+                        func(ent);
+                    }
+                }
             }
             GameModule::Dynamic { dll, .. } => unsafe {
                 dll.client_begin(ent_index);
@@ -176,10 +181,14 @@ impl GameModule {
     }
 
     /// Call ge->ClientUserinfoChanged(ent_index, userinfo)
-    pub fn client_userinfo_changed(&self, ent_index: i32, userinfo: &str) {
+    pub fn client_userinfo_changed(&mut self, ent_index: i32, userinfo: &str) {
         match self {
-            GameModule::Static { .. } => {
-                // Static mode uses the game context's client_userinfo_changed
+            GameModule::Static { export } => {
+                if let Some(func) = export.client_userinfo_changed {
+                    if let Some(ent) = export.edicts.get_mut(ent_index as usize) {
+                        func(ent, userinfo);
+                    }
+                }
             }
             GameModule::Dynamic { dll, .. } => unsafe {
                 dll.client_userinfo_changed(ent_index, userinfo);
@@ -204,10 +213,14 @@ impl GameModule {
     }
 
     /// Call ge->ClientCommand(ent_index)
-    pub fn client_command(&self, ent_index: i32) {
+    pub fn client_command(&mut self, ent_index: i32) {
         match self {
-            GameModule::Static { .. } => {
-                // Static mode uses the game context's client_command
+            GameModule::Static { export } => {
+                if let Some(func) = export.client_command {
+                    if let Some(ent) = export.edicts.get_mut(ent_index as usize) {
+                        func(ent);
+                    }
+                }
             }
             GameModule::Dynamic { dll, .. } => unsafe {
                 dll.client_command(ent_index);
@@ -216,10 +229,14 @@ impl GameModule {
     }
 
     /// Call ge->ClientThink(ent_index, cmd)
-    pub fn client_think(&self, ent_index: i32, cmd: &UserCmd) {
+    pub fn client_think(&mut self, ent_index: i32, cmd: &UserCmd) {
         match self {
-            GameModule::Static { .. } => {
-                // Static mode uses the game context's client_think
+            GameModule::Static { export } => {
+                if let Some(func) = export.client_think {
+                    if let Some(ent) = export.edicts.get_mut(ent_index as usize) {
+                        func(ent, cmd);
+                    }
+                }
             }
             GameModule::Dynamic { dll, .. } => unsafe {
                 // Convert UserCmd to usercmd_t for FFI
@@ -326,18 +343,69 @@ impl GameModule {
 
 static GAME_CONTEXT: Mutex<Option<myq2_game::g_local::GameContext>> = Mutex::new(None);
 
+// ============================================================
+// Game context raw pointer — for engine functions during game execution.
+//
+// In original C Q2, the game DLL and engine share a single edict array.
+// Engine functions (PF_setmodel, SV_LinkEdict) directly read/write the
+// game's edicts. In our Rust port, the game (GAME_CONTEXT) and server
+// (GameExport.edicts) have separate copies. This pointer allows engine
+// functions called from within game code to read/write GAME_CONTEXT
+// directly, mimicking the original shared-memory behavior.
+//
+// Set before game code runs within with_game_context, cleared after.
+// Only valid during single-threaded game execution on the main thread.
+// ============================================================
+
+static GAME_CTX_PTR: AtomicPtr<myq2_game::g_local::GameContext> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Access the game context via the raw pointer for engine callback functions.
+/// Returns None if game code is not currently executing.
+///
+/// # Safety
+/// The pointer is only valid during game code execution (within with_game_context).
+/// The caller must ensure no concurrent access. This is safe in Q2 because the
+/// game loop is single-threaded.
+pub fn with_game_ctx_ptr<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(*mut myq2_game::g_local::GameContext) -> R,
+{
+    let ptr = GAME_CTX_PTR.load(Ordering::Acquire);
+    if ptr.is_null() {
+        return None;
+    }
+    Some(f(ptr))
+}
+
 /// Access the global game context. Panics if not initialized.
+/// Sets GAME_CTX_PTR so that engine functions called from within game code
+/// can access the game context to read/write entity state directly.
 pub fn with_game_context<F, R>(f: F) -> R
 where
     F: FnOnce(&mut myq2_game::g_local::GameContext) -> R,
 {
     let mut guard = GAME_CONTEXT.lock().unwrap();
     let ctx = guard.as_mut().expect("Game context not initialized");
-    f(ctx)
+    // SAFETY: ctx is valid for the duration of this closure. Engine functions
+    // called from within f() can access the game context via GAME_CTX_PTR.
+    // The game loop is single-threaded, so there's no concurrent access.
+    GAME_CTX_PTR.store(ctx as *mut _, Ordering::Release);
+    let result = f(ctx);
+    GAME_CTX_PTR.store(std::ptr::null_mut(), Ordering::Release);
+    result
 }
 
 /// Sync server-visible edict fields from the game context into the server's GameExport.edicts.
 /// Called after game code runs to propagate changes back to the server.
+///
+/// IMPORTANT: Engine-only fields (num_clusters, clusternums, headnode, areanum, areanum2,
+/// absmin, absmax, size, linkcount) are computed by linkentity and stored directly on
+/// ge.edicts. They are NOT copied from GAME_CONTEXT because the dispatch wrapper clone
+/// pattern in the game module can clobber GAME_CONTEXT values with stale/zero data.
+///
+/// For modelindex: only copied from GAME_CONTEXT when non-zero. Game code sets player
+/// modelindex=255 directly in GAME_CONTEXT. Engine sets item modelindex via gi_setmodel
+/// on ge.edicts. Dispatch wrappers may clobber GAME_CONTEXT modelindex to 0.
 pub fn sync_edicts_to_server(ge: &mut GameExport) {
     let guard = GAME_CONTEXT.lock().unwrap();
     if let Some(ref game_ctx) = *guard {
@@ -348,22 +416,36 @@ pub fn sync_edicts_to_server(ge: &mut GameExport) {
             ge.edicts.push(Edict::default());
         }
 
+        // Ensure gclient_pool is large enough for all possible clients
+        while ge.gclient_pool.len() < game_ctx.clients.len() {
+            ge.gclient_pool.push(Box::new(GClient::default()));
+        }
+
+        // Sync client PlayerState from game clients to server-side GClient pool
+        for (i, game_client) in game_ctx.clients.iter().enumerate() {
+            ge.gclient_pool[i].ps = game_client.ps.clone();
+        }
+
         // Copy server-visible fields from game edicts to server edicts
         for (dst, src) in ge.edicts.iter_mut().zip(game_ctx.edicts.iter()) {
+            // Save engine-set modelindex before overwriting EntityState.
+            // linkentity and setmodel write this directly to ge.edicts.
+            let ge_modelindex = dst.s.modelindex;
+
+            // Copy game-set EntityState fields
             dst.s = src.s.clone();
+
+            // Restore modelindex if GAME_CONTEXT value is 0 (clobbered by dispatch clone).
+            // Game code sets player modelindex=255 directly → GAME_CONTEXT has 255 → use it.
+            // Engine sets item modelindex via gi_setmodel → ge has N, GAME_CONTEXT has 0 → preserve ge.
+            if dst.s.modelindex == 0 && ge_modelindex != 0 {
+                dst.s.modelindex = ge_modelindex;
+            }
+
             dst.inuse = src.inuse;
-            dst.linkcount = src.linkcount;
-            dst.num_clusters = src.num_clusters;
-            dst.clusternums = src.clusternums;
-            dst.headnode = src.headnode;
-            dst.areanum = src.areanum;
-            dst.areanum2 = src.areanum2;
             dst.svflags = src.svflags;
             dst.mins = src.mins;
             dst.maxs = src.maxs;
-            dst.absmin = src.absmin;
-            dst.absmax = src.absmax;
-            dst.size = src.size;
             dst.solid = match src.solid {
                 myq2_game::game::Solid::Not => Solid::Not,
                 myq2_game::game::Solid::Trigger => Solid::Trigger,
@@ -371,26 +453,23 @@ pub fn sync_edicts_to_server(ge: &mut GameExport) {
                 myq2_game::game::Solid::Bsp => Solid::Bsp,
             };
             dst.clipmask = src.clipmask;
-        }
-    }
-}
 
-/// Sync server-visible edict fields from the server's GameExport into the game context.
-/// Called before game code runs to propagate server-side changes.
-pub fn sync_edicts_from_server(ge: &GameExport) {
-    let mut guard = GAME_CONTEXT.lock().unwrap();
-    if let Some(ref mut game_ctx) = *guard {
-        // Sync entity state from server back to game
-        for (dst, src) in game_ctx.edicts.iter_mut().zip(ge.edicts.iter()) {
-            dst.linkcount = src.linkcount;
-            dst.num_clusters = src.num_clusters;
-            dst.clusternums = src.clusternums;
-            dst.headnode = src.headnode;
-            dst.areanum = src.areanum;
-            dst.areanum2 = src.areanum2;
-            dst.absmin = src.absmin;
-            dst.absmax = src.absmax;
-            dst.size = src.size;
+            // Engine-only fields are NOT copied from GAME_CONTEXT.
+            // They are set by linkentity directly on ge.edicts and must be preserved:
+            // - num_clusters, clusternums, headnode (PVS membership)
+            // - areanum, areanum2 (area portal connectivity)
+            // - absmin, absmax, size (computed bounding box)
+            // - linkcount (link sequence counter)
+
+            // Sync client field: translate game-side index to server-side raw pointer
+            dst.client = match src.client {
+                Some(client_idx) if client_idx < ge.gclient_pool.len() => {
+                    // SAFETY: Box provides a stable heap address. The pointer remains
+                    // valid as long as the gclient_pool entry is not removed or replaced.
+                    Some(&mut *ge.gclient_pool[client_idx] as *mut GClient)
+                }
+                _ => None,
+            };
         }
     }
 }
@@ -590,6 +669,11 @@ pub struct GameExport {
     pub edict_size: i32,
     pub num_edicts: i32,
     pub max_edicts: i32,
+
+    /// Server-side GClient pool. Box provides stable heap addresses so that
+    /// Edict.client raw pointers remain valid even if the Vec reallocates.
+    /// Index matches game-side client index (0 = first client).
+    pub gclient_pool: Vec<Box<GClient>>,
 }
 
 

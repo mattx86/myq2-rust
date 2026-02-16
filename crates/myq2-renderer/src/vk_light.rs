@@ -153,7 +153,7 @@ pub unsafe fn r_push_dlights() {
     }
 
     let dlight_framecount = {
-        let mut ls = LIGHT_STATE.lock().unwrap();
+        let mut ls = LIGHT_STATE.lock().unwrap_or_else(|e| e.into_inner());
         ls.r_dlightframecount = rfs().r_framecount + 1;
         ls.r_dlightframecount
     };
@@ -455,7 +455,7 @@ pub unsafe fn r_light_point(p: &Vec3, color: &mut Vec3) {
 
     let end = [p[0], p[1], p[2] - 2048.0];
 
-    let mut ls = LIGHT_STATE.lock().unwrap();
+    let mut ls = LIGHT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let r = recursive_light_point(&mut ls, r_worldmodel_nodes() as *const MNode, p, &end);
 
     if r == -1 {
@@ -490,6 +490,10 @@ unsafe fn r_add_dynamic_lights(ls: &mut LightState, surf: &MSurface) {
     let smax = (surf.extents[0] as i32 >> 4) + 1;
     let tmax = (surf.extents[1] as i32 >> 4) + 1;
     let tex = &*surf.texinfo;
+
+    // Scale dynamic light contributions by 1/overbrightbits so the shader's
+    // overbright multiply produces correct final intensity.
+    let overbright_inv = 1.0 / crate::vk_rmain::rcvars().r_overbrightbits.value.max(1.0);
 
     for lnum in 0..rfs().r_newrefdef.num_dlights {
         if surf.dlightbits & (1 << lnum) == 0 {
@@ -547,19 +551,15 @@ unsafe fn r_add_dynamic_lights(ls: &mut LightState, surf: &MSurface) {
 
                 if fdist_local < fminlight {
                     if BETTER_DLIGHT_FALLOFF {
-                        ls.blocklights[bl_idx] +=
-                            (fminlight - fdist_local) * dl.color[0];
-                        ls.blocklights[bl_idx + 1] +=
-                            (fminlight - fdist_local) * dl.color[1];
-                        ls.blocklights[bl_idx + 2] +=
-                            (fminlight - fdist_local) * dl.color[2];
+                        let contrib = (fminlight - fdist_local) * overbright_inv;
+                        ls.blocklights[bl_idx] += contrib * dl.color[0];
+                        ls.blocklights[bl_idx + 1] += contrib * dl.color[1];
+                        ls.blocklights[bl_idx + 2] += contrib * dl.color[2];
                     } else {
-                        ls.blocklights[bl_idx] +=
-                            (frad_adj - fdist_local) * dl.color[0];
-                        ls.blocklights[bl_idx + 1] +=
-                            (frad_adj - fdist_local) * dl.color[1];
-                        ls.blocklights[bl_idx + 2] +=
-                            (frad_adj - fdist_local) * dl.color[2];
+                        let contrib = (frad_adj - fdist_local) * overbright_inv;
+                        ls.blocklights[bl_idx] += contrib * dl.color[0];
+                        ls.blocklights[bl_idx + 1] += contrib * dl.color[1];
+                        ls.blocklights[bl_idx + 2] += contrib * dl.color[2];
                     }
                 }
 
@@ -576,7 +576,9 @@ unsafe fn r_add_dynamic_lights(ls: &mut LightState, surf: &MSurface) {
 /// # Safety
 /// Accesses global blocklights buffer and surface stain data.
 unsafe fn r_add_stains(ls: &mut LightState, surf: &MSurface) {
-    let scale = [crate::vk_rmain::rcvars().vk_modulate.value; 3];
+    let cv = crate::vk_rmain::rcvars();
+    let modulate = cv.vk_modulate.value / cv.r_overbrightbits.value.max(1.0);
+    let scale = [modulate; 3];
 
     let smax = (surf.extents[0] as i32 >> 4) + 1;
     let tmax = (surf.extents[1] as i32 >> 4) + 1;
@@ -629,7 +631,7 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
     let tmax = (surf.extents[1] as i32 >> 4) + 1;
     let size = (smax * tmax) as usize;
 
-    let mut ls = LIGHT_STATE.lock().unwrap();
+    let mut ls = LIGHT_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     if size > (std::mem::size_of_val(&ls.blocklights) >> 4) {
         vid_printf(ERR_DROP, "Bad s_blocklights size");
@@ -661,6 +663,12 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
 
         let mut lightmap = surf.samples;
 
+        // Divide vk_modulate by r_overbrightbits so lightmap values fit in [0,255]
+        // without clamping. The shader multiplies by r_overbrightbits to recover
+        // the full dynamic range, producing smooth circular light gradients.
+        let cv = crate::vk_rmain::rcvars();
+        let modulate = cv.vk_modulate.value / cv.r_overbrightbits.value.max(1.0);
+
         if nummaps == 1 {
             for maps in 0..MAXLIGHTMAPS {
                 if surf.styles[maps] == 255 {
@@ -669,9 +677,9 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
 
                 let style = &rfs().r_newrefdef.lightstyle(surf.styles[maps] as usize);
                 let scale = [
-                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[0],
-                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[1],
-                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[2],
+                    modulate * style.rgb[0],
+                    modulate * style.rgb[1],
+                    modulate * style.rgb[2],
                 ];
 
                 if scale[0] == 1.0 && scale[1] == 1.0 && scale[2] == 1.0 {
@@ -709,9 +717,9 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
 
                 let style = &rfs().r_newrefdef.lightstyle(surf.styles[maps] as usize);
                 let scale = [
-                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[0],
-                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[1],
-                    crate::vk_rmain::rcvars().vk_modulate.value * style.rgb[2],
+                    modulate * style.rgb[0],
+                    modulate * style.rgb[1],
+                    modulate * style.rgb[2],
                 ];
 
                 if scale[0] == 1.0 && scale[1] == 1.0 && scale[2] == 1.0 {

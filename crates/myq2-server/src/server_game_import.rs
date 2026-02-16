@@ -208,36 +208,42 @@ impl GameImport for ServerGameImport {
     }
 
     fn setmodel(&self, ent_idx: i32, name: &str) {
+        let is_inline = name.starts_with('*');
+
         with_ctx(|ctx| {
-            // Get the model index and inline model data before borrowing ctx.ge
+            // Get the model index
             let i = sv_model_index(ctx, name);
-            let inline_model = if name.starts_with('*') {
+
+            // For inline models, get mins/maxs from BSP
+            let inline_model = if is_inline {
                 Some(cm_inline_model(ctx, name))
             } else {
                 None
             };
 
-            // Then update the edict
+            // Update the server edict
             if let Some(ref mut ge) = ctx.ge {
                 if let Some(ent) = ge.edicts.get_mut(ent_idx as usize) {
                     ent.s.modelindex = i;
 
-                    if let Some(model) = inline_model {
+                    if let Some(ref model) = inline_model {
                         ent.mins = model.mins;
                         ent.maxs = model.maxs;
-                        for j in 0..3 {
-                            ent.size[j] = ent.maxs[j] - ent.mins[j];
-                            ent.absmin[j] = ent.s.origin[j] + ent.mins[j] - 1.0;
-                            ent.absmax[j] = ent.s.origin[j] + ent.maxs[j] + 1.0;
-                        }
-                        if ent.linkcount == 0 {
-                            ent.s.old_origin = ent.s.origin;
-                        }
-                        ent.linkcount += 1;
                     }
+
                 }
             }
+
+            // Note: We do NOT write modelindex back to GAME_CONTEXT here.
+            // The dispatch wrapper clone pattern would clobber it anyway.
+            // sync_edicts_to_server preserves ge.edicts modelindex via conditional copy.
         });
+
+        // For inline models, call linkentity to compute size, absbox, PVS clusters.
+        // This matches the original C PF_setmodel which calls SV_LinkEdict.
+        if is_inline {
+            self.linkentity(ent_idx);
+        }
     }
 
     // ---- Collision ----
@@ -388,6 +394,32 @@ impl GameImport for ServerGameImport {
         with_ctx(|ctx| {
             if let Some(ref mut ge) = ctx.ge {
                 if let Some(ent) = ge.edicts.get_mut(ent_idx as usize) {
+                    // Copy current entity state from GAME_CONTEXT to ge so we use
+                    // up-to-date origin/mins/maxs/solid for PVS computation.
+                    // In original C Q2, these are shared memory; here we must sync explicitly.
+                    //
+                    // NOTE: We do NOT copy modelindex here — it's already set on ge.edicts
+                    // by setmodel. Copying from GAME_CONTEXT would overwrite it with stale
+                    // data (0) when called from dispatch wrapper contexts.
+                    //
+                    // SAFETY: GAME_CTX_PTR is valid during game code execution (single-threaded).
+                    with_game_ctx_ptr(|ptr| {
+                        let game_ctx = unsafe { &*ptr };
+                        if let Some(game_ent) = game_ctx.edicts.get(ent_idx as usize) {
+                            ent.s.origin = game_ent.s.origin;
+                            ent.s.angles = game_ent.s.angles;
+                            ent.mins = game_ent.mins;
+                            ent.maxs = game_ent.maxs;
+                            ent.solid = match game_ent.solid {
+                                myq2_game::game::Solid::Not => crate::sv_game::Solid::Not,
+                                myq2_game::game::Solid::Trigger => crate::sv_game::Solid::Trigger,
+                                myq2_game::game::Solid::Bbox => crate::sv_game::Solid::Bbox,
+                                myq2_game::game::Solid::Bsp => crate::sv_game::Solid::Bsp,
+                            };
+                            ent.svflags = game_ent.svflags;
+                        }
+                    });
+
                     // Compute size
                     for i in 0..3 {
                         ent.size[i] = ent.maxs[i] - ent.mins[i];
@@ -431,6 +463,25 @@ impl GameImport for ServerGameImport {
                             }
                         }
                     }
+
+                    // Write computed fields back to GAME_CONTEXT so that game code
+                    // (g_touch_triggers, g_phys, etc.) can read them. In original C Q2,
+                    // the game DLL shares memory with the server, so these fields are
+                    // automatically visible. In our Rust port, we must sync explicitly.
+                    //
+                    // Dispatch wrappers may overwrite these with stale clone data, but
+                    // the next linkentity call will recompute them. The critical case is
+                    // the player edict, which goes through client_think → gi_linkentity
+                    // directly (not through dispatch), so the values stay current.
+                    with_game_ctx_ptr(|ptr| {
+                        let game_ctx = unsafe { &mut *ptr };
+                        if let Some(game_ent) = game_ctx.edicts.get_mut(ent_idx as usize) {
+                            game_ent.absmin = ent.absmin;
+                            game_ent.absmax = ent.absmax;
+                            game_ent.size = ent.size;
+                            game_ent.linkcount = ent.linkcount;
+                        }
+                    });
                 }
             }
         });
@@ -449,6 +500,9 @@ impl GameImport for ServerGameImport {
                 }
             }
         });
+
+        // Note: We do NOT write cleared fields back to GAME_CONTEXT.
+        // sync_edicts_to_server preserves ge.edicts engine fields.
     }
 
     fn box_edicts(&self, mins: &Vec3, maxs: &Vec3, maxcount: i32, _areatype: i32) -> Vec<i32> {

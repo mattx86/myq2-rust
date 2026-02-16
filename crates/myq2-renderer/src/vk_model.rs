@@ -88,7 +88,7 @@ static MODEL_STATE: LazyLock<Mutex<ModelState>> = LazyLock::new(|| {
 });
 
 pub fn ms() -> MutexGuard<'static, ModelState> {
-    MODEL_STATE.lock().unwrap()
+    MODEL_STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Get the current registration sequence value.
@@ -1312,8 +1312,10 @@ unsafe fn build_modern_bsp_geometry() {
     for i in 0..num_surfaces as usize {
         let surface = &*surfaces_ptr.add(i);
 
-        // Skip special surfaces
-        if surface.flags & (SURF_DRAWSKY as i32 | SURF_DRAWTURB as i32) != 0 {
+        // Skip sky surfaces (rendered by separate sky pipeline)
+        // Note: SURF_DRAWTURB (water/lava/slime) surfaces are kept — they render
+        // with the world or alpha-blend pipeline using their texture.
+        if surface.flags & SURF_DRAWSKY as i32 != 0 {
             continue;
         }
 
@@ -1343,13 +1345,27 @@ unsafe fn build_modern_bsp_geometry() {
             let first_index = indices.len() as u32;
             let base_vertex = vertices.len() as u32;
 
-            // Extract vertices from the GlPoly
+            // Extract vertices from the GlPoly with lightmap layer index
+            let has_lightmap = surface.flags & (SURF_DRAWSKY | SURF_DRAWTURB) as i32 == 0;
+            let lm_layer = if has_lightmap {
+                surface.lightmaptexturenum as f32
+            } else {
+                -1.0 // No lightmap (sky/water) — shader uses full bright
+            };
             for v in 0..numverts {
                 let vert_ptr = glpoly_vert_ptr(poly, v);
-                let bsp_vert = BspVertex::new(
+                let lm_s = *vert_ptr.add(5);
+                let lm_t = *vert_ptr.add(6);
+                // Water/lava/slime surfaces store raw dot-product texture coordinates.
+                // The Water shader divides by 64 after applying turbulent warp animation.
+                // Non-turb surfaces use pre-computed normalized tex coords directly.
+                let tex_s = *vert_ptr.add(3);
+                let tex_t = *vert_ptr.add(4);
+                let bsp_vert = BspVertex::with_lightmap(
                     [*vert_ptr, *vert_ptr.add(1), *vert_ptr.add(2)],
-                    [*vert_ptr.add(3), *vert_ptr.add(4)],
-                    [*vert_ptr.add(5), *vert_ptr.add(6)],
+                    [tex_s, tex_t],
+                    [lm_s, lm_t],
+                    lm_layer,
                 );
                 vertices.push(bsp_vert);
             }
@@ -1385,6 +1401,13 @@ unsafe fn build_modern_bsp_geometry() {
                 modern.bsp_geometry().surfaces().len()
             ),
         );
+
+        // Upload lightmap data to GPU texture array for per-pixel sampling
+        let lm_data = crate::vk_rsurf::LIGHTMAP_LAYER_DATA.lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let layers: Vec<Vec<u8>> = lm_data.clone();
+        drop(lm_data);
+        modern.init_lightmap_gpu(&layers);
     }
 }
 
@@ -1393,45 +1416,206 @@ unsafe fn build_modern_bsp_geometry() {
 /// # Safety
 /// Accesses vk_local globals and filesystem.
 pub unsafe fn r_register_model(name: &str) -> *mut Model {
-    let mut state = ms();
-    let model = mod_for_name(&mut state, name, false);
-    if model.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    (*model).registration_sequence = state.registration_sequence;
-
-    // register any images used by the models
-    match (*model).r#type {
-        ModType::Sprite => {
-            let sprout = (*model).extradata as *const DSprite;
-            let sprite_header_size = std::mem::size_of::<DSprite>();
-            let frame_size = std::mem::size_of::<DSprFrame>();
-            for i in 0..(*sprout).numframes as usize {
-                let frame = (sprout as *const u8).add(sprite_header_size + i * frame_size) as *const DSprFrame;
-                (*model).skins[i] = vk_find_image_c((*frame).name.as_ptr(), ImageType::Sprite);
-            }
+    let model = {
+        let mut state = ms();
+        let model = mod_for_name(&mut state, name, false);
+        if model.is_null() {
+            return std::ptr::null_mut();
         }
-        ModType::Alias => {
-            let pheader = (*model).extradata as *const DMdl;
-            for i in 0..(*pheader).num_skins as usize {
-                let skin_name_ptr = (pheader as *const u8).add((*pheader).ofs_skins as usize + i * MAX_SKINNAME);
-                (*model).skins[i] = vk_find_image_c(skin_name_ptr, ImageType::Skin);
-            }
-            (*model).numframes = (*pheader).num_frames;
-        }
-        ModType::Brush => {
-            for i in 0..(*model).numtexinfo {
-                let ti = &mut *(*model).texinfo.add(i as usize);
-                if !ti.image.is_null() {
-                    (*ti.image).registration_sequence = state.registration_sequence;
+
+        (*model).registration_sequence = state.registration_sequence;
+
+        // register any images used by the models
+        match (*model).r#type {
+            ModType::Sprite => {
+                let sprout = (*model).extradata as *const DSprite;
+                let sprite_header_size = std::mem::size_of::<DSprite>();
+                let frame_size = std::mem::size_of::<DSprFrame>();
+                for i in 0..(*sprout).numframes as usize {
+                    let frame = (sprout as *const u8).add(sprite_header_size + i * frame_size) as *const DSprFrame;
+                    (*model).skins[i] = vk_find_image_c((*frame).name.as_ptr(), ImageType::Sprite);
                 }
             }
+            ModType::Alias => {
+                let pheader = (*model).extradata as *const DMdl;
+                for i in 0..(*pheader).num_skins as usize {
+                    let skin_name_ptr = (pheader as *const u8).add((*pheader).ofs_skins as usize + i * MAX_SKINNAME);
+                    (*model).skins[i] = vk_find_image_c(skin_name_ptr, ImageType::Skin);
+                }
+                (*model).numframes = (*pheader).num_frames;
+            }
+            ModType::Brush => {
+                for i in 0..(*model).numtexinfo {
+                    let ti = &mut *(*model).texinfo.add(i as usize);
+                    if !ti.image.is_null() {
+                        (*ti.image).registration_sequence = state.registration_sequence;
+                    }
+                }
+            }
+            _ => {}
         }
-        _ => {}
+
+        model
+    }; // MODEL_STATE lock dropped here
+
+    // Build Vulkan vertex/index buffers for MD2 alias models.
+    // This must be done after dropping MODEL_STATE to avoid deadlock
+    // (lock ordering: MODEL_STATE → RENDERER_GLOBALS → VK_DEVICE_STATE).
+    if (*model).r#type == ModType::Alias {
+        build_alias_gpu_buffers(model);
     }
 
     model
+}
+
+/// Build Vulkan GPU vertex/index buffers from MD2 triangle data.
+///
+/// Reads the DTriangle array from the model's extradata, deduplicates vertices
+/// by (xyz_index, st_index) pairs, decompresses positions for all animation
+/// frames, and uploads the resulting buffers to the GPU via the modern renderer.
+///
+/// # Safety
+/// `model` must point to a valid alias (MD2) model with properly loaded extradata.
+unsafe fn build_alias_gpu_buffers(model: *mut Model) {
+    use std::collections::HashMap;
+    use crate::vk_rmain::with_modern;
+    use crate::modern::geometry::AliasModelBuffers;
+
+    let model_id = model as usize;
+
+    // Check if already registered
+    let already_registered = with_modern(|m| m.alias_models().get(model_id).is_some());
+    if already_registered == Some(true) {
+        return;
+    }
+
+    let pheader = (*model).extradata as *const DMdl;
+    if pheader.is_null() {
+        return;
+    }
+
+    let num_tris = (*pheader).num_tris as usize;
+    let num_st = (*pheader).num_st as usize;
+    let num_xyz = (*pheader).num_xyz as usize;
+    let num_frames = (*pheader).num_frames as usize;
+    let skinwidth = (*pheader).skinwidth as f32;
+    let skinheight = (*pheader).skinheight as f32;
+
+    if num_tris == 0 || num_xyz == 0 || num_frames == 0 || skinwidth <= 0.0 || skinheight <= 0.0 {
+        return;
+    }
+
+    // Read triangle and texcoord arrays from extradata
+    let triangles = (pheader as *const u8).add((*pheader).ofs_tris as usize) as *const DTriangle;
+    let st_verts = (pheader as *const u8).add((*pheader).ofs_st as usize) as *const DStVert;
+
+    // Deduplicate vertices: MD2 triangles reference position and texcoord
+    // indices separately (like OBJ format). The same position may have
+    // different texcoords at UV seams.
+    let mut vertex_map: HashMap<(i16, i16), u32> = HashMap::new();
+    let mut dedup_xyz_indices: Vec<i16> = Vec::new();
+    let mut dedup_st_indices: Vec<i16> = Vec::new();
+    let mut indices: Vec<u32> = Vec::with_capacity(num_tris * 3);
+
+    for i in 0..num_tris {
+        let tri = &*triangles.add(i);
+        for j in 0..3 {
+            let xyz_idx = tri.index_xyz[j];
+            let st_idx = tri.index_st[j];
+            let key = (xyz_idx, st_idx);
+
+            let vertex_index = match vertex_map.get(&key) {
+                Some(&idx) => idx,
+                None => {
+                    let idx = dedup_xyz_indices.len() as u32;
+                    dedup_xyz_indices.push(xyz_idx);
+                    dedup_st_indices.push(st_idx);
+                    vertex_map.insert(key, idx);
+                    idx
+                }
+            };
+            indices.push(vertex_index);
+        }
+    }
+
+    let verts_per_frame = dedup_xyz_indices.len();
+
+    // Build normalized texture coordinates
+    let mut tex_coords: Vec<[f32; 2]> = Vec::with_capacity(verts_per_frame);
+    for &st_idx in &dedup_st_indices {
+        let st_idx = st_idx as usize;
+        if st_idx < num_st {
+            let st = &*st_verts.add(st_idx);
+            tex_coords.push([
+                st.s as f32 / skinwidth,
+                st.t as f32 / skinheight,
+            ]);
+        } else {
+            tex_coords.push([0.0, 0.0]);
+        }
+    }
+
+    // Build normal indices from first frame (all frames share the same vertex layout)
+    let mut normal_indices: Vec<u8> = Vec::with_capacity(verts_per_frame);
+
+    // Build decompressed positions for all frames
+    let mut all_positions: Vec<[f32; 3]> = Vec::with_capacity(num_frames * verts_per_frame);
+
+    for frame_idx in 0..num_frames {
+        let frame_ofs = (*pheader).ofs_frames as usize + frame_idx * (*pheader).framesize as usize;
+        let frame_header = (pheader as *const u8).add(frame_ofs) as *const DAliasFrame;
+        let scale = (*frame_header).scale;
+        let translate = (*frame_header).translate;
+
+        // Compressed vertices follow the frame header
+        let frame_verts = (pheader as *const u8).add(frame_ofs + std::mem::size_of::<DAliasFrame>()) as *const DTriVertx;
+
+        for (vert_idx, &xyz_idx) in dedup_xyz_indices.iter().enumerate() {
+            let xyz_idx = xyz_idx as usize;
+            if xyz_idx < num_xyz {
+                let v = &*frame_verts.add(xyz_idx);
+                all_positions.push([
+                    v.v[0] as f32 * scale[0] + translate[0],
+                    v.v[1] as f32 * scale[1] + translate[1],
+                    v.v[2] as f32 * scale[2] + translate[2],
+                ]);
+
+                // Collect normal indices from frame 0 only
+                if frame_idx == 0 {
+                    normal_indices.push(v.lightnormalindex);
+                }
+            } else {
+                all_positions.push([0.0, 0.0, 0.0]);
+                if frame_idx == 0 {
+                    normal_indices.push(0);
+                }
+            }
+            let _ = vert_idx; // suppress unused warning
+        }
+    }
+
+    // Create GPU buffers and register with the modern renderer
+    let buffers = AliasModelBuffers::new(
+        &all_positions,
+        &tex_coords,
+        &normal_indices,
+        &indices,
+        verts_per_frame as u32,
+        num_frames as u32,
+    );
+
+    let has_vbo = buffers.vertex_buffer().is_valid();
+    let has_ibo = buffers.index_buffer().vk_buffer().is_some();
+    eprintln!("build_alias_gpu_buffers: model_id={:#x}, frames={}, verts_per_frame={}, indices={}, vbo_valid={}, ibo_valid={}",
+        model_id, num_frames, verts_per_frame, indices.len(), has_vbo, has_ibo);
+
+    let registered = with_modern(|m| {
+        m.alias_models_mut().register(model_id, buffers);
+        true
+    });
+    if registered.is_none() {
+        eprintln!("WARNING: build_alias_gpu_buffers: with_modern returned None, modern renderer not available!");
+    }
 }
 
 /// End model registration: free unused models and images.

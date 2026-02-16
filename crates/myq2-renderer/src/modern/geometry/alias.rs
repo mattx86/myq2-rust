@@ -182,6 +182,11 @@ impl AliasModelManager {
     pub fn clear(&mut self) {
         self.models.clear();
     }
+
+    /// Get the number of registered models.
+    pub fn model_count(&self) -> usize {
+        self.models.len()
+    }
 }
 
 impl Default for AliasModelManager {

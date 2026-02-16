@@ -48,21 +48,16 @@ impl ParticleManager {
 
     /// Create with specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
-        let mut manager = Self {
+        // FIXME: setup_quad()/setup_vao() hang during initialization - skip for now
+        // TODO: Investigate VAO/VBO binding deadlock
+        Self {
             quad_vbo: VertexBuffer::new(),
             instance_vbo: VertexBuffer::new(),
             vao: VertexArray::new(),
             count: 0,
             capacity,
             staging: Vec::with_capacity(capacity),
-        };
-
-        // FIXME: These hang during initialization - skip for now
-        // TODO: Investigate VAO/VBO binding deadlock
-        // manager.setup_quad();
-        // manager.setup_vao();
-
-        manager
+        }
     }
 
     /// Create the unit quad VBO.

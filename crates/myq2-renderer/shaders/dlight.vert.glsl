@@ -1,6 +1,7 @@
 #version 450
 
 layout(location = 0) in vec3 a_Position;
+layout(location = 1) in vec3 a_Color;
 
 layout(push_constant) uniform PushConstants {
     mat4 u_ModelViewProjection;  // 64 bytes
@@ -10,9 +11,9 @@ layout(push_constant) uniform PushConstants {
     float _pad;                  // 4 bytes
 } pc;                            // Total: 96 bytes
 
-layout(location = 0) out vec3 v_Position;
+layout(location = 0) out vec3 v_Color;
 
 void main() {
     gl_Position = pc.u_ModelViewProjection * vec4(a_Position, 1.0);
-    v_Position = a_Position;
+    v_Color = a_Color;
 }

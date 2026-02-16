@@ -187,7 +187,7 @@ impl Default for InputCvars {
             cl_sidespeed: 200.0,
             cl_yawspeed: 140.0,
             cl_pitchspeed: 150.0,
-            cl_run: 0.0,
+            cl_run: 1.0,
             cl_anglespeedkey: 1.5,
             cl_strafejump_fix: true,   // Enabled by default for consistent gameplay
             cl_physics_fps: 125.0,     // 125fps = 8ms timestep (classic competitive rate)
@@ -474,7 +474,8 @@ pub fn cl_create_cmd(
         timing.frame_msec,
     );
 
-    // NOTE: IN_Move (mice/external controllers) would be called here
+    // allow mice or other external controllers to add to the move
+    crate::platform::in_move(&mut cmd, viewangles, buttons.in_strafe.state as i32);
 
     cl_finish_move(
         &mut cmd,

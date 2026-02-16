@@ -134,7 +134,7 @@ pub fn player_noise(ctx: &mut GameContext, who_idx: usize, where_pos: &Vec3, noi
         return;
     }
 
-    if ctx.edicts[who_idx].mynoise == 0 {
+    if ctx.edicts[who_idx].mynoise <= 0 {
         // Spawn two noise entities for this player
         let noise_idx = spawn_noise_entity(ctx);
         ctx.edicts[noise_idx].classname = "player_noise".to_string();

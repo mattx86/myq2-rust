@@ -54,7 +54,7 @@ fn dispatch() -> &'static Mutex<PlatformDispatch> {
 
 /// Register all platform callbacks at once.
 pub fn platform_register(d: PlatformDispatch) {
-    *dispatch().lock().unwrap() = d;
+    *dispatch().lock().unwrap_or_else(|e| e.into_inner()) = d;
 }
 
 // ============================================================
@@ -62,7 +62,7 @@ pub fn platform_register(d: PlatformDispatch) {
 // ============================================================
 
 pub fn glimp_init(hinstance: usize, hwnd: usize) -> bool {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.glimp_init {
         f(hinstance, hwnd)
     } else {
@@ -72,28 +72,28 @@ pub fn glimp_init(hinstance: usize, hwnd: usize) -> bool {
 }
 
 pub fn glimp_shutdown() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.glimp_shutdown {
         f();
     }
 }
 
 pub fn glimp_begin_frame(camera_separation: f32) {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.glimp_begin_frame {
         f(camera_separation);
     }
 }
 
 pub fn glimp_end_frame() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.glimp_end_frame {
         f();
     }
 }
 
 pub fn glimp_set_mode(width: &mut i32, height: &mut i32, mode: f32, fullscreen: bool) -> i32 {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.glimp_set_mode {
         f(width, height, mode, fullscreen)
     } else {
@@ -102,14 +102,14 @@ pub fn glimp_set_mode(width: &mut i32, height: &mut i32, mode: f32, fullscreen: 
 }
 
 pub fn vid_menu_init() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.vid_menu_init {
         f();
     }
 }
 
 pub fn update_gamma_ramp() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.update_gamma_ramp {
         f();
     }

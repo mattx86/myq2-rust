@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use winit::dpi::PhysicalSize;
 use winit::event_loop::EventLoop;
-use winit::window::{Window, WindowAttributes, Fullscreen};
+use winit::window::{Icon, Window, WindowAttributes, Fullscreen};
 use raw_window_handle::HasDisplayHandle;
 
 use myq2_common::common::{com_printf, DISTNAME};
@@ -141,7 +141,8 @@ impl GlImpContext {
         // Build window attributes
         let mut window_attrs = WindowAttributes::default()
             .with_title(DISTNAME)
-            .with_inner_size(PhysicalSize::new(width as u32, height as u32));
+            .with_inner_size(PhysicalSize::new(width as u32, height as u32))
+            .with_resizable(false);
 
         if fullscreen {
             // Use borderless fullscreen on primary monitor
@@ -162,6 +163,11 @@ impl GlImpContext {
         };
 
         com_printf("...winit window created\n");
+
+        // Set window icon
+        if let Some(icon) = generate_q2_icon() {
+            window.set_window_icon(Some(icon));
+        }
 
         // Initialize Vulkan context
         let display_handle = match window.display_handle() {
@@ -575,4 +581,122 @@ mod tests {
         // On Linux/Wayland, save_original_gamma should disable hw gamma
         assert!(!ctx.vk_config.gammaramp);
     }
+}
+
+/// Generate a 64x64 RGBA Quake 2 window icon.
+///
+/// Green "Q" with "II" roman numerals inside — matching the classic Quake 2 style.
+/// Same design as the exe icon generated in build.rs.
+fn generate_q2_icon() -> Option<Icon> {
+    const SIZE: u32 = 64;
+    let center = SIZE as f32 / 2.0;
+    let scale = 1.0f32; // 64px reference
+    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
+
+    let outer_r = center - 3.0 * scale;
+    let ring_thick = 8.0 * scale;
+    let inner_r = outer_r - ring_thick;
+    let bg_r = center - 1.0 * scale;
+
+    let bg = [12u8, 16, 12];
+    let q_green = [0u8, 200, 40];
+    let q_bright = [80u8, 255, 100];
+    let q_dark = [0u8, 120, 20];
+
+    let tail_angle: f32 = std::f32::consts::FRAC_PI_4;
+    let tail_cos = tail_angle.cos();
+    let tail_sin = tail_angle.sin();
+    let tail_width = 4.5 * scale;
+
+    let ii_height = ring_thick * 1.5;
+    let ii_bar_width = 2.2 * scale;
+    let ii_gap = 3.0 * scale;
+    let ii_y_center = center - 0.5 * scale;
+
+    fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t.clamp(0.0, 1.0) }
+    fn ablend(pixel: &mut [u8], r: f32, g: f32, b: f32, a: f32) {
+        let old_a = pixel[3] as f32 / 255.0;
+        let new_a = a / 255.0;
+        let out_a = new_a + old_a * (1.0 - new_a);
+        if out_a > 0.001 {
+            pixel[0] = ((r * new_a + pixel[0] as f32 * old_a * (1.0 - new_a)) / out_a).clamp(0.0, 255.0) as u8;
+            pixel[1] = ((g * new_a + pixel[1] as f32 * old_a * (1.0 - new_a)) / out_a).clamp(0.0, 255.0) as u8;
+            pixel[2] = ((b * new_a + pixel[2] as f32 * old_a * (1.0 - new_a)) / out_a).clamp(0.0, 255.0) as u8;
+            pixel[3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let dx = px - center;
+            let dy = py - center;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let idx = ((y * SIZE + x) * 4) as usize;
+
+            if dist < bg_r {
+                let aa = (bg_r - dist).clamp(0.0, 1.5) / 1.5;
+                rgba[idx] = bg[0]; rgba[idx+1] = bg[1]; rgba[idx+2] = bg[2];
+                rgba[idx+3] = (aa * 255.0) as u8;
+            }
+
+            let ring_alpha = ((outer_r - dist).clamp(0.0, 1.5) / 1.5)
+                .min((dist - inner_r).clamp(0.0, 1.5) / 1.5);
+            if ring_alpha > 0.0 {
+                let light = ((-dx - dy) / (center * 2.0) + 0.5).clamp(0.15, 1.0);
+                ablend(&mut rgba[idx..idx+4],
+                    lerp(q_green[0] as f32, q_bright[0] as f32, (light - 0.4) * 0.8),
+                    lerp(q_green[1] as f32, q_bright[1] as f32, (light - 0.4) * 0.8),
+                    lerp(q_green[2] as f32, q_bright[2] as f32, (light - 0.4) * 0.8),
+                    ring_alpha * 255.0);
+            }
+
+            let tail_proj = dx * tail_cos + dy * tail_sin;
+            let tail_perp = (-dx * tail_sin + dy * tail_cos).abs();
+            if tail_proj > inner_r * 0.2 && tail_proj < outer_r + 7.0 * scale && tail_perp < tail_width {
+                let ta = ((tail_width - tail_perp) / (1.5*scale)).clamp(0.0,1.0)
+                    * ((outer_r + 7.0*scale - tail_proj) / (2.0*scale)).clamp(0.0,1.0)
+                    * ((tail_proj - inner_r * 0.2) / (2.0*scale)).clamp(0.0,1.0);
+                if ta > 0.01 {
+                    let f = ((tail_width - tail_perp) / (1.5*scale)).clamp(0.0,1.0);
+                    ablend(&mut rgba[idx..idx+4],
+                        lerp(q_dark[0] as f32, q_green[0] as f32, f),
+                        lerp(q_dark[1] as f32, q_green[1] as f32, f),
+                        lerp(q_dark[2] as f32, q_green[2] as f32, f),
+                        ta * 255.0);
+                }
+            }
+
+            let fy = py - ii_y_center;
+            if fy.abs() < ii_height / 2.0 && dist < inner_r - 1.0 * scale {
+                let left_bar_x = center - ii_gap / 2.0 - ii_bar_width / 2.0;
+                let right_bar_x = center + ii_gap / 2.0 + ii_bar_width / 2.0;
+                let bl = ((ii_bar_width / 2.0 - (px - left_bar_x).abs()) / scale).clamp(0.0, 1.0);
+                let br = ((ii_bar_width / 2.0 - (px - right_bar_x).abs()) / scale).clamp(0.0, 1.0);
+                let by = ((ii_height / 2.0 - fy.abs()) / scale).clamp(0.0, 1.0);
+                let bar_a = bl.max(br) * by;
+
+                let serif_h = 1.5 * scale;
+                let serif_extra = 1.5 * scale;
+                let near_top = (ii_height / 2.0 - fy.abs()) < serif_h;
+                if near_top {
+                    let sl = ((ii_bar_width / 2.0 + serif_extra - (px - left_bar_x).abs()) / scale).clamp(0.0, 1.0);
+                    let sr = ((ii_bar_width / 2.0 + serif_extra - (px - right_bar_x).abs()) / scale).clamp(0.0, 1.0);
+                    let sy = ((serif_h - (ii_height / 2.0 - fy.abs())) / scale).clamp(0.0, 1.0);
+                    let sa = sl.max(sr) * by * sy;
+                    if sa > bar_a && sa > 0.01 {
+                        let l = 0.7 + 0.3 * (1.0 - fy.abs() / (ii_height / 2.0));
+                        ablend(&mut rgba[idx..idx+4], q_bright[0] as f32*l, q_bright[1] as f32*l, q_bright[2] as f32*l, sa * 255.0);
+                    }
+                }
+                if bar_a > 0.01 {
+                    let l = 0.7 + 0.3 * (1.0 - fy.abs() / (ii_height / 2.0));
+                    ablend(&mut rgba[idx..idx+4], q_bright[0] as f32*l, q_bright[1] as f32*l, q_bright[2] as f32*l, bar_a * 255.0);
+                }
+            }
+        }
+    }
+
+    Icon::from_rgba(rgba, SIZE, SIZE).ok()
 }

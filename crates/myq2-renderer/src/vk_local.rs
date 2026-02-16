@@ -289,7 +289,10 @@ pub fn qvk_bind_texture(target: u32, texture: i32) {
     // SAFETY: Delegates to OpenGL; GL must be loaded via crate::vk_bindings::load_with first.
     unsafe { crate::vk_bindings::BindTexture(target, texture as u32); }
 }
-pub fn qvk_tex_image2d(
+/// # Safety
+/// `data` must point to a valid buffer of at least `width * height * bytes_per_pixel` bytes,
+/// or be null. The caller must ensure the pointer remains valid for the duration of this call.
+pub unsafe fn qvk_tex_image2d(
     target: u32, level: i32, internal_format: i32,
     width: i32, height: i32, border: i32,
     format: u32, data_type: u32, data: *const u8,

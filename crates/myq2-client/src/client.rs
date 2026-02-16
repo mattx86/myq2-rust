@@ -40,7 +40,7 @@ pub const API_VERSION: i32 = 3;
 /// entity_t — renderer entity
 #[derive(Debug, Clone)]
 pub struct Entity {
-    pub model: i32,             // model index (opaque type outside refresh)
+    pub model: isize,           // opaque model handle (pointer-sized for 64-bit safety)
     pub angles: Vec3,
     pub origin: Vec3,           // also used as RF_BEAM's "from"
     pub frame: i32,             // also used as RF_BEAM's diameter
@@ -50,7 +50,7 @@ pub struct Entity {
     pub skinnum: i32,           // also used as RF_BEAM's palette index
     pub lightstyle: i32,        // for flashing entities
     pub alpha: f32,             // ignore if RF_TRANSLUCENT isn't set
-    pub skin: i32,              // image index, 0 for inline skin
+    pub skin: isize,            // opaque skin handle (pointer-sized for 64-bit safety)
     pub flags: i32,
 }
 
@@ -436,11 +436,11 @@ impl Default for CEntity {
 pub struct ClientInfo {
     pub name: String,
     pub cinfo: String,
-    pub skin: i32,                 // image index
-    pub icon: i32,                 // image index
+    pub skin: isize,               // opaque skin handle (pointer-sized)
+    pub icon: i32,                 // image index (0/1 flag)
     pub iconname: String,
-    pub model: i32,                // model index
-    pub weaponmodel: [i32; MAX_CLIENTWEAPONMODELS], // model indices
+    pub model: isize,              // opaque model handle (pointer-sized)
+    pub weaponmodel: [isize; MAX_CLIENTWEAPONMODELS], // opaque model handles
 }
 
 impl Default for ClientInfo {
@@ -532,7 +532,7 @@ pub struct ClientState {
     //
     // locally derived information from server state
     //
-    pub model_draw: [i32; MAX_MODELS],     // model indices
+    pub model_draw: [isize; MAX_MODELS],    // opaque model handles (pointer-sized)
     pub model_clip: [i32; MAX_MODELS],     // cmodel indices
 
     pub sound_precache: [i32; MAX_SOUNDS], // sfx indices

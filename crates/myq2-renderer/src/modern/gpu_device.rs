@@ -77,29 +77,40 @@ static VK_DEVICE_STATE: std::sync::Mutex<VulkanDeviceState> = std::sync::Mutex::
     commands: None,
 });
 
+/// Lock VK_DEVICE_STATE, recovering from poisoned mutex.
+/// If a previous panic occurred inside a with_device closure, the mutex becomes
+/// poisoned. Using unwrap_or_else(into_inner) recovers the state so the renderer
+/// can continue rather than silently freezing (panics caught by catch_unwind).
+fn lock_device_state() -> std::sync::MutexGuard<'static, VulkanDeviceState> {
+    VK_DEVICE_STATE.lock().unwrap_or_else(|e| {
+        eprintln!("WARNING: VK_DEVICE_STATE mutex was poisoned, recovering");
+        e.into_inner()
+    })
+}
+
 /// Initialize the Vulkan device. Called by myq2-sys during startup.
 pub fn init_device(ctx: VulkanContext) {
-    VK_DEVICE_STATE.lock().unwrap().ctx = Some(ctx);
+    lock_device_state().ctx = Some(ctx);
 }
 
 /// Initialize the rendering surface.
 pub fn init_surface(surface: VulkanSurface) {
-    VK_DEVICE_STATE.lock().unwrap().surface = Some(surface);
+    lock_device_state().surface = Some(surface);
 }
 
 /// Initialize the swapchain.
 pub fn init_swapchain(swapchain: Swapchain) {
-    VK_DEVICE_STATE.lock().unwrap().swapchain = Some(swapchain);
+    lock_device_state().swapchain = Some(swapchain);
 }
 
 /// Initialize the command manager.
 pub fn init_commands(commands: CommandManager) {
-    VK_DEVICE_STATE.lock().unwrap().commands = Some(commands);
+    lock_device_state().commands = Some(commands);
 }
 
 /// Shut down and release the Vulkan device.
 pub fn shutdown_device() {
-    let mut state = VK_DEVICE_STATE.lock().unwrap();
+    let mut state = lock_device_state();
     // Shut down in reverse order of initialization
     if let Some(commands) = state.commands.take() {
         drop(commands);
@@ -115,45 +126,45 @@ pub fn shutdown_device() {
 
 /// Access the Vulkan context immutably.
 pub fn with_device<R>(f: impl FnOnce(&VulkanContext) -> R) -> Option<R> {
-    VK_DEVICE_STATE.lock().unwrap().ctx.as_ref().map(f)
+    lock_device_state().ctx.as_ref().map(f)
 }
 
 /// Access the Vulkan context mutably.
 pub fn with_device_mut<R>(f: impl FnOnce(&mut VulkanContext) -> R) -> Option<R> {
-    VK_DEVICE_STATE.lock().unwrap().ctx.as_mut().map(f)
+    lock_device_state().ctx.as_mut().map(f)
 }
 
 /// Access the swapchain immutably.
 pub fn with_swapchain<R>(f: impl FnOnce(&Swapchain) -> R) -> Option<R> {
-    VK_DEVICE_STATE.lock().unwrap().swapchain.as_ref().map(f)
+    lock_device_state().swapchain.as_ref().map(f)
 }
 
 /// Access the swapchain mutably.
 pub fn with_swapchain_mut<R>(f: impl FnOnce(&mut Swapchain) -> R) -> Option<R> {
-    VK_DEVICE_STATE.lock().unwrap().swapchain.as_mut().map(f)
+    lock_device_state().swapchain.as_mut().map(f)
 }
 
 /// Access the command manager immutably.
 pub fn with_commands<R>(f: impl FnOnce(&CommandManager) -> R) -> Option<R> {
-    VK_DEVICE_STATE.lock().unwrap().commands.as_ref().map(f)
+    lock_device_state().commands.as_ref().map(f)
 }
 
 /// Access the command manager mutably.
 pub fn with_commands_mut<R>(f: impl FnOnce(&mut CommandManager) -> R) -> Option<R> {
-    VK_DEVICE_STATE.lock().unwrap().commands.as_mut().map(f)
+    lock_device_state().commands.as_mut().map(f)
 }
 
 /// Get the current swapchain extent (actual framebuffer dimensions).
 /// Returns None if swapchain is not initialized.
 pub fn get_swapchain_extent() -> Option<vk::Extent2D> {
-    VK_DEVICE_STATE.lock().unwrap().swapchain.as_ref().map(|sc| sc.extent)
+    lock_device_state().swapchain.as_ref().map(|sc| sc.extent)
 }
 
 /// Access both the context and command manager together (single lock).
 pub fn with_device_and_commands_mut<R>(
     f: impl FnOnce(&VulkanContext, &mut CommandManager) -> R
 ) -> Option<R> {
-    let mut state = VK_DEVICE_STATE.lock().unwrap();
+    let mut state = lock_device_state();
     let ctx_ptr = state.ctx.as_ref()? as *const VulkanContext;
     let commands = state.commands.as_mut()?;
     // SAFETY: ctx and commands are disjoint fields; ctx is only read.
@@ -164,7 +175,7 @@ pub fn with_device_and_commands_mut<R>(
 pub fn with_device_and_swapchain<R>(
     f: impl FnOnce(&VulkanContext, &mut Swapchain) -> R
 ) -> Option<R> {
-    let mut state = VK_DEVICE_STATE.lock().unwrap();
+    let mut state = lock_device_state();
     // Split borrow: need immutable ctx + mutable swapchain from the same struct.
     let ctx_ptr = state.ctx.as_ref()? as *const VulkanContext;
     let sc = state.swapchain.as_mut()?;
@@ -177,7 +188,7 @@ pub fn with_device_and_swapchain<R>(
 pub fn with_device_swapchain_commands<R>(
     f: impl FnOnce(&VulkanContext, &mut Swapchain, &CommandManager) -> R
 ) -> Option<R> {
-    let mut state = VK_DEVICE_STATE.lock().unwrap();
+    let mut state = lock_device_state();
     // Use raw pointers to allow split borrows
     let ctx_ptr = state.ctx.as_ref()? as *const VulkanContext;
     let commands_ptr = state.commands.as_ref()? as *const CommandManager;
@@ -190,7 +201,7 @@ pub fn with_device_swapchain_commands<R>(
 pub fn with_device_swapchain_surface<R>(
     f: impl FnOnce(&VulkanContext, &mut Swapchain, &VulkanSurface) -> R
 ) -> Option<R> {
-    let mut state = VK_DEVICE_STATE.lock().unwrap();
+    let mut state = lock_device_state();
     let ctx_ptr = state.ctx.as_ref()? as *const VulkanContext;
     let surface_ptr = state.surface.as_ref()? as *const VulkanSurface;
     let sc = state.swapchain.as_mut()?;
@@ -200,12 +211,12 @@ pub fn with_device_swapchain_surface<R>(
 
 /// Check if the GPU device is initialized.
 pub fn is_initialized() -> bool {
-    VK_DEVICE_STATE.lock().unwrap().ctx.is_some()
+    lock_device_state().ctx.is_some()
 }
 
 /// Check if the swapchain is initialized.
 pub fn is_swapchain_initialized() -> bool {
-    VK_DEVICE_STATE.lock().unwrap().swapchain.is_some()
+    lock_device_state().swapchain.is_some()
 }
 
 /// Supported shader format for the current GPU backend.
@@ -696,22 +707,22 @@ static FRAME_MANAGER: std::sync::Mutex<FrameManager> = std::sync::Mutex::new(Fra
 
 /// Initialize the global frame manager.
 pub fn init_frame_manager() {
-    FRAME_MANAGER.lock().unwrap().init();
+    FRAME_MANAGER.lock().unwrap_or_else(|e| e.into_inner()).init();
 }
 
 /// Shut down the global frame manager.
 pub fn shutdown_frame_manager() {
-    FRAME_MANAGER.lock().unwrap().shutdown();
+    FRAME_MANAGER.lock().unwrap_or_else(|e| e.into_inner()).shutdown();
 }
 
 /// Access the frame manager immutably.
 pub fn with_frame_manager<R>(f: impl FnOnce(&FrameManager) -> R) -> R {
-    f(&FRAME_MANAGER.lock().unwrap())
+    f(&FRAME_MANAGER.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Access the frame manager mutably.
 pub fn with_frame_manager_mut<R>(f: impl FnOnce(&mut FrameManager) -> R) -> R {
-    f(&mut FRAME_MANAGER.lock().unwrap())
+    f(&mut FRAME_MANAGER.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Begin a new frame (convenience wrapper).

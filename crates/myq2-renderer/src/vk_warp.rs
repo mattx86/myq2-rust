@@ -62,7 +62,7 @@ static WARP_STATE: std::sync::Mutex<WarpState> = std::sync::Mutex::new(WarpState
 
 /// Access the warp state under the mutex lock.
 pub fn with_warp_state<R>(f: impl FnOnce(&mut WarpState) -> R) -> R {
-    let mut state = WARP_STATE.lock().unwrap();
+    let mut state = WARP_STATE.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut state)
 }
 
@@ -81,7 +81,7 @@ pub unsafe fn load_detail_texture() {
     } else {
         std::ptr::null_mut()
     };
-    WARP_STATE.lock().unwrap().detailtexture = tex;
+    WARP_STATE.lock().unwrap_or_else(|e| e.into_inner()).detailtexture = tex;
 }
 
 /// Load the caustic texture (fx/caustic.png) for underwater surface overlay.
@@ -91,7 +91,7 @@ pub unsafe fn load_caustic_texture() {
     if tex.is_null() {
         vid_printf(PRINT_ALL, "Warning: could not load fx/caustic.png\n");
     }
-    WARP_STATE.lock().unwrap().caustic_texture = tex;
+    WARP_STATE.lock().unwrap_or_else(|e| e.into_inner()).caustic_texture = tex;
 }
 
 // ============================================================
@@ -202,11 +202,14 @@ pub fn bound_poly(numverts: usize, verts: &[f32], mins: &mut Vec3, maxs: &mut Ve
 ///
 /// # Safety
 /// `warpface` must point to a valid MSurface. Allocates polys via Hunk_Alloc equivalent.
-unsafe fn subdivide_polygon(warpface: *mut MSurface, numverts: usize, verts: &mut [f32]) {
+unsafe fn subdivide_polygon(warpface: *mut MSurface, numverts: usize, verts: &mut Vec<f32>) {
     if numverts > 60 {
         vid_printf(ERR_DROP, &format!("numverts = {}", numverts));
         return;
     }
+
+    // Ensure space for wrap-around vertex copy (numverts+1 vertices * 3 floats each)
+    verts.resize((numverts + 1) * 3, 0.0);
 
     let mut mins = [0.0f32; 3];
     let mut maxs = [0.0f32; 3];
@@ -269,13 +272,14 @@ unsafe fn subdivide_polygon(warpface: *mut MSurface, numverts: usize, verts: &mu
         }
 
         // flatten front/back into flat arrays and recurse
-        let mut front_flat = vec![0.0f32; f * 3];
+        // Allocate with extra space for wrap-around vertex
+        let mut front_flat = vec![0.0f32; (f + 1) * 3];
         for j in 0..f {
             front_flat[j * 3] = front[j][0];
             front_flat[j * 3 + 1] = front[j][1];
             front_flat[j * 3 + 2] = front[j][2];
         }
-        let mut back_flat = vec![0.0f32; b * 3];
+        let mut back_flat = vec![0.0f32; (b + 1) * 3];
         for j in 0..b {
             back_flat[j * 3] = back[j][0];
             back_flat[j * 3 + 1] = back[j][1];
@@ -353,7 +357,8 @@ pub unsafe fn vk_subdivide_surface(fa: *mut MSurface) {
         numverts += 1;
     }
 
-    let mut flat = vec![0.0f32; numverts * 3];
+    // Allocate with extra space for wrap-around vertex copy
+    let mut flat = vec![0.0f32; (numverts + 1) * 3];
     for i in 0..numverts {
         flat[i * 3] = verts[i][0];
         flat[i * 3 + 1] = verts[i][1];
@@ -547,7 +552,7 @@ unsafe fn clip_sky_polygon(ws: &mut WarpState, nump: usize, vecs: &[f32], stage:
 /// # Safety
 /// Add a sky surface — clips sky polygons and updates sky bounds.
 pub unsafe fn r_add_sky_surface(fa: &MSurface) {
-    let mut ws = WARP_STATE.lock().unwrap();
+    let mut ws = WARP_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let mut p = fa.polys;
     while !p.is_null() {
         let nv = (*p).numverts as usize;
@@ -565,7 +570,7 @@ pub unsafe fn r_add_sky_surface(fa: &MSurface) {
 
 /// Clear the sky box bounds.
 pub fn r_clear_sky_box() {
-    let mut ws = WARP_STATE.lock().unwrap();
+    let mut ws = WARP_STATE.lock().unwrap_or_else(|e| e.into_inner());
     for i in 0..6 {
         ws.skymins[0][i] = 9999.0;
         ws.skymins[1][i] = 9999.0;
@@ -582,7 +587,7 @@ pub fn r_clear_sky_box() {
 
 /// Set the sky parameters (texture name, rotation, axis).
 pub unsafe fn r_set_sky(name: &str, rotate: f32, axis: &Vec3) {
-    let mut ws = WARP_STATE.lock().unwrap();
+    let mut ws = WARP_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     // copy name
     let name_bytes = name.as_bytes();
@@ -593,6 +598,7 @@ pub unsafe fn r_set_sky(name: &str, rotate: f32, axis: &Vec3) {
     ws.skyrotate = rotate;
     ws.skyaxis = *axis;
 
+    eprintln!("[SKY] r_set_sky: name='{}' rotate={} axis={:?}", name, rotate, axis);
     for i in 0..6 {
         // chop down rotating skies for less memory
         if crate::vk_rmain::rcvars().vk_skymip.value != 0.0 || ws.skyrotate != 0.0 {
@@ -602,7 +608,13 @@ pub unsafe fn r_set_sky(name: &str, rotate: f32, axis: &Vec3) {
         let pathname = format!("env/{}{}.pcx", name, SUF[i]);
         ws.sky_images[i] = vk_find_image(&pathname, ImageType::Sky);
         if ws.sky_images[i].is_null() {
+            eprintln!("[SKY]   face {} '{}' -> FAILED, using r_notexture", i, pathname);
             ws.sky_images[i] = rfs().r_notexture;
+        } else {
+            let texnum = (*ws.sky_images[i]).texnum;
+            let w = (*ws.sky_images[i]).width;
+            let h = (*ws.sky_images[i]).height;
+            eprintln!("[SKY]   face {} '{}' -> texnum={} {}x{}", i, pathname, texnum, w, h);
         }
 
         if crate::vk_rmain::rcvars().vk_skymip.value != 0.0 || ws.skyrotate != 0.0 {

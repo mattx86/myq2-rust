@@ -78,9 +78,9 @@ static RENDERER_GLOBALS: std::sync::Mutex<RendererGlobals> = std::sync::Mutex::n
     r_newrefdef: None,
 });
 
-/// Lock the renderer globals. Panics if poisoned.
+/// Lock the renderer globals. Recovers from poisoned mutex.
 pub fn rg() -> std::sync::MutexGuard<'static, RendererGlobals> {
-    RENDERER_GLOBALS.lock().unwrap()
+    RENDERER_GLOBALS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Access the modern renderer. Returns `None` if not yet initialized.
@@ -223,7 +223,7 @@ pub struct EntityLocal {
     pub alpha: f32,
     pub skinnum: i32,
     pub lightstyle: i32,
-    pub skin: i32,
+    pub skin: isize,
 }
 
 impl Default for EntityLocal {
@@ -413,7 +413,7 @@ fn glimp_set_mode(
 static VK_LOG_FP: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
 
 fn glimp_enable_logging(enable: f32) {
-    let mut log_fp = VK_LOG_FP.lock().unwrap();
+    let mut log_fp = VK_LOG_FP.lock().unwrap_or_else(|e| e.into_inner());
     if enable != 0.0 {
         if log_fp.is_none() {
             let gamedir = myq2_common::files::fs_gamedir();
@@ -440,7 +440,7 @@ fn glimp_enable_logging(enable: f32) {
 }
 
 fn glimp_log_new_frame() {
-    let mut log_fp = VK_LOG_FP.lock().unwrap();
+    let mut log_fp = VK_LOG_FP.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut f) = *log_fp {
         use std::io::Write;
         let _ = writeln!(f, "*** R_BeginFrame ***");
@@ -964,6 +964,16 @@ pub fn r_render_view(fd: &RefdefLocal) {
 
         // World geometry
         if rcvars().r_drawworld.value != 0.0 {
+            // BSP traversal: detect sky surfaces and chain alpha/texture surfaces.
+            // r_clear_sky_box() resets accumulated sky bounds from the previous frame.
+            // r_recursive_world_node() walks the BSP tree, calling r_add_sky_surface()
+            // for each sky surface encountered and chaining other surfaces.
+            crate::vk_warp::r_clear_sky_box();
+            let root = crate::vk_local::r_worldmodel_nodes();
+            if !root.is_null() {
+                let mut alpha_surfaces: *mut crate::vk_model_types::MSurface = std::ptr::null_mut();
+                crate::vk_rsurf::r_recursive_world_node(root, &mut alpha_surfaces);
+            }
             modern.draw_world();
         }
 
