@@ -8,6 +8,7 @@
 
 use std::sync::Mutex;
 
+use myq2_common::common::com_dprintf;
 use myq2_common::q_shared::{
     Vec3, Trace, Multicast,
     CS_SOUNDS, CS_IMAGES, MAX_SOUNDS, MAX_IMAGES,
@@ -191,7 +192,9 @@ impl GameImport for ServerGameImport {
 
     fn modelindex(&self, name: &str) -> i32 {
         with_ctx(|ctx| {
-            sv_model_index(ctx, name)
+            let result = sv_model_index(ctx, name);
+            com_dprintf(&format!("gi_modelindex: name={}, result={}\n", name, result));
+            result
         })
     }
 

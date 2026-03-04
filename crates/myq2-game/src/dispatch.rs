@@ -1794,6 +1794,7 @@ fn w_func_door_secret_done(self_idx: usize, edicts: &mut [Edict], level: &mut Le
 }
 
 fn w_func_train_next(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+    eprintln!("w_func_train_next called for entity {}", self_idx);
     let mut ctx = make_func_ctx(edicts, level);
     ctx.train_next(self_idx);
     sync_func_ctx(edicts, level, &ctx);

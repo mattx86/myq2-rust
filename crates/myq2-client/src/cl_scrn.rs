@@ -1267,6 +1267,7 @@ pub fn scr_update_screen(scr: &mut ScrState, cls: &mut ClientStatic, cl: &mut Cl
 
             // Apply HUD alpha check: skip all HUD drawing if fully transparent
             let hud_alpha = cl_hud::hud_get_alpha();
+            eprintln!("scr_draw_stats: hud_alpha={}", hud_alpha);
             if hud_alpha > 0.0 {
                 // Apply HUD scale factor for layout positioning
                 let _hud_scale = cl_hud::hud_get_scale();

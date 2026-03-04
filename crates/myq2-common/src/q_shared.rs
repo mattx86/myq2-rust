@@ -1270,13 +1270,13 @@ pub fn angle_vectors(
         fwd[2] = -sp;
     }
     if let Some(r) = right {
-        r[0] = -sr * sp * cy + -cr * -sy;
-        r[1] = -sr * sp * sy + -cr * cy;
+        r[0] = -sr * sp * cy + -cr * sy;
+        r[1] = -sr * sp * sy + cr * cy;
         r[2] = -sr * cp;
     }
     if let Some(u) = up {
-        u[0] = cr * sp * cy + -sr * -sy;
-        u[1] = cr * sp * sy + -sr * cy;
+        u[0] = cr * sp * cy + -sr * sy;
+        u[1] = cr * sp * sy + sr * cy;
         u[2] = cr * cp;
     }
 }

@@ -739,6 +739,8 @@ pub fn cl_add_entities(cl: &mut super::client::ClientState) {
     let cl_timedemo = cl_timedemo_value() != 0.0;
     let cl_predict = myq2_common::cvar::cvar_variable_value("cl_predict") != 0.0;
     let cl_gun = myq2_common::cvar::cvar_variable_value("cl_gun") != 0.0;
+    // Debug: print cl_gun value
+    eprintln!("cl_add_entities: cl_gun={}", cl_gun);
 
     let view_state = super::cl_main::VIEW_STATE.lock().unwrap();
     let gun_model = view_state.gun_model;
@@ -746,6 +748,8 @@ pub fn cl_add_entities(cl: &mut super::client::ClientState) {
     drop(view_state);
 
     let hand = myq2_common::cvar::cvar_variable_value("hand") as i32;
+    // Debug: print hand value
+    eprintln!("cl_add_entities: hand={}", hand);
 
     let mut frame_cb = FrameCallbacks {
         fx: &mut fx_state,

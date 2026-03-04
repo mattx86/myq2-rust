@@ -1767,15 +1767,6 @@ pub fn cl_add_view_weapon(
     } else {
         gun.model = cl.model_draw[ps.gunindex as usize];
     }
-    // Diagnostic: print viewweapon state once to identify why gun is invisible
-    {
-        static VIEW_WEAPON_DIAG: std::sync::Once = std::sync::Once::new();
-        VIEW_WEAPON_DIAG.call_once(|| {
-            eprintln!("CL_AddViewWeapon: gunindex={}, gun_model_override={:#x}, gun.model={:#x}, model_draw[gunindex]={:#x}",
-                ps.gunindex, gun_model_override, gun.model,
-                if (ps.gunindex as usize) < cl.model_draw.len() { cl.model_draw[ps.gunindex as usize] } else { -1isize });
-        });
-    }
 
     if gun.model == 0 {
         return;
@@ -1787,45 +1778,41 @@ pub fn cl_add_view_weapon(
     for i in 0..3 {
         raw_origin[i] = cl.refdef.vieworg[i] + ops.gunoffset[i]
             + cl.lerpfrac * (ps.gunoffset[i] - ops.gunoffset[i]);
-        raw_angles[i] = cl.refdef.viewangles[i]
-            + lerp_angle(ops.gunangles[i], ps.gunangles[i], cl.lerpfrac);
+        // Use view angles directly for gun angles (ignore gunangles from player state)
+        raw_angles[i] = cl.refdef.viewangles[i];
     }
-
     // RIOT - Centered gun (CENTERED_GUN enabled)
-    if hand_value == 2 {
-        let mut anglemove = [0.0f32; 3];
-        let mut anglemove2 = [0.0f32; 3];
-        angle_vectors(&raw_angles, None, Some(&mut anglemove), Some(&mut anglemove2));
-        let am_scaled = vector_scale(&anglemove, -8.0);
-        let am2_scaled = vector_scale(&anglemove2, -5.0);
-        raw_origin = vector_add(&raw_origin, &am_scaled);
-        raw_origin = vector_add(&raw_origin, &am2_scaled);
-    }
+    // The correct centered gun calculation should offset the gun to the center
+    // by adding scaled right and up vectors
+    // Note: This is applied later after smoothing and sway
 
     // Apply weapon view smoothing for smoother gun movement
-    let (smoothed_origin, smoothed_angles) = if cl.smoothing.weapon_smoothing.enabled {
-        cl.smoothing.weapon_smoothing.update(&raw_origin, &raw_angles, frametime)
-    } else {
-        (raw_origin, raw_angles)
-    };
+    // Disabled for testing - see if gun appears without smoothing
+    let (smoothed_origin, smoothed_angles) = (raw_origin, raw_angles);
+    // let (smoothed_origin, smoothed_angles) = if cl.smoothing.weapon_smoothing.enabled {
+    //     cl.smoothing.weapon_smoothing.update(&raw_origin, &raw_angles, frametime)
+    // } else {
+    //     (raw_origin, raw_angles)
+    // };
 
     // Apply weapon sway (inertial gun movement based on player movement)
+    // Disabled for testing - see if gun appears without sway
     let current_time = cl.time;
-    if cl.packet_loss_frames > 0 {
-        // During packet loss, continue sway momentum (gradually settle)
-        cl.smoothing.weapon_sway.continue_during_packet_loss(current_time);
-    } else {
-        // Normal update - sway based on player velocity and view angles
-        let velocity = [
-            ps.pmove.velocity[0] as f32 * 0.125,
-            ps.pmove.velocity[1] as f32 * 0.125,
-            ps.pmove.velocity[2] as f32 * 0.125,
-        ];
-        cl.smoothing.weapon_sway.update(&velocity, &raw_angles, current_time);
-    }
+    let sway_offset = [0.0f32; 3];
+    // if cl.packet_loss_frames > 0 {
+    //     // During packet loss, continue sway momentum (gradually settle)
+    //     cl.smoothing.weapon_sway.continue_during_packet_loss(current_time);
+    // } else {
+    //     // Normal update - sway based on player velocity and view angles
+    //     let velocity = [
+    //         ps.pmove.velocity[0] as f32 * 0.125,
+    //         ps.pmove.velocity[1] as f32 * 0.125,
+    //         ps.pmove.velocity[2] as f32 * 0.125,
+    //     ];
+    //     cl.smoothing.weapon_sway.update(&velocity, &raw_angles, current_time);
+    // }
 
     // Get sway offset and apply to gun position
-    let sway_offset = cl.smoothing.weapon_sway.get_offset();
     gun.origin = [
         smoothed_origin[0] + sway_offset[0],
         smoothed_origin[1] + sway_offset[1],
@@ -1872,6 +1859,22 @@ pub fn cl_add_view_weapon(
             }
         }
     }
+
+    // RIOT - Centered gun (CENTERED_GUN enabled)
+    // Apply centered gun calculation to final position
+    // Commented out for testing - see if gun appears without centered calculation
+    // if hand_value == 2 {
+    //     let mut right_vec = [0.0f32; 3];
+    //     let mut up_vec = [0.0f32; 3];
+    //     angle_vectors(&gun.angles, None, Some(&mut right_vec), Some(&mut up_vec));
+    //
+    //     // Scale the right and up vectors to center the gun
+    //     // angle_vectors calculates the right vector directly (not left)
+    //     let scaled_right = vector_scale(&right_vec, -8.0);
+    //     let scaled_up = vector_scale(&up_vec, -5.0);
+    //     gun.origin = vector_add(&gun.origin, &scaled_right);
+    //     gun.origin = vector_add(&gun.origin, &scaled_up);
+    // }
 
     gun.flags = RF_MINLIGHT | RF_DEPTHHACK | RF_WEAPONMODEL;
     gun.oldorigin = vector_copy(&gun.origin); // don't lerp at all

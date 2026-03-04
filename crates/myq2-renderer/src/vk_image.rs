@@ -842,7 +842,7 @@ pub unsafe fn vk_load_pic(
     (*image).texnum = TEXNUM_IMAGES + i;
     vk_bind((*image).texnum);
 
-    let mipmap = (*image).r#type != ImageType::Pic && (*image).r#type != ImageType::Sky;
+    let mipmap = (*image).r#type != ImageType::Pic;
 
     if bits == 8 {
         (*image).has_alpha = vk_upload8(&mut is, pic, width, height, mipmap, image);
@@ -956,15 +956,37 @@ pub unsafe fn vk_find_image_impl(name: &str, img_type: ImageType) -> *mut Image 
     // load the pic from disk
     let ext = &name[len - 4..];
 
-    if ext.eq_ignore_ascii_case(".pcx") {
-        if let Some(raw) = myq2_common::files::fs_load_file(name) {
-            if let Some((pixels, w, h, _palette)) = load_pcx(&raw) {
-                return vk_load_pic(name, pixels.as_ptr(), w as i32, h as i32, img_type, 8);
+    // For legacy formats (.pcx, .wal), try hi-res alternatives first (TGA, PNG, JPG).
+    // The texture is registered under the original name so subsequent lookups match.
+    if ext.eq_ignore_ascii_case(".pcx") || ext.eq_ignore_ascii_case(".wal") {
+        let base = &name[..len - 4];
+        let hires_exts: &[(&str, i32)] = &[(".tga", 32), (".png", 32), (".jpg", 32)];
+        for &(hi_ext, bits) in hires_exts {
+            let hi_path = format!("{}{}", base, hi_ext);
+            if let Some(raw) = myq2_common::files::fs_load_file(&hi_path) {
+                let result = match hi_ext {
+                    ".tga" => load_tga(&raw),
+                    ".png" => load_png(&raw),
+                    ".jpg" => load_jpg(&raw),
+                    _ => None,
+                };
+                if let Some((pixels, w, h)) = result {
+                    // Register under original name so texture lookups work
+                    return vk_load_pic(name, pixels.as_ptr(), w as i32, h as i32, img_type, bits);
+                }
             }
         }
+        // No hi-res found — load original format
+        if ext.eq_ignore_ascii_case(".pcx") {
+            if let Some(raw) = myq2_common::files::fs_load_file(name) {
+                if let Some((pixels, w, h, _palette)) = load_pcx(&raw) {
+                    return vk_load_pic(name, pixels.as_ptr(), w as i32, h as i32, img_type, 8);
+                }
+            }
+        } else {
+            return vk_load_wal(name);
+        }
         return std::ptr::null_mut();
-    } else if ext.eq_ignore_ascii_case(".wal") {
-        return vk_load_wal(name);
     } else if ext.eq_ignore_ascii_case(".tga") {
         if let Some(raw) = myq2_common::files::fs_load_file(name) {
             if let Some((pixels, w, h)) = load_tga(&raw) {
@@ -1018,7 +1040,7 @@ pub fn clear_pic_cache() {
 
 /// Find a 2D picture by name.
 /// If name doesn't start with '/' or '\', prepends "pics/" and tries multiple extensions.
-/// Tries extensions in order: .pcx, .tga, .png, .jpg
+/// Tries extensions in order: .tga, .png, .jpg, .pcx (hi-res first)
 /// Results are cached to avoid repeated filesystem lookups for failed extensions.
 pub unsafe fn draw_find_pic(name: &str) -> *mut Image {
     let cache = PIC_RESOLVE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
@@ -1035,8 +1057,8 @@ pub unsafe fn draw_find_pic(name: &str) -> *mut Image {
             }
         }
 
-        // Not cached — try multiple extensions in order: pcx, tga, png, jpg
-        let extensions = ["pcx", "tga", "png", "jpg"];
+        // Not cached — try hi-res formats first, then legacy
+        let extensions = ["tga", "png", "jpg", "pcx"];
         for ext in &extensions {
             let fullname = format!("pics/{}.{}", name, ext);
             let result = vk_find_image(&fullname, ImageType::Pic);

@@ -994,12 +994,15 @@ pub fn cl_parse_config_string(cl: &mut ClientState, net_message: &mut SizeBuf, f
         // CD audio removed
     } else if (CS_MODELS..CS_MODELS + MAX_MODELS).contains(&i) {
         if cl.refresh_prepped {
+            com_dprintf(&format!("cl_parse_config_string: registering model i={}, name={}\n", i, &cl.configstrings[i]));
             cl.model_draw[i - CS_MODELS] = r_register_model(&cl.configstrings[i]);
             if cl.configstrings[i].starts_with('*') {
                 cl.model_clip[i - CS_MODELS] = cm_inline_model(&cl.configstrings[i]);
             } else {
                 cl.model_clip[i - CS_MODELS] = 0;
             }
+        } else {
+            com_dprintf(&format!("cl_parse_config_string: skipping model i={}, name={} (refresh_prepped=false)\n", i, &cl.configstrings[i]));
         }
     } else if (CS_SOUNDS..CS_SOUNDS + MAX_MODELS).contains(&i) {
         if cl.refresh_prepped {

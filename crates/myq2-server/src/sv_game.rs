@@ -1649,6 +1649,7 @@ fn game_cb_spawn_entities(mapname: &str, entstring: &str, spawnpoint: &str) {
 }
 
 fn game_cb_run_frame() {
+    eprintln!("game_cb_run_frame called");
     // Sync to GLOBAL_GAME_CTX so dispatch wrappers have current game state
     sync_to_global_game_ctx();
     with_game_context(|ctx| {
@@ -1733,6 +1734,7 @@ fn game_cb_client_connect(ent: &mut Edict, userinfo: &str) -> bool {
 
 fn game_cb_client_begin(ent: &mut Edict) {
     let ent_idx = ent.s.number as usize;
+    eprintln!("game_cb_client_begin called for entity {}", ent_idx);
     with_game_context(|ctx| {
         myq2_game::p_client::client_begin(ctx, ent_idx);
     });
@@ -1766,6 +1768,7 @@ fn game_cb_client_command(ent: &mut Edict) {
 
 fn game_cb_client_think(ent: &mut Edict, cmd: &UserCmd) {
     let ent_idx = ent.s.number as usize;
+    eprintln!("game_cb_client_think called for entity {}", ent_idx);
     with_game_context(|ctx| {
         myq2_game::p_client::client_think(ctx, ent_idx, cmd);
     });

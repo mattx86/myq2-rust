@@ -1474,6 +1474,24 @@ pub fn sp_worldspawn(ctx: &mut GameContext, ent_idx: usize) {
         crate::g_items::precache_item(ctx, blaster_idx);
     }
 
+    // Precache all weapon view models so they're available when clients connect
+    let weapon_names = [
+        "Shotgun",
+        "Super Shotgun",
+        "Machinegun",
+        "Chaingun",
+        "Grenade Launcher",
+        "Rocket Launcher",
+        "Hyperblaster",
+        "Railgun",
+        "BFG10K",
+    ];
+    for weapon_name in &weapon_names {
+        if let Some(weapon_idx) = crate::g_items::find_item(weapon_name) {
+            crate::g_items::precache_item(ctx, weapon_idx);
+        }
+    }
+
     // All the precached sounds
     let sounds = [
         "player/lava1.wav",

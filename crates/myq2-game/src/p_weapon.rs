@@ -369,6 +369,7 @@ pub fn no_ammo_weapon_change(ctx: &mut GameContext, ent_idx: usize) {
 
 /// Called by ClientBeginServerFrame and ClientThink.
 pub fn think_weapon(ctx: &mut GameContext, ent_idx: usize) {
+    eprintln!("think_weapon called for entity {}", ent_idx);
     // if just died, put the weapon away
     if ctx.edicts[ent_idx].health < 1 {
         let client_idx = ctx.edicts[ent_idx].client.expect("Think_Weapon: no client");
@@ -1611,6 +1612,7 @@ fn drop_weapon_item(ctx: &mut GameContext, ent_idx: usize, item_idx: usize) {
 
 /// Dispatch weapon think function by id.
 fn dispatch_weapon_think(ctx: &mut GameContext, ent_idx: usize, think_id: usize) {
+    eprintln!("dispatch_weapon_think called for entity {}, think_id={}", ent_idx, think_id);
     match think_id {
         WEAPTHINK_BLASTER => weapon_blaster(ctx, ent_idx),
         WEAPTHINK_SHOTGUN => weapon_shotgun(ctx, ent_idx),

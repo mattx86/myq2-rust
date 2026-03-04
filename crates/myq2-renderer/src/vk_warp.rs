@@ -71,14 +71,21 @@ pub fn with_warp_state<R>(f: impl FnOnce(&mut WarpState) -> R) -> R {
 /// Call on init and when the cvar is modified.
 pub unsafe fn load_detail_texture() {
     let val = crate::vk_rmain::rcvars().r_detailtexture.value as i32;
+    eprintln!("[DETAIL] load_detail_texture: r_detailtexture={}", val);
     let tex = if val >= 1 && val <= 8 {
         let path = format!("fx/detail{}.png", val);
+        eprintln!("[DETAIL] Trying to load '{}'", path);
         let t = vk_find_image(&path, ImageType::Wall);
         if t.is_null() {
+            eprintln!("[DETAIL] FAILED to load '{}'", path);
             vid_printf(PRINT_ALL, &format!("Warning: could not load {}\n", path));
+        } else {
+            eprintln!("[DETAIL] Loaded '{}' -> texnum={} {}x{}",
+                path, (*t).texnum, (*t).width, (*t).height);
         }
         t
     } else {
+        eprintln!("[DETAIL] r_detailtexture value {} out of range 1-8, disabled", val);
         std::ptr::null_mut()
     };
     WARP_STATE.lock().unwrap_or_else(|e| e.into_inner()).detailtexture = tex;
@@ -605,16 +612,28 @@ pub unsafe fn r_set_sky(name: &str, rotate: f32, axis: &Vec3) {
             vk_picmip_inc();
         }
 
-        let pathname = format!("env/{}{}.pcx", name, SUF[i]);
-        ws.sky_images[i] = vk_find_image(&pathname, ImageType::Sky);
+        // Try hi-res formats (TGA, PNG) first, then fall back to PCX
+        let suf = SUF[i];
+        let tga_path = format!("env/{}{}.tga", name, suf);
+        let png_path = format!("env/{}{}.png", name, suf);
+        let pcx_path = format!("env/{}{}.pcx", name, suf);
+
+        ws.sky_images[i] = vk_find_image(&tga_path, ImageType::Sky);
         if ws.sky_images[i].is_null() {
-            eprintln!("[SKY]   face {} '{}' -> FAILED, using r_notexture", i, pathname);
+            ws.sky_images[i] = vk_find_image(&png_path, ImageType::Sky);
+        }
+        if ws.sky_images[i].is_null() {
+            ws.sky_images[i] = vk_find_image(&pcx_path, ImageType::Sky);
+        }
+
+        if ws.sky_images[i].is_null() {
+            eprintln!("[SKY]   face {} 'env/{}{}' -> FAILED, using r_notexture", i, name, suf);
             ws.sky_images[i] = rfs().r_notexture;
         } else {
             let texnum = (*ws.sky_images[i]).texnum;
             let w = (*ws.sky_images[i]).width;
             let h = (*ws.sky_images[i]).height;
-            eprintln!("[SKY]   face {} '{}' -> texnum={} {}x{}", i, pathname, texnum, w, h);
+            eprintln!("[SKY]   face {} 'env/{}{}' -> texnum={} {}x{}", i, name, suf, texnum, w, h);
         }
 
         if crate::vk_rmain::rcvars().vk_skymip.value != 0.0 || ws.skyrotate != 0.0 {

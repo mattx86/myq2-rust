@@ -558,6 +558,18 @@ pub fn init_client_persistant(ctx: &mut GameContext, client_idx: usize) {
         ctx.clients[client_idx].pers.selected_item = item_idx as i32;
         ctx.clients[client_idx].pers.inventory[item_idx] = 1;
         ctx.clients[client_idx].pers.weapon = Some(item_idx);
+        crate::game_import::gi_dprintf(&format!("init_client_persistant: client_idx={}, blaster_idx={}, weapon set to Some({})\n", client_idx, item_idx, item_idx));
+    } else {
+        crate::game_import::gi_dprintf(&format!("init_client_persistant: client_idx={}, blaster_idx=None\n", client_idx));
+        // Fallback: try to find blaster by item index
+        // In Quake II, blaster is typically item index 7
+        let blaster_idx_fallback = 7;
+        if blaster_idx_fallback < ctx.items.len() {
+            ctx.clients[client_idx].pers.selected_item = blaster_idx_fallback as i32;
+            ctx.clients[client_idx].pers.inventory[blaster_idx_fallback] = 1;
+            ctx.clients[client_idx].pers.weapon = Some(blaster_idx_fallback);
+            crate::game_import::gi_dprintf(&format!("init_client_persistant: client_idx={}, using fallback blaster_idx={}, weapon set to Some({})\n", client_idx, blaster_idx_fallback, blaster_idx_fallback));
+        }
     }
 
     ctx.clients[client_idx].pers.health = 100;
@@ -997,11 +1009,13 @@ pub fn put_client_in_server(ctx: &mut GameContext, ent_idx: usize) {
     // deathmatch wipes most client data every spawn
     let resp: ClientRespawn;
     if ctx.deathmatch != 0.0 {
+        crate::game_import::gi_dprintf(&format!("put_client_in_server: deathmatch mode (deathmatch={})\n", ctx.deathmatch));
         resp = ctx.clients[client_idx].resp.clone();
         let userinfo = ctx.clients[client_idx].pers.userinfo.clone();
         init_client_persistant(ctx, client_idx);
         client_userinfo_changed(ctx, ent_idx, &userinfo);
     } else if ctx.coop != 0.0 {
+        crate::game_import::gi_dprintf(&format!("put_client_in_server: coop mode (coop={})\n", ctx.coop));
         let mut r = ctx.clients[client_idx].resp.clone();
         let userinfo = ctx.clients[client_idx].pers.userinfo.clone();
         r.coop_respawn.game_helpchanged = ctx.clients[client_idx].pers.game_helpchanged;
@@ -1013,15 +1027,21 @@ pub fn put_client_in_server(ctx: &mut GameContext, ent_idx: usize) {
         }
         resp = r;
     } else {
+        crate::game_import::gi_dprintf(&format!("put_client_in_server: single-player mode (deathmatch={}, coop={})\n", ctx.deathmatch, ctx.coop));
         resp = ClientRespawn::default();
     }
 
     // clear everything but the persistant data
     let saved = ctx.clients[client_idx].pers.clone();
+    crate::game_import::gi_dprintf(&format!("put_client_in_server: before clear, saved.health={}, saved.weapon={:?}\n", saved.health, saved.weapon));
     ctx.clients[client_idx] = GClient::default();
     ctx.clients[client_idx].pers = saved;
+    crate::game_import::gi_dprintf(&format!("put_client_in_server: after restore, pers.health={}, pers.weapon={:?}\n", ctx.clients[client_idx].pers.health, ctx.clients[client_idx].pers.weapon));
     if ctx.clients[client_idx].pers.health <= 0 {
+        crate::game_import::gi_dprintf("put_client_in_server: health <= 0, calling init_client_persistant\n");
         init_client_persistant(ctx, client_idx);
+    } else {
+        crate::game_import::gi_dprintf(&format!("put_client_in_server: health > 0 ({}), skipping init_client_persistant\n", ctx.clients[client_idx].pers.health));
     }
     ctx.clients[client_idx].resp = resp;
 
@@ -1081,7 +1101,12 @@ pub fn put_client_in_server(ctx: &mut GameContext, ent_idx: usize) {
     }
 
     if let Some(weapon_idx) = ctx.clients[client_idx].pers.weapon {
-        ctx.clients[client_idx].ps.gunindex = gi_modelindex(&ctx.items[weapon_idx].view_model);
+        let view_model = &ctx.items[weapon_idx].view_model;
+        let gunindex = gi_modelindex(view_model);
+        ctx.clients[client_idx].ps.gunindex = gunindex;
+        crate::game_import::gi_dprintf(&format!("put_client_in_server: weapon_idx={}, view_model={}, gunindex={}\n", weapon_idx, view_model, gunindex));
+    } else {
+        crate::game_import::gi_dprintf("put_client_in_server: no weapon set\n");
     }
 
     // clear entity state values
@@ -1595,6 +1620,7 @@ pub fn client_think(ctx: &mut GameContext, ent_idx: usize, ucmd: &UserCmd) {
             }
         } else if !ctx.clients[ci].weapon_thunk {
             ctx.clients[ci].weapon_thunk = true;
+            eprintln!("player_think: calling think_weapon for entity {}", ent_idx);
             crate::p_weapon::think_weapon(ctx,ent_idx);
         }
     }
@@ -1632,6 +1658,7 @@ pub fn client_think(ctx: &mut GameContext, ent_idx: usize, ucmd: &UserCmd) {
 
 /// Converted from: ClientBeginServerFrame
 pub fn client_begin_server_frame(ctx: &mut GameContext, ent_idx: usize) {
+    eprintln!("client_begin_server_frame called for entity {}", ent_idx);
     if ctx.level.intermissiontime != 0.0 {
         return;
     }

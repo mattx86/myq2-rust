@@ -467,6 +467,7 @@ pub fn blaster_touch(self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>,
 pub fn fire_blaster(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
                     start: &Vec3, dir: &Vec3, damage: i32,
                     speed: i32, effect: i32, hyper: bool) {
+    eprintln!("fire_blaster called for entity {} with damage={}, speed={}", self_idx, damage, speed);
     let mut normalized_dir = vector_copy(dir);
     vector_normalize(&mut normalized_dir);
 

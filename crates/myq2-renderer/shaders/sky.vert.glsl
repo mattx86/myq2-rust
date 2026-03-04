@@ -12,6 +12,6 @@ layout(location = 0) out vec2 v_TexCoord;
 
 void main() {
     vec4 pos = pc.u_ModelViewProjection * vec4(a_Position, 1.0);
-    gl_Position = pos.xyww;  // Force depth to 1.0 (far plane)
+    gl_Position = pos.xyww;  // Force depth = 1.0 (w/w = 1.0), like glDepthRange(1,1)
     v_TexCoord = a_TexCoord;
 }

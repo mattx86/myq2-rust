@@ -1367,14 +1367,6 @@ pub fn r_init(hinstance: usize, hwnd: usize) -> i32 {
             myq2_common::common::com_printf("R_Init: mod_init completed\n");
         }
 
-        // Load overlay textures (detail + caustic) for world shader
-        myq2_common::common::com_printf("R_Init: Loading overlay textures\n");
-        unsafe {
-            crate::vk_warp::load_detail_texture();
-            crate::vk_warp::load_caustic_texture();
-        }
-        myq2_common::common::com_printf("R_Init: Overlay textures loaded\n");
-
         // Create and initialize ModernRenderPath
         myq2_common::common::com_printf("R_Init: Creating ModernRenderPath\n");
         let mut modern = ModernRenderPath::new();
@@ -1393,6 +1385,13 @@ pub fn r_init(hinstance: usize, hwnd: usize) -> i32 {
         myq2_common::common::com_printf("R_Init: ModernRenderPath initialization complete\n");
 
         // Load textures (TextureStore intercepts vk_upload32 calls)
+        // NOTE: All texture loading must happen AFTER modern.init() which creates the TextureStore.
+        myq2_common::common::com_printf("R_Init: Loading overlay textures\n");
+        unsafe {
+            crate::vk_warp::load_detail_texture();
+            crate::vk_warp::load_caustic_texture();
+        }
+        myq2_common::common::com_printf("R_Init: Overlay textures loaded\n");
         myq2_common::common::com_printf("R_Init: Loading particle textures\n");
         crate::vk_rmisc::r_init_particle_texture();
         myq2_common::common::com_printf("R_Init: Calling draw_init_local\n");

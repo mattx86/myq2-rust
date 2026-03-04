@@ -773,6 +773,10 @@ unsafe fn mod_load_faces(state: &mut ModelState, l: *const Lump) {
         }
 
         // set the drawing flags
+        if (*(*outp).texinfo).flags & SURF_SKY != 0 {
+            (*outp).flags |= SURF_DRAWSKY;
+        }
+
         if (*(*outp).texinfo).flags & SURF_WARP != 0 {
             (*outp).flags |= SURF_DRAWTURB;
             for i in 0..2 {

@@ -966,8 +966,8 @@ impl RenderPath for ModernRenderPath {
                 if let Err(e) = pm.create_pipeline(ShaderType::Alias, PipelineVariant::AlphaBlend) {
                     eprintln!("Failed to create Alias/AlphaBlend pipeline: {}", e);
                 }
-                if let Err(e) = pm.create_pipeline(ShaderType::Sky, PipelineVariant::AlphaBlend) {
-                    eprintln!("Failed to create Sky/AlphaBlend pipeline: {}", e);
+                if let Err(e) = pm.create_pipeline(ShaderType::Sky, PipelineVariant::Opaque) {
+                    eprintln!("Failed to create Sky/Opaque pipeline: {}", e);
                 }
                 if let Err(e) = pm.create_pipeline(ShaderType::DynamicLight, PipelineVariant::Additive) {
                     eprintln!("Failed to create DynamicLight/Additive pipeline: {}", e);
@@ -1131,8 +1131,11 @@ impl RenderPath for ModernRenderPath {
         // ========== Setup matrices and uniforms ==========
 
         // Compute view and projection matrices from refdef
+        // Far plane computed from SKYBOX_SIZE to match original MyQ2 (gl_rmain.c):
+        //   boxsize = SKYBOX_SIZE - 252*ceil(SKYBOX_SIZE/2300) → 4096
+        //   farz = next_power_of_2(boxsize) * 2 → 8192
         let view = Self::compute_view_matrix(&params.vieworg, &params.viewangles);
-        let proj = Self::compute_projection_matrix(params.fov_x, params.fov_y, 4.0, 4096.0);
+        let proj = Self::compute_projection_matrix(params.fov_x, params.fov_y, 4.0, 8192.0);
         let view_proj = Self::mat4_multiply(&proj, &view);
 
         // Extract view vectors from the view matrix (row-major interpretation of the rotation)
@@ -1657,14 +1660,22 @@ impl RenderPath for ModernRenderPath {
             self.sky_face_draws.push((texnum, first_idx, 6));
         }
 
-        // One-time diagnostic for sky rendering
-        static SKY_DIAG_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !self.sky_face_draws.is_empty() && !SKY_DIAG_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("[SKY] draw_sky: {} faces, {} verts, {} indices",
-                self.sky_face_draws.len(), self.sky_vertices.len(), self.sky_indices.len());
-            for (tex_id, first_idx, count) in &self.sky_face_draws {
-                let has_ds = super::texture::ensure_descriptor_set(*tex_id as i32).is_some();
-                eprintln!("[SKY]   texnum={} first={} count={} descriptor_set={}", tex_id, first_idx, count, has_ds);
+        // Diagnostic: only count frames that have sky faces (skip empty early frames)
+        static SKY_HAS_DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if !self.sky_face_draws.is_empty() {
+            let n = SKY_HAS_DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 5 {
+                eprintln!("[SKY] draw_sky (sky frame {}): {} faces, {} verts, {} indices",
+                    n, self.sky_face_draws.len(), self.sky_vertices.len(), self.sky_indices.len());
+                for (tex_id, first_idx, count) in &self.sky_face_draws {
+                    let has_ds = super::texture::ensure_descriptor_set(*tex_id as i32).is_some();
+                    eprintln!("[SKY]   texnum={} first={} count={} descriptor_set={}", tex_id, first_idx, count, has_ds);
+                }
+                // Dump first few vertices
+                for (vi, v) in self.sky_vertices.iter().enumerate().take(8) {
+                    eprintln!("[SKY]   vert[{}] pos=({:.1},{:.1},{:.1}) tc=({:.3},{:.3})",
+                        vi, v.position[0], v.position[1], v.position[2], v.tex_coord[0], v.tex_coord[1]);
+                }
             }
         }
     }
@@ -2595,7 +2606,7 @@ impl ModernRenderPath {
 
         // Pre-gather sky draw data
         let sky_pipeline_data = self.pipelines.as_ref()
-            .and_then(|pm| pm.get(ShaderType::Sky, PipelineVariant::AlphaBlend))
+            .and_then(|pm| pm.get(ShaderType::Sky, PipelineVariant::Opaque))
             .map(|p| (p.pipeline, p.layout));
         let sky_verts = self.sky_vertices.clone();
         let sky_idxs = self.sky_indices.clone();
@@ -2638,6 +2649,15 @@ impl ModernRenderPath {
         let has_detail_overlay = detail_pipeline_data.is_some()
             && detail_descriptor_set.is_some()
             && has_bsp;
+
+        {
+            static DETAIL_DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = DETAIL_DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 3 {
+                eprintln!("[DETAIL-RENDER] pipeline={} descriptor={} has_bsp={} -> has_detail_overlay={}",
+                    detail_pipeline_data.is_some(), detail_descriptor_set.is_some(), has_bsp, has_detail_overlay);
+            }
+        }
 
         // Build particle push constants (112 bytes)
         #[repr(C)]
@@ -3041,32 +3061,54 @@ impl ModernRenderPath {
                 }
 
                 // === Sky ===
+                // Sky is drawn with the xyww trick (sky.vert.glsl sets gl_Position = pos.xyww)
+                // which forces all sky fragments to depth = 1.0. With LESS_OR_EQUAL depth test
+                // and no depth write, sky renders behind all BSP geometry but in front of the
+                // cleared depth buffer (also 1.0, so EQUAL passes).
                 if has_sky {
                     let (sky_pipeline, sky_layout) = sky_pipeline_data.unwrap();
 
-                    if let (Some(s_vbo), Some(s_ibo)) = (self.sky_vbo.vk_buffer(), self.sky_ibo.vk_buffer()) {
-                        ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, sky_pipeline);
+                    ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, sky_pipeline);
+
+                    // Push sky MVP
+                    let sky_mvp_bytes: &[u8] = std::slice::from_raw_parts(
+                        sky_mvp_flat.as_ptr() as *const u8, 64,
+                    );
+                    ctx.device.cmd_push_constants(
+                        cmd, sky_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0, sky_mvp_bytes,
+                    );
+                    // Alpha = 1.0 (opaque sky)
+                    let sky_alpha = 1.0_f32;
+                    ctx.device.cmd_push_constants(
+                        cmd, sky_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        64, std::slice::from_raw_parts(&sky_alpha as *const f32 as *const u8, 4),
+                    );
+                    // Overbright = 1.0 (no overbright for sky)
+                    let sky_ob = 1.0_f32;
+                    ctx.device.cmd_push_constants(
+                        cmd, sky_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        68, std::slice::from_raw_parts(&sky_ob as *const f32 as *const u8, 4),
+                    );
+
+                    if let Some(s_vbo) = self.sky_vbo.vk_buffer() {
                         ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[s_vbo], &[0]);
-                        ctx.device.cmd_bind_index_buffer(cmd, s_ibo, 0, vk::IndexType::UINT32);
 
-                        // Push sky MVP (64 bytes)
-                        let sky_mvp_bytes: &[u8] = std::slice::from_raw_parts(
-                            sky_mvp_flat.as_ptr() as *const u8, 64,
-                        );
-                        ctx.device.cmd_push_constants(
-                            cmd, sky_layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0, sky_mvp_bytes,
-                        );
+                        if let Some(s_ibo) = self.sky_ibo.vk_buffer() {
+                            ctx.device.cmd_bind_index_buffer(cmd, s_ibo, 0, vk::IndexType::UINT32);
 
-                        for &(_, first_idx, count, ds) in &sky_draws {
-                            if let Some(ds) = ds {
-                                ctx.device.cmd_bind_descriptor_sets(
-                                    cmd, vk::PipelineBindPoint::GRAPHICS,
-                                    sky_layout, 1, &[ds], &[],
-                                );
+                            for &(_, first_idx, count, ds) in &sky_draws {
+                                if let Some(ds) = ds {
+                                    ctx.device.cmd_bind_descriptor_sets(
+                                        cmd, vk::PipelineBindPoint::GRAPHICS,
+                                        sky_layout, 1, &[ds], &[],
+                                    );
+                                }
+                                ctx.device.cmd_draw_indexed(cmd, count, 1, first_idx, 0, 0);
                             }
-                            ctx.device.cmd_draw_indexed(cmd, count, 1, first_idx, 0, 0);
                         }
                     }
                 }

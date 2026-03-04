@@ -877,6 +877,16 @@ impl FsContext {
             let gd = self.gamedirvar.clone();
             self.set_gamedir(&gd);
         }
+
+        // Diagnostic: dump all search paths
+        eprintln!("[FS] Search paths after init ({} entries):", self.search_paths.len());
+        for (i, sp) in self.search_paths.iter().enumerate() {
+            if let Some(ref pack) = sp.pack {
+                eprintln!("[FS]   [{}] PAK: {} ({} files)", i, pack.filename, pack.files.len());
+            } else {
+                eprintln!("[FS]   [{}] DIR: {}", i, sp.filename);
+            }
+        }
     }
 }
 

@@ -210,6 +210,11 @@ impl VertexBuffer {
         self.buffer
     }
 
+    /// Get the underlying Vulkan memory handle (for readback diagnostics).
+    pub fn vk_memory(&self) -> Option<vk::DeviceMemory> {
+        self.memory
+    }
+
     /// Get the size in bytes.
     pub fn size(&self) -> u32 {
         self.size

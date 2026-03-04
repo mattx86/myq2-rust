@@ -1,3 +1,5 @@
+use myq2_common::common::com_dprintf;
+
 // sv_send.rs — Server packet sending code
 // Converted from: myq2-original/server/sv_send.c
 //
@@ -200,6 +202,7 @@ pub fn sv_multicast(ctx: &mut ServerContext, origin: Option<Vec3>, to: Multicast
         if client.state != ClientState::Spawned && !reliable {
             continue;
         }
+        com_dprintf(&format!("sv_multicast: sending to client {} (state={:?}, reliable={})\n", j, client.state, reliable));
 
         if let Some(ref mask_data) = mask {
             // In the original C code, this accesses client->edict->s.origin.

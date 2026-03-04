@@ -67,21 +67,26 @@ impl GameContext {
     }
 
     pub fn move_final(&mut self, ent: usize) {
+        eprintln!("move_final called for entity {}", ent);
         if self.edicts[ent].moveinfo.remaining_distance == 0.0 {
+            eprintln!("move_final: remaining_distance is 0, calling move_done for entity {}", ent);
             self.move_done(ent);
             return;
         }
 
         let remaining = self.edicts[ent].moveinfo.remaining_distance;
         let dir = self.edicts[ent].moveinfo.dir;
-        vec3_scale(&dir, remaining / FRAMETIME, &mut self.edicts[ent].velocity);
+        vec3_scale(&dir, remaining, &mut self.edicts[ent].velocity);
 
         self.edicts[ent].think_fn = Some(crate::dispatch::THINK_FUNC_MOVE_DONE);
         self.edicts[ent].nextthink = self.level.time + FRAMETIME;
+        eprintln!("move_final: entity {} set nextthink to {:.3}, think_fn to MOVE_DONE, velocity={:.1?}", ent, self.edicts[ent].nextthink, self.edicts[ent].velocity);
     }
 
     pub fn move_begin(&mut self, ent: usize) {
+        eprintln!("move_begin called for entity {}", ent);
         if (self.edicts[ent].moveinfo.speed * FRAMETIME) >= self.edicts[ent].moveinfo.remaining_distance {
+            eprintln!("move_begin: moving directly to final for entity {}", ent);
             self.move_final(ent);
             return;
         }
@@ -94,9 +99,11 @@ impl GameContext {
         self.edicts[ent].moveinfo.remaining_distance -= frames * speed * FRAMETIME;
         self.edicts[ent].nextthink = self.level.time + frames * FRAMETIME;
         self.edicts[ent].think_fn = Some(crate::dispatch::THINK_FUNC_MOVE_FINAL);
+        eprintln!("move_begin: entity {} set nextthink to {:.3}, think_fn to MOVE_FINAL", ent, self.edicts[ent].nextthink);
     }
 
     pub fn move_calc(&mut self, ent: usize, dest: [f32; 3], endfunc: usize) {
+        eprintln!("move_calc called for entity {}, current_entity={}", ent, self.level.current_entity);
         vec3_clear(&mut self.edicts[ent].velocity);
         let origin = self.edicts[ent].s.origin;
         vec3_subtract(&dest, &origin, &mut self.edicts[ent].moveinfo.dir);
@@ -109,9 +116,12 @@ impl GameContext {
 
         if mi_speed == mi_accel && mi_speed == mi_decel {
             let is_current = self.level.current_entity == self.get_team_entity(ent);
+            eprintln!("move_calc: entity {} is_current={}, current_entity={}, team_entity={}", ent, is_current, self.level.current_entity, self.get_team_entity(ent));
             if is_current {
+                eprintln!("move_calc: calling move_begin immediately for entity {}", ent);
                 self.move_begin(ent);
             } else {
+                eprintln!("move_calc: scheduling move_begin for next frame for entity {}", ent);
                 self.edicts[ent].nextthink = self.level.time + FRAMETIME;
                 self.edicts[ent].think_fn = Some(crate::dispatch::THINK_FUNC_MOVE_BEGIN);
             }
@@ -1440,6 +1450,7 @@ impl GameContext {
     }
 
     pub fn train_next(&mut self, self_ent: usize) {
+        eprintln!("train_next called for entity {}", self_ent);
         let mut first = true;
 
         loop {
@@ -1515,6 +1526,7 @@ impl GameContext {
     }
 
     pub fn func_train_find(&mut self, self_ent: usize) {
+        eprintln!("func_train_find called for entity {}", self_ent);
         if self.edicts[self_ent].target.is_empty() {
             gi_dprintf("train_find: no target");
             return;

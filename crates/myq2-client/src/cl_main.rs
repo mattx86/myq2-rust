@@ -3743,6 +3743,7 @@ pub fn cl_init_local() {
 
     // HUD customization cvars (R1Q2/Q2Pro feature)
     *HUD_SCALE.lock().unwrap() = cvar_get("hud_scale", "1.0", CVAR_ARCHIVE);
+    eprintln!("cl_init_local: HUD cvars registered");
     *HUD_ALPHA.lock().unwrap() = cvar_get("hud_alpha", "1.0", CVAR_ARCHIVE);
     *HUD_SHOW_HEALTH.lock().unwrap() = cvar_get("hud_show_health", "1", CVAR_ARCHIVE);
     *HUD_SHOW_ARMOR.lock().unwrap() = cvar_get("hud_show_armor", "1", CVAR_ARCHIVE);
@@ -3828,12 +3829,19 @@ pub fn cl_init_local() {
     cmd_add_command("god", None);
     cmd_add_command("notarget", None);
     cmd_add_command("noclip", None);
-    cmd_add_command("invuse", None);
-    cmd_add_command("invprev", None);
-    cmd_add_command("invnext", None);
-    cmd_add_command("invdrop", None);
-    cmd_add_command("weapnext", None);
-    cmd_add_command("weapprev", None);
+    // Inventory commands
+    myq2_common::cmd::cmd_add_command("invnext", Some(Box::new(cl_forward_to_server_f)));
+    myq2_common::cmd::cmd_add_command("invprev", Some(Box::new(cl_forward_to_server_f)));
+    myq2_common::cmd::cmd_add_command("invnextp", Some(Box::new(cl_forward_to_server_f)));
+    myq2_common::cmd::cmd_add_command("invprevp", Some(Box::new(cl_forward_to_server_f)));
+    myq2_common::cmd::cmd_add_command("invuse", Some(Box::new(cl_forward_to_server_f)));
+    myq2_common::cmd::cmd_add_command("invdrop", Some(Box::new(cl_forward_to_server_f)));
+    
+    // Weapon commands
+    myq2_common::cmd::cmd_add_command("weapnext", Some(Box::new(cl_forward_to_server_f)));
+    myq2_common::cmd::cmd_add_command("weapprev", Some(Box::new(cl_forward_to_server_f)));
+    myq2_common::cmd::cmd_add_command("weaplast", Some(Box::new(cl_forward_to_server_f)));
+    myq2_common::cmd::cmd_add_command("putaway", Some(Box::new(cl_forward_to_server_f)));
 
     // Demo playback enhancement commands (R1Q2/Q2Pro feature)
     cmd_add_command("playdemo", Some(cl_playdemo_f));

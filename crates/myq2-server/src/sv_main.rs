@@ -863,6 +863,7 @@ pub fn sv_prep_world_frame(ctx: &mut ServerContext) {
 // ============================================================
 
 pub fn sv_run_game_frame(ctx: &mut ServerContext) {
+    eprintln!("sv_run_game_frame called");
     let host_speeds = ctx.cvars.variable_value("host_speeds");
 
     if host_speeds != 0.0 {

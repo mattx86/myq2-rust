@@ -373,7 +373,6 @@ pub fn cl_prep_refresh(
     scr_update_screen(scr, cls, cl);
     cl.refresh_prepped = true;
     cl.force_refdef = true; // make sure we have a valid refdef
-    com_printf("cl_prep_refresh: complete\n");
 }
 
 // ============================================================
@@ -426,7 +425,10 @@ pub fn scr_draw_crosshair(view: &ViewState, scr: &ScrState) {
 
 /// Draw crosshair with optional health-based coloring (R1Q2/Q2Pro ch_health feature)
 pub fn scr_draw_crosshair_with_health(view: &ViewState, scr: &ScrState, health: Option<i32>) {
-    if cvar_value(view.crosshair) == 0.0 {
+    let crosshair_value = cvar_value(view.crosshair);
+    eprintln!("scr_draw_crosshair_with_health: crosshair cvar={}", crosshair_value);
+    if crosshair_value == 0.0 {
+        eprintln!("scr_draw_crosshair_with_health: crosshair disabled, returning");
         return;
     }
 
@@ -644,7 +646,8 @@ pub fn v_render_view(
 
     // Get player health for ch_health crosshair coloring (R1Q2/Q2Pro feature)
     let health = cl.frame.playerstate.stats[STAT_HEALTH as usize] as i32;
-    scr_draw_crosshair_with_health(&ViewState::default(), scr, Some(health));
+    let view_state = crate::cl_main::VIEW_STATE.lock().unwrap();
+    scr_draw_crosshair_with_health(&view_state, scr, Some(health));
 }
 
 // ============================================================
@@ -673,6 +676,7 @@ pub fn v_init(view: &mut ViewState) {
     cmd_add_command("viewpos", v_viewpos_f_cmd);
 
     view.crosshair = cvar_get("crosshair", "1", CVAR_ARCHIVE);
+    eprintln!("v_init: crosshair cvar registered with handle {:?}", view.crosshair);
 
     view.cl_testblend = cvar_get("cl_testblend", "0", CVAR_ZERO);
     view.cl_testparticles = cvar_get("cl_testparticles", "0", CVAR_ZERO);
