@@ -49,6 +49,10 @@ pub enum ShaderType {
     Fsr2Temporal,
     /// Motion vectors generation for temporal effects.
     MotionVectors,
+    /// Shadow cubemap depth pass for D3 point lights.
+    ShadowCube,
+    /// D3 per-pixel additive lit pass with shadow cubemap sampling.
+    WorldLitAdditive,
 }
 
 /// Manages all shader programs.
@@ -193,6 +197,18 @@ impl ShaderManager {
             ShaderProgram::from_source(MOTION_VECTORS_VERT, MOTION_VECTORS_FRAG)?,
         );
 
+        // Shadow cubemap depth pass
+        self.programs.insert(
+            ShaderType::ShadowCube,
+            ShaderProgram::from_source(SHADOW_CUBE_VERT, SHADOW_CUBE_FRAG)?,
+        );
+
+        // D3 additive lit pass with shadow sampling
+        self.programs.insert(
+            ShaderType::WorldLitAdditive,
+            ShaderProgram::from_source(WORLD_LIT_VERT, WORLD_LIT_FRAG)?,
+        );
+
         Ok(())
     }
 
@@ -246,3 +262,7 @@ const FSR_RCAS_FRAG: &str = include_str!("../../../shaders/fsr_rcas.frag.glsl");
 const FSR2_TEMPORAL_FRAG: &str = include_str!("../../../shaders/fsr2_temporal.frag.glsl");
 const MOTION_VECTORS_VERT: &str = include_str!("../../../shaders/motion_vectors.vert.glsl");
 const MOTION_VECTORS_FRAG: &str = include_str!("../../../shaders/motion_vectors.frag.glsl");
+const SHADOW_CUBE_VERT: &str = include_str!("../../../shaders/shadow_cube.vert.glsl");
+const SHADOW_CUBE_FRAG: &str = include_str!("../../../shaders/shadow_cube.frag.glsl");
+const WORLD_LIT_VERT: &str = include_str!("../../../shaders/world_lit.vert.glsl");
+const WORLD_LIT_FRAG: &str = include_str!("../../../shaders/world_lit.frag.glsl");

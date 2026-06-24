@@ -1,4 +1,4 @@
-// keys.rs — Key input handling
+// keys.rs â€” Key input handling
 // Converted from: myq2-original/client/keys.c
 //
 // Copyright (C) 1997-2001 Id Software, Inc.
@@ -218,7 +218,7 @@ static KEYNAMES: &[KeyName] = &[
 ];
 
 // ============================================================
-// Key state — wrapped in Mutex for thread safety
+// Key state â€” wrapped in Mutex for thread safety
 // ============================================================
 
 pub struct KeyInputState {
@@ -271,7 +271,7 @@ static KEY_STATE: LazyLock<Mutex<KeyInputState>> = LazyLock::new(|| {
 });
 
 pub fn ks() -> MutexGuard<'static, KeyInputState> {
-    KEY_STATE.lock().unwrap()
+    KEY_STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 // ============================================================
@@ -281,14 +281,14 @@ pub fn ks() -> MutexGuard<'static, KeyInputState> {
 
 
 
-/// Placeholder — Cmd_CompleteCommand
+/// Placeholder â€” Cmd_CompleteCommand
 fn cmd_complete_command(partial: &str) -> Option<String> {
     myq2_common::cmd::with_cmd_ctx(|ctx| {
         ctx.cmd_complete_command(partial).map(|s| s.to_string())
     }).flatten()
 }
 
-/// Placeholder — Cvar_CompleteVariable
+/// Placeholder â€” Cvar_CompleteVariable
 fn cvar_complete_variable(partial: &str) -> Option<String> {
     myq2_common::cvar::with_cvar_ctx(|ctx| {
         ctx.complete_variable(partial).map(|s| s.to_string())
@@ -299,38 +299,38 @@ fn sys_get_clipboard_data() -> Option<String> {
     (crate::console::system_fns().sys_get_clipboard_data)()
 }
 
-/// Placeholder — Cbuf_InsertText
+/// Placeholder â€” Cbuf_InsertText
 fn cbuf_insert_text(text: &str) {
     myq2_common::cmd::with_cmd_ctx(|ctx| {
         ctx.cbuf_insert_text(text);
     });
 }
 
-/// Sys_SendKeyEvents — wired through console module's system function pointer table.
+/// Sys_SendKeyEvents â€” wired through console module's system function pointer table.
 fn sys_send_key_events() {
     crate::console::sys_send_key_events();
 }
 
 use myq2_common::common::sys_milliseconds;
 
-/// Placeholder — Z_Free / Z_Malloc (not needed in Rust, use String)
+/// Placeholder â€” Z_Free / Z_Malloc (not needed in Rust, use String)
 
-/// M_Keydown — wired to menu module.
+/// M_Keydown â€” wired to menu module.
 fn m_keydown(key: i32) {
     crate::menu::m_keydown(key);
 }
 
-/// M_Menu_Main_f — wired to menu module.
+/// M_Menu_Main_f â€” wired to menu module.
 fn m_menu_main_f() {
     crate::menu::m_menu_main_f();
 }
 
-/// S_StartLocalSound — wired through console module's system function pointer table.
+/// S_StartLocalSound â€” wired through console module's system function pointer table.
 fn s_start_local_sound(name: &str) {
     (crate::console::system_fns().s_start_local_sound)(name)
 }
 
-/// Placeholder — Com_sprintf (not needed — use format!)
+/// Placeholder â€” Com_sprintf (not needed â€” use format!)
 
 const STAT_LAYOUTS: usize = myq2_common::q_shared::STAT_LAYOUTS as usize;
 
@@ -551,7 +551,7 @@ pub fn key_console(mut key: i32) {
         return;
     }
 
-    // Tab completion — must drop ks before calling complete_command which acquires ks()
+    // Tab completion â€” must drop ks before calling complete_command which acquires ks()
     if key == K_TAB {
         drop(ks);
         complete_command();
@@ -1180,6 +1180,9 @@ pub fn key_init() {
             // Mouse
             (K_MOUSE1, "+attack"),
             (K_MOUSE2, "+strafe"),
+            // Weapon cycle via mouse wheel
+            (K_MWHEELUP,   "weapprev"),
+            (K_MWHEELDOWN, "weapnext"),
             // Weapons
             (b'1' as i32, "use Blaster"),
             (b'2' as i32, "use Shotgun"),
@@ -1246,7 +1249,7 @@ pub fn key_event(key: i32, down: bool, time: u32) {
             ks.shift_down = down;
         }
 
-        // console key is hardcoded — drop lock before dispatch
+        // console key is hardcoded â€” drop lock before dispatch
         if key == b'`' as i32 || key == b'~' as i32 {
             if !down {
                 return;
@@ -1257,7 +1260,7 @@ pub fn key_event(key: i32, down: bool, time: u32) {
         }
 
         // any key during attract mode will bring up the menu
-        // mattx86: console_demos — USE_CONSOLE_IN_DEMOS, so skip attract key override
+        // mattx86: console_demos â€” USE_CONSOLE_IN_DEMOS, so skip attract key override
         let mut key = key;
         if !crate::console::USE_CONSOLE_IN_DEMOS
             && CLS.key_dest != KeyDest::Menu {
@@ -1267,7 +1270,7 @@ pub fn key_event(key: i32, down: bool, time: u32) {
                 }
             }
 
-        // menu key is hardcoded — drop lock before dispatch
+        // menu key is hardcoded â€” drop lock before dispatch
         if key == K_ESCAPE {
             if !down {
                 return;
@@ -1355,7 +1358,7 @@ pub fn key_event(key: i32, down: bool, time: u32) {
             return;
         }
 
-        // Apply shift, then dispatch — drop lock before dispatch
+        // Apply shift, then dispatch â€” drop lock before dispatch
         let mut key = key;
         if ks.shift_down {
             key = ks.keyshift[key as usize];

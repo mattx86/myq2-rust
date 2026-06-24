@@ -1,4 +1,4 @@
-// myq2-game-dll — Quake 2 game DLL built from Rust
+// myq2-game-dll â€” Quake 2 game DLL built from Rust
 //
 // This crate builds our Rust game module as a dynamic library (gamex86.dll)
 // that can be loaded by any Quake 2 engine (including the original C engine).
@@ -55,7 +55,7 @@ static GAME_CONTEXT: Mutex<Option<myq2_game::g_local::GameContext>> = Mutex::new
 static EDICT_STORAGE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
 // ============================================================
-// GetGameApi — the DLL entry point
+// GetGameApi â€” the DLL entry point
 // ============================================================
 
 /// The main entry point for the game DLL.
@@ -75,7 +75,7 @@ pub unsafe extern "C" fn GetGameApi(import: *mut game_import_t) -> *mut game_exp
     // Store the import table for later use
     // We need to copy each field since game_import_t doesn't implement Copy
     {
-        let mut guard = GAME_IMPORT.lock().unwrap();
+        let mut guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
         let imp = &*import;
         *guard = Some(game_import_t {
             bprintf: imp.bprintf,
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn GetGameApi(import: *mut game_import_t) -> *mut game_exp
 
     // Allocate edict storage
     {
-        let mut storage_guard = EDICT_STORAGE.lock().unwrap();
+        let mut storage_guard = EDICT_STORAGE.lock().unwrap_or_else(|e| e.into_inner());
         let total_size = (max_edicts * edict_size) as usize;
         let mut storage = vec![0u8; total_size];
 
@@ -154,7 +154,7 @@ pub unsafe extern "C" fn GetGameApi(import: *mut game_import_t) -> *mut game_exp
 }
 
 // ============================================================
-// Game import bridge — adapts engine callbacks to Rust game code
+// Game import bridge â€” adapts engine callbacks to Rust game code
 // ============================================================
 
 /// Set up the game import interface so game code can call engine functions
@@ -165,7 +165,7 @@ fn setup_game_import_bridge() {
 
     impl GameImport for DllGameImport {
         fn bprintf(&self, printlevel: i32, msg: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.bprintf {
                     let c_msg = CString::new(msg).unwrap_or_default();
@@ -175,7 +175,7 @@ fn setup_game_import_bridge() {
         }
 
         fn dprintf(&self, msg: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.dprintf {
                     let c_msg = CString::new(msg).unwrap_or_default();
@@ -185,7 +185,7 @@ fn setup_game_import_bridge() {
         }
 
         fn cprintf(&self, ent_index: i32, printlevel: i32, msg: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.cprintf {
                     let c_msg = CString::new(msg).unwrap_or_default();
@@ -200,7 +200,7 @@ fn setup_game_import_bridge() {
         }
 
         fn centerprintf(&self, ent_index: i32, msg: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.centerprintf {
                     let c_msg = CString::new(msg).unwrap_or_default();
@@ -211,7 +211,7 @@ fn setup_game_import_bridge() {
         }
 
         fn sound(&self, ent_index: i32, channel: i32, soundindex: i32, volume: f32, attenuation: f32, timeofs: f32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.sound {
                     let ent_ptr = unsafe { get_edict_ptr(ent_index) };
@@ -221,7 +221,7 @@ fn setup_game_import_bridge() {
         }
 
         fn positioned_sound(&self, origin: &Vec3, ent_index: i32, channel: i32, soundindex: i32, volume: f32, attenuation: f32, timeofs: f32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.positioned_sound {
                     let ent_ptr = unsafe { get_edict_ptr(ent_index) };
@@ -231,7 +231,7 @@ fn setup_game_import_bridge() {
         }
 
         fn configstring(&self, num: i32, string: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.configstring {
                     let c_str = CString::new(string).unwrap_or_default();
@@ -241,7 +241,7 @@ fn setup_game_import_bridge() {
         }
 
         fn error(&self, msg: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.error {
                     let c_msg = CString::new(msg).unwrap_or_default();
@@ -252,7 +252,7 @@ fn setup_game_import_bridge() {
         }
 
         fn modelindex(&self, name: &str) -> i32 {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.modelindex {
                     let c_name = CString::new(name).unwrap_or_default();
@@ -263,7 +263,7 @@ fn setup_game_import_bridge() {
         }
 
         fn soundindex(&self, name: &str) -> i32 {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.soundindex {
                     let c_name = CString::new(name).unwrap_or_default();
@@ -274,7 +274,7 @@ fn setup_game_import_bridge() {
         }
 
         fn imageindex(&self, name: &str) -> i32 {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.imageindex {
                     let c_name = CString::new(name).unwrap_or_default();
@@ -285,7 +285,7 @@ fn setup_game_import_bridge() {
         }
 
         fn setmodel(&self, ent_index: i32, name: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.setmodel {
                     let ent_ptr = unsafe { get_edict_ptr(ent_index) };
@@ -296,7 +296,7 @@ fn setup_game_import_bridge() {
         }
 
         fn trace(&self, start: &Vec3, mins: &Vec3, maxs: &Vec3, end: &Vec3, passent_index: i32, contentmask: i32) -> Trace {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.trace {
                     let passent = if passent_index >= 0 {
@@ -321,7 +321,7 @@ fn setup_game_import_bridge() {
         }
 
         fn pointcontents(&self, point: &Vec3) -> i32 {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.pointcontents {
                     return unsafe { func(point) };
@@ -331,7 +331,7 @@ fn setup_game_import_bridge() {
         }
 
         fn in_pvs(&self, p1: &Vec3, p2: &Vec3) -> bool {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.inPVS {
                     return unsafe { func(p1, p2) != 0 };
@@ -341,7 +341,7 @@ fn setup_game_import_bridge() {
         }
 
         fn in_phs(&self, p1: &Vec3, p2: &Vec3) -> bool {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.inPHS {
                     return unsafe { func(p1, p2) != 0 };
@@ -351,7 +351,7 @@ fn setup_game_import_bridge() {
         }
 
         fn set_area_portal_state(&self, portalnum: i32, open: bool) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.SetAreaPortalState {
                     unsafe { func(portalnum, if open { 1 } else { 0 }); }
@@ -360,7 +360,7 @@ fn setup_game_import_bridge() {
         }
 
         fn areas_connected(&self, area1: i32, area2: i32) -> bool {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.AreasConnected {
                     return unsafe { func(area1, area2) != 0 };
@@ -370,7 +370,7 @@ fn setup_game_import_bridge() {
         }
 
         fn linkentity(&self, ent_index: i32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.linkentity {
                     let ent_ptr = unsafe { get_edict_ptr(ent_index) };
@@ -380,7 +380,7 @@ fn setup_game_import_bridge() {
         }
 
         fn unlinkentity(&self, ent_index: i32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.unlinkentity {
                     let ent_ptr = unsafe { get_edict_ptr(ent_index) };
@@ -390,7 +390,7 @@ fn setup_game_import_bridge() {
         }
 
         fn box_edicts(&self, mins: &Vec3, maxs: &Vec3, maxcount: i32, areatype: i32) -> Vec<i32> {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.BoxEdicts {
                     // Allocate a list to receive edict pointers
@@ -414,7 +414,7 @@ fn setup_game_import_bridge() {
         }
 
         fn write_char(&self, c: i32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.WriteChar {
                     unsafe { func(c); }
@@ -423,7 +423,7 @@ fn setup_game_import_bridge() {
         }
 
         fn write_byte(&self, c: i32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.WriteByte {
                     unsafe { func(c); }
@@ -432,7 +432,7 @@ fn setup_game_import_bridge() {
         }
 
         fn write_short(&self, c: i32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.WriteShort {
                     unsafe { func(c); }
@@ -441,7 +441,7 @@ fn setup_game_import_bridge() {
         }
 
         fn write_long(&self, c: i32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.WriteLong {
                     unsafe { func(c); }
@@ -450,7 +450,7 @@ fn setup_game_import_bridge() {
         }
 
         fn write_float(&self, f: f32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.WriteFloat {
                     unsafe { func(f); }
@@ -459,7 +459,7 @@ fn setup_game_import_bridge() {
         }
 
         fn write_string(&self, s: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.WriteString {
                     let c_str = CString::new(s).unwrap_or_default();
@@ -469,7 +469,7 @@ fn setup_game_import_bridge() {
         }
 
         fn write_position(&self, pos: &Vec3) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.WritePosition {
                     unsafe { func(pos); }
@@ -478,7 +478,7 @@ fn setup_game_import_bridge() {
         }
 
         fn write_dir(&self, dir: &Vec3) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.WriteDir {
                     unsafe { func(dir); }
@@ -487,7 +487,7 @@ fn setup_game_import_bridge() {
         }
 
         fn write_angle(&self, f: f32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.WriteAngle {
                     unsafe { func(f); }
@@ -496,7 +496,7 @@ fn setup_game_import_bridge() {
         }
 
         fn multicast(&self, origin: &Vec3, to: i32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.multicast {
                     unsafe { func(origin, to); }
@@ -505,7 +505,7 @@ fn setup_game_import_bridge() {
         }
 
         fn unicast(&self, ent_index: i32, reliable: bool) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.unicast {
                     let ent_ptr = unsafe { get_edict_ptr(ent_index) };
@@ -515,7 +515,7 @@ fn setup_game_import_bridge() {
         }
 
         fn cvar(&self, var_name: &str, value: &str, flags: i32) -> f32 {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.cvar {
                     let c_name = CString::new(var_name).unwrap_or_default();
@@ -530,7 +530,7 @@ fn setup_game_import_bridge() {
         }
 
         fn cvar_set(&self, var_name: &str, value: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.cvar_set {
                     let c_name = CString::new(var_name).unwrap_or_default();
@@ -541,7 +541,7 @@ fn setup_game_import_bridge() {
         }
 
         fn cvar_forceset(&self, var_name: &str, value: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.cvar_forceset {
                     let c_name = CString::new(var_name).unwrap_or_default();
@@ -552,7 +552,7 @@ fn setup_game_import_bridge() {
         }
 
         fn argc(&self) -> i32 {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.argc {
                     return unsafe { func() };
@@ -562,7 +562,7 @@ fn setup_game_import_bridge() {
         }
 
         fn argv(&self, n: i32) -> String {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.argv {
                     let ptr = unsafe { func(n) };
@@ -575,7 +575,7 @@ fn setup_game_import_bridge() {
         }
 
         fn args(&self) -> String {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.args {
                     let ptr = unsafe { func() };
@@ -588,7 +588,7 @@ fn setup_game_import_bridge() {
         }
 
         fn add_command_string(&self, text: &str) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.AddCommandString {
                     let c_text = CString::new(text).unwrap_or_default();
@@ -598,7 +598,7 @@ fn setup_game_import_bridge() {
         }
 
         fn debug_graph(&self, value: f32, color: i32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.DebugGraph {
                     unsafe { func(value, color); }
@@ -607,7 +607,7 @@ fn setup_game_import_bridge() {
         }
 
         fn tag_malloc(&self, size: i32, tag: i32) -> Vec<u8> {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.TagMalloc {
                     let ptr = unsafe { func(size, tag) };
@@ -628,7 +628,7 @@ fn setup_game_import_bridge() {
         }
 
         fn free_tags(&self, tag: i32) {
-            let guard = GAME_IMPORT.lock().unwrap();
+            let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref gi) = *guard {
                 if let Some(func) = gi.FreeTags {
                     unsafe { func(tag); }
@@ -653,7 +653,7 @@ unsafe fn get_edict_ptr(n: c_int) -> *mut edict_t {
 unsafe extern "C" fn ge_init() {
     // Get maxclients from engine cvar
     let maxclients = {
-        let guard = GAME_IMPORT.lock().unwrap();
+        let guard = GAME_IMPORT.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref gi) = *guard {
             if let Some(func) = gi.cvar {
                 let name = CString::new("maxclients").unwrap();
@@ -684,7 +684,7 @@ unsafe extern "C" fn ge_init() {
     game_ctx.maxclients = maxclients as f32;
 
     // Store globally
-    *GAME_CONTEXT.lock().unwrap() = Some(game_ctx);
+    *GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner()) = Some(game_ctx);
 
     // Update export values
     GAME_EXPORT.num_edicts = maxclients + 1;
@@ -693,7 +693,7 @@ unsafe extern "C" fn ge_init() {
 
 /// ge->Shutdown()
 unsafe extern "C" fn ge_shutdown() {
-    *GAME_CONTEXT.lock().unwrap() = None;
+    *GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// ge->SpawnEntities(mapname, entstring, spawnpoint)
@@ -706,7 +706,7 @@ unsafe extern "C" fn ge_spawn_entities(
     let entstring_str = if entstring.is_null() { "" } else { CStr::from_ptr(entstring).to_str().unwrap_or("") };
     let spawnpoint_str = if spawnpoint.is_null() { "" } else { CStr::from_ptr(spawnpoint).to_str().unwrap_or("") };
 
-    let mut guard = GAME_CONTEXT.lock().unwrap();
+    let mut guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut ctx) = *guard {
         myq2_game::g_spawn::spawn_entities(ctx, mapname_str, entstring_str, spawnpoint_str);
         GAME_EXPORT.num_edicts = ctx.num_edicts;
@@ -717,7 +717,7 @@ unsafe extern "C" fn ge_spawn_entities(
 unsafe extern "C" fn ge_write_game(filename: *const c_char, autosave: c_int) {
     let filename_str = if filename.is_null() { "" } else { CStr::from_ptr(filename).to_str().unwrap_or("") };
 
-    let mut guard = GAME_CONTEXT.lock().unwrap();
+    let mut guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut ctx) = *guard {
         use myq2_game::g_save::SaveContext;
         let mut save_ctx = SaveContext {
@@ -736,7 +736,7 @@ unsafe extern "C" fn ge_write_game(filename: *const c_char, autosave: c_int) {
 unsafe extern "C" fn ge_read_game(filename: *const c_char) {
     let filename_str = if filename.is_null() { "" } else { CStr::from_ptr(filename).to_str().unwrap_or("") };
 
-    let mut guard = GAME_CONTEXT.lock().unwrap();
+    let mut guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut ctx) = *guard {
         use myq2_game::g_save::SaveContext;
         let mut save_ctx = SaveContext {
@@ -755,7 +755,7 @@ unsafe extern "C" fn ge_read_game(filename: *const c_char) {
 unsafe extern "C" fn ge_write_level(filename: *const c_char) {
     let filename_str = if filename.is_null() { "" } else { CStr::from_ptr(filename).to_str().unwrap_or("") };
 
-    let guard = GAME_CONTEXT.lock().unwrap();
+    let guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref ctx) = *guard {
         use myq2_game::g_save::SaveContext;
         let save_ctx = SaveContext {
@@ -774,7 +774,7 @@ unsafe extern "C" fn ge_write_level(filename: *const c_char) {
 unsafe extern "C" fn ge_read_level(filename: *const c_char) {
     let filename_str = if filename.is_null() { "" } else { CStr::from_ptr(filename).to_str().unwrap_or("") };
 
-    let mut guard = GAME_CONTEXT.lock().unwrap();
+    let mut guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut ctx) = *guard {
         use myq2_game::g_save::SaveContext;
         let mut save_ctx = SaveContext {
@@ -812,8 +812,24 @@ unsafe extern "C" fn ge_client_disconnect(_ent: *mut edict_t) {
 }
 
 /// ge->ClientCommand(ent)
-unsafe extern "C" fn ge_client_command(_ent: *mut edict_t) {
-    // Placeholder - delegate to game context
+unsafe extern "C" fn ge_client_command(ent: *mut edict_t) {
+    // Convert edict pointer back to index (same arithmetic as get_edict_ptr, reversed)
+    let ent_idx = game_api::num_for_edict(
+        GAME_EXPORT.edicts,
+        GAME_EXPORT.edict_size,
+        ent,
+    ) as usize;
+
+    // Build argv/args from the global tokenizer (already tokenized by sv_execute_user_command)
+    let argc = myq2_common::cmd::cmd_argc();
+    let argv_owned: Vec<String> = (0..argc).map(|i| myq2_common::cmd::cmd_argv(i)).collect();
+    let argv_refs: Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
+    let args = myq2_common::cmd::cmd_args();
+
+    let mut guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref mut ctx) = *guard {
+        myq2_game::g_cmds::client_command(ctx, ent_idx, &argv_refs, &args);
+    }
 }
 
 /// ge->ClientThink(ent, cmd)
@@ -823,8 +839,11 @@ unsafe extern "C" fn ge_client_think(_ent: *mut edict_t, _cmd: *mut usercmd_t) {
 
 /// ge->RunFrame()
 unsafe extern "C" fn ge_run_frame() {
-    let mut guard = GAME_CONTEXT.lock().unwrap();
+    let mut guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut ctx) = *guard {
+        // Call the game frame function
+        myq2_game::g_main::g_run_frame(ctx);
+        
         // Update num_edicts in export
         GAME_EXPORT.num_edicts = ctx.num_edicts;
     }

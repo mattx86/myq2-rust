@@ -1,4 +1,4 @@
-// g_items.rs — Item pickup, use, drop logic and item table
+// g_items.rs â€” Item pickup, use, drop logic and item table
 // Converted from: myq2-original/game/g_items.c
 //
 // Copyright (C) 1997-2001 Id Software, Inc.
@@ -12,7 +12,7 @@ use crate::g_utils::g_spawn;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-/// Global item lookup indices — populated once during build_item_indices, read by find_item/find_item_by_classname.
+/// Global item lookup indices â€” populated once during build_item_indices, read by find_item/find_item_by_classname.
 static ITEM_BY_CLASSNAME_INDEX: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static ITEM_BY_PICKUP_NAME_INDEX: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -61,17 +61,17 @@ pub const WEAPTHINK_GRENADELAUNCHER: usize = 9;
 pub const WEAPTHINK_RAILGUN: usize = 10;
 pub const WEAPTHINK_BFG: usize = 11;
 
-// Think function IDs (for edict think callbacks) — use central dispatch indices
+// Think function IDs (for edict think callbacks) â€” use central dispatch indices
 pub use crate::dispatch::THINK_DO_RESPAWN;
 pub use crate::dispatch::THINK_MEGAHEALTH_THINK as THINK_MEGAHEALTH;
 pub use crate::dispatch::THINK_DROP_MAKE_TOUCHABLE;
 pub use crate::dispatch::THINK_DROPTOFLOOR;
 
-// Touch function IDs — use central dispatch indices
+// Touch function IDs â€” use central dispatch indices
 pub use crate::dispatch::TOUCH_ITEM;
 pub use crate::dispatch::TOUCH_DROP_TEMP;
 
-// Use (entity trigger) function IDs — use central dispatch indices
+// Use (entity trigger) function IDs â€” use central dispatch indices
 pub use crate::dispatch::USE_ITEM_TRIGGER;
 
 // ============================================================
@@ -167,8 +167,8 @@ impl GameContext {
         }
 
         // Update global statics for cross-module access
-        *ITEM_BY_CLASSNAME_INDEX.lock().unwrap() = self.item_by_classname.clone();
-        *ITEM_BY_PICKUP_NAME_INDEX.lock().unwrap() = self.item_by_pickup_name.clone();
+        *ITEM_BY_CLASSNAME_INDEX.lock().unwrap_or_else(|e| e.into_inner()) = self.item_by_classname.clone();
+        *ITEM_BY_PICKUP_NAME_INDEX.lock().unwrap_or_else(|e| e.into_inner()) = self.item_by_pickup_name.clone();
     }
 
     /// O(1) lookup of item by classname
@@ -183,7 +183,7 @@ impl GameContext {
 }
 
 // ============================================================
-// Helper: ITEM_INDEX — in C this is pointer arithmetic (item - itemlist).
+// Helper: ITEM_INDEX â€” in C this is pointer arithmetic (item - itemlist).
 // In Rust, items are stored in a Vec and referenced by usize index.
 // ============================================================
 
@@ -209,7 +209,7 @@ pub fn get_item_by_index(ctx: &GameContext, index: usize) -> Option<usize> {
 
 /// O(1) lookup using global HashMap index. Works from any module.
 pub fn find_item_by_classname(classname: &str) -> Option<usize> {
-    ITEM_BY_CLASSNAME_INDEX.lock().unwrap().get(&classname.to_lowercase()).copied()
+    ITEM_BY_CLASSNAME_INDEX.lock().unwrap_or_else(|e| e.into_inner()).get(&classname.to_lowercase()).copied()
 }
 
 // ============================================================
@@ -218,7 +218,7 @@ pub fn find_item_by_classname(classname: &str) -> Option<usize> {
 
 /// O(1) lookup using global HashMap index. Works from any module.
 pub fn find_item(pickup_name: &str) -> Option<usize> {
-    ITEM_BY_PICKUP_NAME_INDEX.lock().unwrap().get(&pickup_name.to_lowercase()).copied()
+    ITEM_BY_PICKUP_NAME_INDEX.lock().unwrap_or_else(|e| e.into_inner()).get(&pickup_name.to_lowercase()).copied()
 }
 
 // ============================================================
@@ -1071,7 +1071,7 @@ pub fn drop_make_touchable(ctx: &mut GameContext, ent_idx: usize) {
     ctx.edicts[ent_idx].touch_fn = Some(TOUCH_ITEM);
     if ctx.deathmatch != 0.0 {
         ctx.edicts[ent_idx].nextthink = ctx.level.time + 29.0;
-        // ent->think = G_FreeEdict — will be handled by dispatch
+        // ent->think = G_FreeEdict â€” will be handled by dispatch
         ctx.edicts[ent_idx].think_fn = Some(crate::dispatch::THINK_FREE_EDICT);
     }
 }

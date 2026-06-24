@@ -275,12 +275,12 @@ fn dispatch() -> &'static Mutex<NetDispatch> {
 
 /// Register the platform's NET_GetPacket implementation.
 pub fn net_register_get_packet(f: NetGetPacketFn) {
-    dispatch().lock().unwrap().get_packet = Some(f);
+    dispatch().lock().unwrap_or_else(|e| e.into_inner()).get_packet = Some(f);
 }
 
 /// Register the platform's NET_SendPacket implementation.
 pub fn net_register_send_packet(f: NetSendPacketFn) {
-    dispatch().lock().unwrap().send_packet = Some(f);
+    dispatch().lock().unwrap_or_else(|e| e.into_inner()).send_packet = Some(f);
 }
 
 /// NET_GetPacket -- receive the next packet from the network.
@@ -288,7 +288,7 @@ pub fn net_register_send_packet(f: NetSendPacketFn) {
 /// Calls the platform-registered implementation. Returns false if no
 /// implementation is registered or no packet is available.
 pub fn net_get_packet(sock: NetSrc, from: &mut NetAdr, message: &mut SizeBuf) -> bool {
-    let guard = dispatch().lock().unwrap();
+    let guard = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(f) = guard.get_packet {
         f(sock, from, message)
     } else {
@@ -301,13 +301,13 @@ pub fn net_get_packet(sock: NetSrc, from: &mut NetAdr, message: &mut SizeBuf) ->
 /// Calls the platform-registered implementation. Does nothing if no
 /// implementation is registered.
 pub fn net_send_packet(sock: NetSrc, data: &[u8], to: &NetAdr) {
-    let guard = dispatch().lock().unwrap();
+    let guard = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(f) = guard.send_packet {
         f(sock, data, to);
     }
 }
 
-/// NET_Config — Open or close network sockets based on multiplayer mode.
+/// NET_Config â€” Open or close network sockets based on multiplayer mode.
 ///
 /// When `multiplayer` is true, opens server and client sockets if not already open.
 /// When false, closes all sockets. In the C original this was in win32/net_udp.c.

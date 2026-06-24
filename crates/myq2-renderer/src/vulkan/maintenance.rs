@@ -123,7 +123,7 @@ impl ShaderModuleIdentifier {
 
         // This requires the VK_EXT_shader_module_identifier extension
         // which is promoted in maintenance5
-        unsafe {
+        {
             // Would call vkGetShaderModuleIdentifierEXT here
             // For now, return None as we'd need the function pointer
         }

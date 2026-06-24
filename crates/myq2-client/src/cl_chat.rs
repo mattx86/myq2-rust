@@ -346,31 +346,31 @@ pub static CHAT_QUEUE: LazyLock<Mutex<ChatMessageQueue>> =
 
 /// Queue an outgoing chat message (call during packet loss)
 pub fn chat_queue_outgoing(message: &str, team: bool, current_time: i32) -> bool {
-    let mut queue = CHAT_QUEUE.lock().unwrap();
+    let mut queue = CHAT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     queue.queue_message(message, team, current_time)
 }
 
 /// Get next queued message to send (call when connection restored)
 pub fn chat_get_queued(current_time: i32) -> Option<QueuedChatMessage> {
-    let mut queue = CHAT_QUEUE.lock().unwrap();
+    let mut queue = CHAT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     queue.get_next(current_time)
 }
 
 /// Re-queue a message after failed send attempt
 pub fn chat_retry_message(msg: QueuedChatMessage) {
-    let mut queue = CHAT_QUEUE.lock().unwrap();
+    let mut queue = CHAT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     queue.retry_message(msg);
 }
 
 /// Check if there are queued chat messages
 pub fn chat_has_queued() -> bool {
-    let queue = CHAT_QUEUE.lock().unwrap();
+    let queue = CHAT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     queue.has_pending()
 }
 
 /// Clear all queued chat messages
 pub fn chat_clear_queue() {
-    let mut queue = CHAT_QUEUE.lock().unwrap();
+    let mut queue = CHAT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     queue.clear();
 }
 
@@ -452,7 +452,7 @@ fn is_leap_year(year: i64) -> bool {
 /// Initialize the chat system. Call on client init.
 pub fn chat_init() {
     let gamedir = fs_gamedir();
-    let mut state = CHAT_STATE.lock().unwrap();
+    let mut state = CHAT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.load_filter(&gamedir);
     state.load_ignore_list(&gamedir);
 }
@@ -461,7 +461,7 @@ pub fn chat_init() {
 /// Returns None if the message should be ignored, or the filtered message otherwise.
 pub fn chat_process_message(sender: &str, message: &str) -> Option<String> {
     let gamedir = fs_gamedir();
-    let mut state = CHAT_STATE.lock().unwrap();
+    let mut state = CHAT_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     // Check if sender is ignored
     if state.is_ignored(sender) {
@@ -493,13 +493,13 @@ pub fn chat_extract_sender(message: &str) -> Option<&str> {
 
 /// Set whether chat filtering is enabled
 pub fn chat_set_filter_enabled(enabled: bool) {
-    let mut state = CHAT_STATE.lock().unwrap();
+    let mut state = CHAT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.filter_enabled = enabled;
 }
 
 /// Set whether chat logging is enabled
 pub fn chat_set_log_enabled(enabled: bool) {
-    let mut state = CHAT_STATE.lock().unwrap();
+    let mut state = CHAT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.log_enabled = enabled;
     if !enabled {
         state.close_log();
@@ -515,7 +515,7 @@ pub fn cmd_ignore(args: &str) {
     let name = args.trim();
     if name.is_empty() {
         // List ignored players
-        let state = CHAT_STATE.lock().unwrap();
+        let state = CHAT_STATE.lock().unwrap_or_else(|e| e.into_inner());
         if state.ignored_players.is_empty() {
             com_printf("No players ignored.\n");
         } else {
@@ -528,7 +528,7 @@ pub fn cmd_ignore(args: &str) {
     }
 
     let gamedir = fs_gamedir();
-    let mut state = CHAT_STATE.lock().unwrap();
+    let mut state = CHAT_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     if state.ignore_player(name, &gamedir) {
         com_printf(&format!("Now ignoring '{}'\n", name));
@@ -546,7 +546,7 @@ pub fn cmd_unignore(args: &str) {
     }
 
     let gamedir = fs_gamedir();
-    let mut state = CHAT_STATE.lock().unwrap();
+    let mut state = CHAT_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     if state.unignore_player(name, &gamedir) {
         com_printf(&format!("No longer ignoring '{}'\n", name));
@@ -557,7 +557,7 @@ pub fn cmd_unignore(args: &str) {
 
 /// ignorelist - List all ignored players
 pub fn cmd_ignorelist() {
-    let state = CHAT_STATE.lock().unwrap();
+    let state = CHAT_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     if state.ignored_players.is_empty() {
         com_printf("No players ignored.\n");
@@ -572,7 +572,7 @@ pub fn cmd_ignorelist() {
 /// filter_reload - Reload the word filter
 pub fn cmd_filter_reload() {
     let gamedir = fs_gamedir();
-    let mut state = CHAT_STATE.lock().unwrap();
+    let mut state = CHAT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.load_filter(&gamedir);
     com_printf(&format!("Reloaded filter ({} words)\n", state.filter_words.len()));
 }

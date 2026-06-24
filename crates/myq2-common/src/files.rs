@@ -1,4 +1,4 @@
-// files.rs — Quake 2 virtual filesystem
+// files.rs â€” Quake 2 virtual filesystem
 // Converted from: myq2-original/qcommon/files.c
 
 use std::collections::HashMap;
@@ -85,7 +85,7 @@ pub struct FileLink {
     pub to: String,
 }
 
-/// A single element on the search path — either a directory or a pack file.
+/// A single element on the search path â€” either a directory or a pack file.
 #[derive(Debug)]
 pub struct SearchPath {
     /// Directory path (used when `pack` is `None`).
@@ -246,7 +246,7 @@ impl FsContext {
                     });
                     f.seek(SeekFrom::Start(pf.filepos as u64)).ok();
                     // We need to set file_from_pak but we have &self borrow
-                    // — handled after the loop via the return value.
+                    // â€” handled after the loop via the return value.
                     return Some(FsOpenResult {
                         file: f,
                         length: pf.filelen,
@@ -428,7 +428,7 @@ impl FsContext {
             }
             let temp: DZipHeader = unsafe { std::ptr::read(hdr_bytes.as_ptr() as *const _) };
 
-            // Check for central directory header — means we are done
+            // Check for central directory header â€” means we are done
             let ident_be = u32::from_be(temp.ident);
             if ident_be == ZPAKDIRHEADER {
                 break;
@@ -475,7 +475,7 @@ impl FsContext {
     }
 
     // ============================================================
-    // FS_ListFiles (simplified — uses std::fs glob via pattern matching)
+    // FS_ListFiles (simplified â€” uses std::fs glob via pattern matching)
     // ============================================================
 
     /// Lists files matching a simple glob pattern (e.g. "baseq2/pak*.pak").
@@ -679,7 +679,7 @@ impl FsContext {
     }
 
     /// Checks if autoexec.cfg exists and returns the path, WITHOUT calling any callbacks.
-    /// Used by the module-level fs_exec_autoexec() to avoid FS_CTX → CMD_CTX deadlock.
+    /// Used by the module-level fs_exec_autoexec() to avoid FS_CTX â†’ CMD_CTX deadlock.
     pub fn exec_autoexec_path(&self) -> Option<String> {
         let name = if !self.gamedirvar.is_empty() {
             format!("{}/{}/autoexec.cfg", self.basedir, self.gamedirvar)
@@ -899,7 +899,7 @@ use std::sync::Mutex;
 static FS_CTX: Mutex<Option<FsContext>> = Mutex::new(None);
 
 pub fn fs_init() {
-    let mut g = FS_CTX.lock().unwrap();
+    let mut g = FS_CTX.lock().unwrap_or_else(|e| e.into_inner());
     let mut ctx = FsContext::new();
     ctx.init_filesystem();
     // Wire up the cbuf_add_text callback so exec_autoexec() and set_gamedir() can
@@ -911,12 +911,12 @@ pub fn fs_init() {
 }
 
 pub fn fs_shutdown() {
-    let mut g = FS_CTX.lock().unwrap();
+    let mut g = FS_CTX.lock().unwrap_or_else(|e| e.into_inner());
     *g = None;
 }
 
 pub fn fs_gamedir() -> String {
-    FS_CTX.lock().unwrap().as_ref().map_or(String::new(), |c| c.gamedir().to_string())
+    FS_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(String::new(), |c| c.gamedir().to_string())
 }
 
 pub fn fs_create_path(path: &str) {
@@ -925,9 +925,9 @@ pub fn fs_create_path(path: &str) {
 
 pub fn fs_exec_autoexec() -> Option<String> {
     // Check if autoexec.cfg exists while holding FS_CTX, but do NOT call
-    // cbuf_add_text inside the lock — that would create FS_CTX → CMD_CTX
-    // lock ordering, which reverses CMD_CTX → FS_CTX used by cmd_exec_f.
-    let result = FS_CTX.lock().unwrap().as_ref().and_then(|c| {
+    // cbuf_add_text inside the lock â€” that would create FS_CTX â†’ CMD_CTX
+    // lock ordering, which reverses CMD_CTX â†’ FS_CTX used by cmd_exec_f.
+    let result = FS_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|c| {
         c.exec_autoexec_path()
     });
     // Call cbuf_add_text AFTER releasing FS_CTX to avoid deadlock
@@ -938,13 +938,13 @@ pub fn fs_exec_autoexec() -> Option<String> {
 }
 
 pub fn fs_load_file(name: &str) -> Option<Vec<u8>> {
-    FS_CTX.lock().unwrap().as_mut().and_then(|c| c.load_file(name))
+    FS_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|c| c.load_file(name))
 }
 
 /// Load a file and also report whether it came from a pak file.
 /// Returns (data, from_pak).
 pub fn fs_load_file_ex(name: &str) -> (Option<Vec<u8>>, bool) {
-    let mut guard = FS_CTX.lock().unwrap();
+    let mut guard = FS_CTX.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut c) = *guard {
         let data = c.load_file(name);
         let from_pak = c.file_from_pak;
@@ -955,17 +955,17 @@ pub fn fs_load_file_ex(name: &str) -> (Option<Vec<u8>>, bool) {
 }
 
 pub fn fs_file_length(name: &str) -> Option<i32> {
-    FS_CTX.lock().unwrap().as_mut().and_then(|c| c.file_length(name))
+    FS_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|c| c.file_length(name))
 }
 
 pub fn fs_set_gamedir(dir: &str) {
-    if let Some(ref mut c) = *FS_CTX.lock().unwrap() {
+    if let Some(ref mut c) = *FS_CTX.lock().unwrap_or_else(|e| e.into_inner()) {
         c.set_gamedir(dir);
     }
 }
 
 pub fn fs_add_game_directory(dir: &str) {
-    if let Some(ref mut c) = *FS_CTX.lock().unwrap() {
+    if let Some(ref mut c) = *FS_CTX.lock().unwrap_or_else(|e| e.into_inner()) {
         c.add_game_directory(dir);
     }
 }
@@ -975,7 +975,7 @@ pub fn with_fs_ctx<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut FsContext) -> R,
 {
-    let mut g = FS_CTX.lock().unwrap();
+    let mut g = FS_CTX.lock().unwrap_or_else(|e| e.into_inner());
     g.as_mut().map(f)
 }
 
@@ -989,7 +989,7 @@ where
 pub fn fs_batch_file_exists(names: &[String]) -> Vec<(String, bool, bool)> {
     // Build pak index and collect directory paths while holding the lock
     let (pak_index, dir_paths): (std::collections::HashSet<String>, Vec<String>) = {
-        let guard = FS_CTX.lock().unwrap();
+        let guard = FS_CTX.lock().unwrap_or_else(|e| e.into_inner());
         let ctx = match guard.as_ref() {
             Some(c) => c,
             None => return names.iter().map(|n| (n.clone(), false, false)).collect(),
@@ -1133,7 +1133,7 @@ mod tests {
     fn test_set_gamedir_rejects_paths() {
         let mut ctx = FsContext::new();
         ctx.set_gamedir("../hack");
-        // Should have been rejected — gamedir unchanged
+        // Should have been rejected â€” gamedir unchanged
         assert!(ctx.gamedir.is_empty() || ctx.gamedir != "../hack");
     }
 

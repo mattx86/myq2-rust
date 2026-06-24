@@ -793,8 +793,8 @@ mod tests {
 
         touch_multi(&mut ctx, 1, 2, None, None);
 
-        // Should return early — activator not set
-        assert_eq!(ctx.edicts[1].activator, 0);
+        // Should return early — activator not set (stays at default -1 = no entity)
+        assert_eq!(ctx.edicts[1].activator, -1);
     }
 
     #[test]
@@ -808,7 +808,7 @@ mod tests {
         touch_multi(&mut ctx, 1, 2, None, None);
 
         // Should return early because spawnflags & 1 == 0
-        assert_eq!(ctx.edicts[1].activator, 0);
+        assert_eq!(ctx.edicts[1].activator, -1);
     }
 
     #[test]
@@ -835,8 +835,8 @@ mod tests {
 
         touch_multi(&mut ctx, 1, 2, None, None);
 
-        // Should return early
-        assert_eq!(ctx.edicts[1].activator, 0);
+        // Should return early (stays at default -1 = no entity)
+        assert_eq!(ctx.edicts[1].activator, -1);
     }
 
     #[test]
@@ -850,7 +850,7 @@ mod tests {
         touch_multi(&mut ctx, 1, 2, None, None);
 
         // Dot product of forward [-1, 0, 0] and movedir [1, 0, 0] = -1 < 0, rejected
-        assert_eq!(ctx.edicts[1].activator, 0);
+        assert_eq!(ctx.edicts[1].activator, -1);
     }
 
     // ============================================================

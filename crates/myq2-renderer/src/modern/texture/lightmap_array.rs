@@ -11,9 +11,9 @@ use crate::modern::gpu_device;
 /// Maximum number of lightmap layers.
 pub const MAX_LIGHTMAPS: u32 = 128;
 
-/// Lightmap block dimensions.
-pub const BLOCK_WIDTH: u32 = 128;
-pub const BLOCK_HEIGHT: u32 = 128;
+/// Lightmap block dimensions. 2048×2048 to hold 16× bicubic-upscaled lightmap data.
+pub const BLOCK_WIDTH: u32 = 2048;
+pub const BLOCK_HEIGHT: u32 = 2048;
 
 /// Lightmap format (RGBA = 4 bytes per texel).
 pub const LIGHTMAP_BYTES: u32 = 4;
@@ -39,8 +39,10 @@ pub struct LightmapArray {
     sampler: Option<vk::Sampler>,
     /// Device memory for the texture.
     texture_memory: Option<vk::DeviceMemory>,
-    /// Number of layers currently in use.
+    /// Number of layers currently in use (CPU allocation tracker).
     layer_count: u32,
+    /// Number of layers actually allocated in the GPU texture.
+    gpu_layer_count: u32,
     /// Allocation tracker for each row in each layer.
     allocated: Vec<[i32; BLOCK_WIDTH as usize]>,
     /// Whether the texture is initialized (initial layout transition done).
@@ -59,13 +61,19 @@ impl LightmapArray {
             sampler: None,
             texture_memory: None,
             layer_count: 0,
+            gpu_layer_count: 0,
             allocated: vec![[0; BLOCK_WIDTH as usize]; MAX_LIGHTMAPS as usize],
             initialized: false,
         }
     }
 
     /// Create the GPU texture array and sampler.
-    pub fn create_gpu_resources(&mut self) {
+    ///
+    /// `num_layers` is the number of layers to allocate. Pass the actual layer
+    /// count used by the current map to avoid over-allocating GPU VRAM.
+    /// At 32x (4096² RGBA8 = 64 MB/layer), `MAX_LIGHTMAPS=128` would be 8 GB.
+    pub fn create_gpu_resources(&mut self, num_layers: u32) {
+        let num_layers = num_layers.max(1).min(MAX_LIGHTMAPS);
         // Use with_device_and_commands_mut to avoid deadlock — both with_device
         // and with_commands_mut lock the same VK_DEVICE_STATE mutex.
         gpu_device::with_device_and_commands_mut(|ctx, commands| {
@@ -81,7 +89,7 @@ impl LightmapArray {
                         depth: 1,
                     })
                     .mip_levels(1)
-                    .array_layers(MAX_LIGHTMAPS)
+                    .array_layers(num_layers)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
                     .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
@@ -141,7 +149,7 @@ impl LightmapArray {
                         base_mip_level: 0,
                         level_count: 1,
                         base_array_layer: 0,
-                        layer_count: MAX_LIGHTMAPS,
+                        layer_count: num_layers,
                     });
 
                 let image_view = match ctx.device.create_image_view(&view_info, None) {
@@ -184,6 +192,7 @@ impl LightmapArray {
                 self.image_view = Some(image_view);
                 self.texture_memory = Some(memory);
                 self.sampler = Some(sampler);
+                self.gpu_layer_count = num_layers;
 
                 // Transition to SHADER_READ_ONLY_OPTIMAL for initial state
                 // (commands already available, no nested lock)
@@ -206,7 +215,7 @@ impl LightmapArray {
                         base_mip_level: 0,
                         level_count: 1,
                         base_array_layer: 0,
-                        layer_count: MAX_LIGHTMAPS,
+                        layer_count: num_layers,
                     })
                     .src_access_mask(vk::AccessFlags::empty())
                     .dst_access_mask(vk::AccessFlags::SHADER_READ);
@@ -353,6 +362,8 @@ impl LightmapArray {
             Some(t) => t,
             None => return,
         };
+
+        let gpu_layers = self.gpu_layer_count.max(1);
 
         // Phase 1 (parallel): Prepare data and compute offsets
         let prepared: Vec<_> = updates
@@ -503,7 +514,7 @@ impl LightmapArray {
                         base_mip_level: 0,
                         level_count: 1,
                         base_array_layer: 0,
-                        layer_count: MAX_LIGHTMAPS,
+                        layer_count: gpu_layers,
                     })
                     .src_access_mask(vk::AccessFlags::SHADER_READ)
                     .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
@@ -539,7 +550,7 @@ impl LightmapArray {
                         base_mip_level: 0,
                         level_count: 1,
                         base_array_layer: 0,
-                        layer_count: MAX_LIGHTMAPS,
+                        layer_count: gpu_layers,
                     })
                     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .dst_access_mask(vk::AccessFlags::SHADER_READ);

@@ -2,7 +2,7 @@
 // Converted from: myq2-original/ref_gl/vk_image.c
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports, non_upper_case_globals,
-         clippy::too_many_arguments, unused_unsafe, clippy::manual_range_contains)]
+         clippy::too_many_arguments, clippy::manual_range_contains)]
 
 use crate::vk_local::*;
 use crate::vk_rmain::vid_printf;

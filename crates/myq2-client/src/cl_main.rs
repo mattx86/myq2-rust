@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, LazyLock};
 ///
 /// In a single-threaded game engine, all panics happen on the main thread.
 /// When a panic occurs while a Mutex is held (e.g., during rendering),
-/// the Mutex becomes "poisoned" and all subsequent .lock().unwrap() calls
+/// the Mutex becomes "poisoned" and all subsequent .lock().unwrap_or_else(|e| e.into_inner()) calls
 /// panic too, creating an infinite cascade. This helper recovers the guard
 /// from a poisoned Mutex so the game can continue after a non-fatal error.
 pub fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -39,18 +39,18 @@ use myq2_common::qfiles::{MAX_SKINNAME, IDALIASHEADER, ALIAS_VERSION};
 use myq2_common::wildcards::wildcardfit;
 use myq2_common::common::info_print;
 
-// Cmd system — direct imports where signatures match
+// Cmd system â€” direct imports where signatures match
 use myq2_common::cmd::{
     cmd_args, cmd_tokenize_string, cbuf_add_text, cbuf_execute, cmd_write_aliases,
 };
 
-// Cvar system — direct imports where signatures match
+// Cvar system â€” direct imports where signatures match
 use myq2_common::cvar::{
     cvar_set, cvar_set_value, cvar_variable_value, cvar_variable_string,
     cvar_userinfo, cvar_write_address_book, cvar_write_variables,
 };
 
-// Filesystem — direct imports where signatures match
+// Filesystem â€” direct imports where signatures match
 use myq2_common::files::{fs_gamedir, fs_create_path, fs_load_file};
 
 // ============================================================
@@ -61,7 +61,7 @@ use crate::console::con_init;
 use crate::menu::{m_init, m_force_menu_off};
 use crate::keys::key_write_bindings;
 
-// Sub-system modules — wired below
+// Sub-system modules â€” wired below
 use crate::cl_scrn::ScrState;
 use crate::cl_timing::ClientTiming;
 use crate::cl_view::ViewState;
@@ -72,7 +72,7 @@ use crate::cl_chat::{chat_queue_outgoing, chat_get_queued, chat_retry_message, c
 use myq2_common::cmodel::CModelContext;
 
 // ============================================================
-// Thin wrappers — real impl exists in myq2-common but signature differs
+// Thin wrappers â€” real impl exists in myq2-common but signature differs
 // ============================================================
 
 fn com_quit() -> ! {
@@ -81,14 +81,14 @@ fn com_quit() -> ! {
 
 use myq2_common::common::com_server_state;
 
-// Re-use console.rs wrappers for cmd_argc / cmd_argv (usize ↔ i32 adaptation)
+// Re-use console.rs wrappers for cmd_argc / cmd_argv (usize â†” i32 adaptation)
 use crate::console::{cmd_argc, cmd_argv};
 
 fn cmd_add_command(name: &str, func: Option<fn()>) {
     myq2_common::cmd::cmd_add_command_optional(name, func);
 }
 
-// Cvar wrapper — adapt Option<usize> return to CvarHandle
+// Cvar wrapper â€” adapt Option<usize> return to CvarHandle
 fn cvar_get(name: &str, value: &str, flags: i32) -> CvarHandle {
     // Real impl returns Option<usize> (index into cvar table); for now
     // we call it for the side-effect of registering the cvar, then build
@@ -102,9 +102,9 @@ fn cvar_get(name: &str, value: &str, flags: i32) -> CvarHandle {
 }
 
 // ============================================================
-// Network wrappers — delegate to myq2_common using canonical NetAdr type
+// Network wrappers â€” delegate to myq2_common using canonical NetAdr type
 // ============================================================
-// Network config — dispatched via platform callbacks, falls back to myq2_common::net::net_config
+// Network config â€” dispatched via platform callbacks, falls back to myq2_common::net::net_config
 fn net_config(multiplayer: bool) { crate::platform::net_config(multiplayer); }
 fn net_string_to_adr(s: &str, adr: &mut NetAdr) -> bool {
     if let Some(result) = myq2_common::net::net_string_to_adr(s) {
@@ -140,7 +140,7 @@ fn net_send_packet(sock: i32, _length: usize, data: &[u8], to: &NetAdr) {
     myq2_common::net::net_send_packet(net_sock, data, to);
 }
 
-// Netchan — wired to myq2_common::net_chan
+// Netchan â€” wired to myq2_common::net_chan
 fn netchan_out_of_band_print(sock: i32, adr: NetAdr, msg: &str) {
     let net_sock = if sock == NS_SERVER {
         myq2_common::qcommon::NetSrc::Server
@@ -163,7 +163,7 @@ fn netchan_transmit(chan: &mut myq2_common::qcommon::NetChan, _length: usize, da
     let qport = chan.qport;
 
     // Get packetdup setting (R1Q2/Q2Pro feature for lossy connections)
-    let dup_count = CL_PACKETDUP.lock().unwrap().value as i32;
+    let dup_count = CL_PACKETDUP.lock().unwrap_or_else(|e| e.into_inner()).value as i32;
 
     if dup_count > 0 {
         // Use the duplication-aware transmit function
@@ -186,7 +186,7 @@ fn netchan_process(chan: &mut myq2_common::qcommon::NetChan, msg: &mut SizeBuf) 
 /// Does nothing if the cvar value is empty.
 fn cl_execute_trigger_cmd(cvar: &LazyLock<Mutex<CvarHandle>>) {
     let cmd = {
-        let handle = cvar.lock().unwrap();
+        let handle = cvar.lock().unwrap_or_else(|e| e.into_inner());
         handle.string.clone()
     };
     if !cmd.is_empty() {
@@ -205,7 +205,7 @@ pub fn cl_trigger_begin_map() {
     // When the user typed "map xxx" in the console, key_dest is still Console.
     // SCR_RunConsole will animate the console closed once key_dest is Game.
     {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.key_dest == crate::client::KeyDest::Console {
             cls.key_dest = crate::client::KeyDest::Game;
         }
@@ -228,7 +228,7 @@ pub fn cl_trigger_disconnect() {
 
 /// Display network statistics (cl_netstats command).
 pub fn cl_netstats_f() {
-    let cl = CL.lock().unwrap();
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
     let stats = &cl.smoothing.network_stats;
 
     com_printf("\n=== Network Statistics ===\n");
@@ -249,7 +249,7 @@ pub fn cl_netstats_f() {
 
 /// Display and control smoothing settings (cl_smooth command).
 pub fn cl_smooth_f() {
-    let cl = CL.lock().unwrap();
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
 
     com_printf("\n=== Smoothing Settings ===\n");
     com_printf(&format!("Time Nudge: {} ms\n", cl.cl_timenudge));
@@ -273,16 +273,16 @@ pub fn cl_smooth_f() {
 /// Sync smoothing cvars to ClientState settings.
 /// Called each frame to pick up cvar changes.
 pub fn cl_update_smoothing_cvars() {
-    let timenudge = CL_TIMENUDGE.lock().unwrap().value as i32;
-    let extrapolate = CL_EXTRAPOLATE.lock().unwrap().value != 0.0;
-    let extrapolate_max = CL_EXTRAPOLATE_MAX.lock().unwrap().value as i32;
-    let anim_continue = CL_ANIM_CONTINUE.lock().unwrap().value != 0.0;
-    let projectile_predict = CL_PROJECTILE_PREDICT.lock().unwrap().value != 0.0;
-    let cubic_interp = CL_CUBIC_INTERP.lock().unwrap().value != 0.0;
-    let view_smooth = CL_VIEW_SMOOTH.lock().unwrap().value != 0.0;
-    let adaptive_interp = CL_ADAPTIVE_INTERP.lock().unwrap().value != 0.0;
+    let timenudge = CL_TIMENUDGE.lock().unwrap_or_else(|e| e.into_inner()).value as i32;
+    let extrapolate = CL_EXTRAPOLATE.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
+    let extrapolate_max = CL_EXTRAPOLATE_MAX.lock().unwrap_or_else(|e| e.into_inner()).value as i32;
+    let anim_continue = CL_ANIM_CONTINUE.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
+    let projectile_predict = CL_PROJECTILE_PREDICT.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
+    let cubic_interp = CL_CUBIC_INTERP.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
+    let view_smooth = CL_VIEW_SMOOTH.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
+    let adaptive_interp = CL_ADAPTIVE_INTERP.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
 
-    let mut cl = CL.lock().unwrap();
+    let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
 
     // Clamp timenudge to reasonable range
     cl.cl_timenudge = timenudge.clamp(-100, 100);
@@ -300,34 +300,34 @@ pub fn cl_update_smoothing_cvars() {
 /// Sync chat cvars (cl_filter_chat, cl_chat_log) to the chat system state.
 /// Called per-frame from cl_frame so runtime cvar changes take effect.
 pub fn cl_update_chat_cvars() {
-    let filter_enabled = CL_FILTER_CHAT.lock().unwrap().value != 0.0;
-    let log_enabled = CL_CHAT_LOG.lock().unwrap().value != 0.0;
+    let filter_enabled = CL_FILTER_CHAT.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
+    let log_enabled = CL_CHAT_LOG.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
     crate::cl_chat::chat_set_filter_enabled(filter_enabled);
     crate::cl_chat::chat_set_log_enabled(log_enabled);
 }
 
-// Message read/write functions — wired to myq2_common::common (imported above)
+// Message read/write functions â€” wired to myq2_common::common (imported above)
 
 /// Register a sound backend at runtime. Called by myq2-sys to provide the
 /// platform-specific audio implementation (OpenAL).
 pub fn cl_register_sound_backend(backend: Box<dyn crate::snd_dma::AudioBackend + Send>) {
-    let mut b = SOUND_BACKEND.lock().unwrap();
+    let mut b = SOUND_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     *b = Some(backend);
 }
 
-// Sound functions — delegate to SoundState methods in snd_dma.rs.
+// Sound functions â€” delegate to SoundState methods in snd_dma.rs.
 // The AudioBackend is registered at runtime by myq2-sys; if no backend is
 // registered, these are safe no-ops (SoundState.sound_started stays false).
 fn s_init() {
-    let mut sound = SOUND_STATE.lock().unwrap();
-    let mut backend = SOUND_BACKEND.lock().unwrap();
+    let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut backend = SOUND_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut be) = *backend {
         sound.s_init(be.as_mut());
     }
 }
 fn s_shutdown() {
-    let mut sound = SOUND_STATE.lock().unwrap();
-    let mut backend = SOUND_BACKEND.lock().unwrap();
+    let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut backend = SOUND_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut be) = *backend {
         sound.s_shutdown(be.as_mut());
     }
@@ -338,26 +338,26 @@ fn s_stop_all_sounds() {
 
 /// Public accessor for tent state, usable from cl_tent module.
 pub fn with_tent_state<F: FnOnce(&mut crate::cl_tent::TEntState)>(f: F) {
-    let mut tent = TENT_STATE.lock().unwrap();
+    let mut tent = TENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut tent);
 }
 
 /// Public accessor for view state, usable from other modules.
 pub fn with_view_state<F: FnOnce(&mut crate::cl_view::ViewState)>(f: F) {
-    let mut view = VIEW_STATE.lock().unwrap();
+    let mut view = VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut view);
 }
 
 /// Public accessor for CL + CLS state, usable from callback modules.
 pub fn with_cl_cls<F: FnOnce(&mut crate::client::ClientState, &mut crate::client::ClientStatic)>(f: F) {
-    let mut cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
+    let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut cl, &mut cls);
 }
 
-/// S_Activate — pause/resume audio on window focus change.
+/// S_Activate â€” pause/resume audio on window focus change.
 pub fn cl_s_activate(active: bool) {
-    let mut backend = SOUND_BACKEND.lock().unwrap();
+    let mut backend = SOUND_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut be) = *backend {
         be.activate(active);
     }
@@ -365,8 +365,8 @@ pub fn cl_s_activate(active: bool) {
 
 /// Public accessor for s_stop_all_sounds, usable from SYSTEM_FNS dispatch.
 pub fn cl_s_stop_all_sounds() {
-    let mut sound = SOUND_STATE.lock().unwrap();
-    let mut backend = SOUND_BACKEND.lock().unwrap();
+    let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut backend = SOUND_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut be) = *backend {
         let be_ref: &mut dyn crate::snd_dma::AudioBackend = be.as_mut();
         sound.s_stop_all_sounds(Some(be_ref));
@@ -379,27 +379,63 @@ pub fn cl_s_stop_all_sounds() {
 pub fn cl_s_start_local_sound(name: &str) {
     // Extract CL/CLS data first, then drop those locks before calling into
     // the sound system.  Holding CL+CLS while the sound callback executes
-    // is fragile — any future callback that touches CL/CLS would deadlock.
+    // is fragile â€” any future callback that touches CL/CLS would deadlock.
     let (playernum, realtime) = {
-        let cl = CL.lock().unwrap();
-        let cls = CLS.lock().unwrap();
+        let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         (cl.playernum, cls.realtime as i32)
     };
-    let mut sound = SOUND_STATE.lock().unwrap();
+    let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
     sound.s_start_local_sound(name, playernum, realtime, &|path| {
         myq2_common::files::fs_load_file(path)
     });
 }
 fn s_update(origin: &Vec3, forward: &Vec3, right: &Vec3, up: &Vec3) {
-    let mut sound = SOUND_STATE.lock().unwrap();
-    let mut backend = SOUND_BACKEND.lock().unwrap();
+    let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut backend = SOUND_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut be) = *backend {
-        let cl = CL.lock().unwrap();
-        let cls = CLS.lock().unwrap();
+        let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         let playernum = cl.playernum;
         let disable_screen = cls.disable_screen != 0.0;
         let current_time = cls.realtime as i32;
         let packet_loss_frames = cl.packet_loss_frames;
+
+        // Gather per-frame loop-sound inputs for s_add_loop_sounds (ambient sounds).
+        let loop_paused = CL_PAUSED.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
+        let loop_active = cls.state == crate::client::ConnState::Active;
+        let loop_sound_prepped = cl.sound_prepped;
+        let loop_num_entities = cl.frame.num_entities;
+        let loop_parse_index = cl.frame.parse_entities;
+        // sound_precache maps a sound configstring index -> sfx index (0 = none).
+        let loop_sound_precache: Vec<Option<usize>> = cl
+            .sound_precache
+            .iter()
+            .map(|&v| if v != 0 { Some(v as usize) } else { None })
+            .collect();
+        // Build the parse-entity sound table from the shared entity state.
+        let loop_parse_entities: Vec<crate::snd_dma::EntitySoundInfo> = {
+            let ent_state = ENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            ent_state
+                .cl_parse_entities
+                .iter()
+                .map(|es| crate::snd_dma::EntitySoundInfo {
+                    origin: es.origin,
+                    sound: es.sound,
+                    entnum: es.number,
+                })
+                .collect()
+        };
+        let loop_frame = crate::snd_dma::LoopSoundFrame {
+            paused: loop_paused,
+            active: loop_active,
+            sound_prepped: loop_sound_prepped,
+            num_entities: loop_num_entities,
+            parse_entities_index: loop_parse_index,
+            parse_entities: &loop_parse_entities,
+            sound_precache: &loop_sound_precache,
+        };
+
         // Drop cl/cls before calling s_update to avoid deadlocks
         drop(cl);
         drop(cls);
@@ -414,7 +450,7 @@ fn s_update(origin: &Vec3, forward: &Vec3, right: &Vec3, up: &Vec3) {
                 //   CL_GetEntitySoundOrigin(ch->entnum, origin);
                 // Uses the enhanced version which handles brush models (doors, platforms)
                 // by calculating sound origin at the center of the model bounds.
-                let ent_state = ENT_STATE.lock().unwrap();
+                let ent_state = ENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let mut org = [0.0f32; 3];
                 crate::cl_ents::cl_get_entity_sound_origin_enhanced(
                     entnum,
@@ -431,11 +467,12 @@ fn s_update(origin: &Vec3, forward: &Vec3, right: &Vec3, up: &Vec3) {
             &|name| fs_load_file(name),
             current_time,
             packet_loss_frames,
+            &loop_frame,
         );
     }
 }
 
-// Video/renderer functions — dispatched via platform callbacks registered by myq2-sys
+// Video/renderer functions â€” dispatched via platform callbacks registered by myq2-sys
 fn vid_init() { crate::platform::vid_init(); }
 fn vid_shutdown() { crate::platform::vid_shutdown(); }
 fn vid_check_changes() { crate::platform::vid_check_changes(); }
@@ -443,7 +480,7 @@ fn r_set_palette(palette: Option<&[u8]>) { crate::platform::r_set_palette(palett
 
 // Wired to crate::cl_scrn / crate::cl_cin
 fn scr_init() {
-    let mut scr = SCR_STATE.lock().unwrap();
+    let mut scr = SCR_STATE.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_scrn::scr_init(&mut scr);
 }
 fn scr_update_screen() {
@@ -451,50 +488,50 @@ fn scr_update_screen() {
     crate::console::scr_update_screen();
 }
 pub fn scr_begin_loading_plaque() {
-    // Lock order: CL → CLS → SCR_STATE (canonical order, avoids deadlock
+    // Lock order: CL â†’ CLS â†’ SCR_STATE (canonical order, avoids deadlock
     // with with_cl_cls and other code that locks CL before CLS).
     // NOTE: This version must be used from server callbacks instead of
     // console::scr_begin_loading_plaque(), because that version holds the
-    // CONSOLE_STATE lock, and com_printf → con_print also needs CONSOLE_STATE,
+    // CONSOLE_STATE lock, and com_printf â†’ con_print also needs CONSOLE_STATE,
     // causing a deadlock (std::sync::Mutex is not reentrant).
-    let mut cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
-    let mut scr = SCR_STATE.lock().unwrap();
+    let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut scr = SCR_STATE.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_scrn::scr_begin_loading_plaque(&mut scr, &mut cls, &mut cl);
 }
 fn scr_end_loading_plaque(clear: bool) {
-    let mut cls = CLS.lock().unwrap();
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_scrn::scr_end_loading_plaque(&mut cls, clear);
 }
 fn scr_stop_cinematic() {
-    let mut cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
+    let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_cin::scr_stop_cinematic(&mut cl, &mut cls);
 }
 fn scr_run_cinematic() {
-    let mut cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
+    let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_cin::scr_run_cinematic(&mut cl, &mut cls);
 }
 fn scr_finish_cinematic() {
-    let cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_cin::scr_finish_cinematic(&mut cls, &cl);
 }
 fn scr_run_console() {
-    // Lock order: CLS → SCR_STATE (consistent with canonical CL → CLS → SCR_STATE).
-    let cls = CLS.lock().unwrap();
-    let mut scr = SCR_STATE.lock().unwrap();
+    // Lock order: CLS â†’ SCR_STATE (consistent with canonical CL â†’ CLS â†’ SCR_STATE).
+    let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut scr = SCR_STATE.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_scrn::scr_run_console(&mut scr, &cls);
 }
 
-// Input functions — dispatched via platform callbacks registered by myq2-sys
+// Input functions â€” dispatched via platform callbacks registered by myq2-sys
 fn in_init() { crate::platform::in_init(); }
 fn in_shutdown() { crate::platform::in_shutdown(); }
 fn in_commands() { crate::platform::in_commands(); }
 fn in_frame() { crate::platform::in_frame(); }
 
-// System functions — use canonical implementation from myq2_common
+// System functions â€” use canonical implementation from myq2_common
 use myq2_common::common::sys_milliseconds;
 fn sys_send_key_events() { crate::platform::sys_send_key_events(); }
 fn sys_app_activate() { crate::platform::sys_app_activate(); }
@@ -506,45 +543,45 @@ fn m_add_to_server_list(adr: &NetAdr, info: &str) {
 
 // Wired to crate::cl_view
 fn v_init() {
-    let mut view = VIEW_STATE.lock().unwrap();
+    let mut view = VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_view::v_init(&mut view);
 }
 
-// In Rust, memory is freed on drop — fs_free_file is a no-op.
+// In Rust, memory is freed on drop â€” fs_free_file is a no-op.
 fn fs_free_file(_data: &[u8]) {}
 fn fs_fopen_file(name: &str) -> Option<File> {
     myq2_common::files::with_fs_ctx(|ctx| {
         ctx.fopen_file(name).map(|result| result.file)
     }).flatten()
 }
-// In Rust, File is closed on drop — this just makes the drop explicit.
+// In Rust, File is closed on drop â€” this just makes the drop explicit.
 fn fs_fclose_file(_f: File) { /* dropped */ }
 
 // Wired to myq2_common::cmodel::CModelContext::load_map
 fn cm_load_map(name: &str, clientload: bool, checksum: &mut u32) {
-    let mut ctx = CMODEL_CTX.lock().unwrap();
+    let mut ctx = CMODEL_CTX.lock().unwrap_or_else(|e| e.into_inner());
     let (_num_models, map_checksum) = ctx.load_map(name, clientload, None);
     *checksum = map_checksum;
 }
 
-// Server shutdown — dispatched via platform callbacks registered by myq2-sys
+// Server shutdown â€” dispatched via platform callbacks registered by myq2-sys
 fn sv_shutdown(msg: &str, reconnect: bool) { crate::platform::sv_shutdown(msg, reconnect); }
 
-// Client module stubs — wired to real implementations where possible
+// Client module stubs â€” wired to real implementations where possible
 fn cl_send_cmd() {
-    let mut cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
-    let mut buttons = INPUT_BUTTONS.lock().unwrap();
-    let mut cvars = INPUT_CVARS.lock().unwrap();
-    let mut timing = INPUT_TIMING.lock().unwrap();
+    let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut buttons = INPUT_BUTTONS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cvars = INPUT_CVARS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut timing = INPUT_TIMING.lock().unwrap_or_else(|e| e.into_inner());
     let sys_frame_time = sys_milliseconds() as u32;
     let anykeydown = crate::keys::ks().anykeydown != 0;
-    let cl_lightlevel = CL_LIGHTLEVEL.lock().unwrap().value;
-    let mut userinfo_modified = USERINFO_MODIFIED.lock().unwrap();
+    let cl_lightlevel = CL_LIGHTLEVEL.lock().unwrap_or_else(|e| e.into_inner()).value;
+    let mut userinfo_modified = USERINFO_MODIFIED.lock().unwrap_or_else(|e| e.into_inner());
 
     // Update strafe jump cvars from actual cvar values (R1Q2/Q2Pro feature)
-    cvars.cl_strafejump_fix = CL_STRAFEJUMP_FIX.lock().unwrap().value != 0.0;
-    cvars.cl_physics_fps = CL_PHYSICS_FPS.lock().unwrap().value;
+    cvars.cl_strafejump_fix = CL_STRAFEJUMP_FIX.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
+    cvars.cl_physics_fps = CL_PHYSICS_FPS.lock().unwrap_or_else(|e| e.into_inner()).value;
 
     // Check if attack button has an edge trigger (just pressed)
     // Bit 2 = edge triggered on down
@@ -619,18 +656,18 @@ fn cl_parse_server_message() {
     // cbuf_execute() and trigger commands lock CL/CLS internally, so calling
     // them while we hold these locks would deadlock.
     let deferred_actions = {
-        let mut cl = CL.lock().unwrap();
-        let mut cls = CLS.lock().unwrap();
-        let mut con = PARSE_CON.lock().unwrap();
-        let mut net_message = NET_MESSAGE.lock().unwrap();
-        let mut cl_entities = CL_ENTITIES.lock().unwrap();
-        let cl_shownet_value = CL_SHOWNET.lock().unwrap().value;
-        let mut scr = SCR_STATE.lock().unwrap();
-        let mut fx = FX_STATE.lock().unwrap();
-        let mut tent = TENT_STATE.lock().unwrap();
-        let mut ent_state = ENT_STATE.lock().unwrap();
-        let mut sound = SOUND_STATE.lock().unwrap();
-        let mut proj = PROJ_STATE.lock().unwrap();
+        let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut con = PARSE_CON.lock().unwrap_or_else(|e| e.into_inner());
+        let mut net_message = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cl_entities = CL_ENTITIES.lock().unwrap_or_else(|e| e.into_inner());
+        let cl_shownet_value = CL_SHOWNET.lock().unwrap_or_else(|e| e.into_inner()).value;
+        let mut scr = SCR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut fx = FX_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tent = TENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ent_state = ENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut proj = PROJ_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let mut ctx = crate::cl_parse::ParseContext {
             scr: &mut scr,
             fx: &mut fx,
@@ -665,30 +702,30 @@ fn cl_parse_server_message() {
     }
 }
 fn cl_parse_clientinfo(player: i32) {
-    let mut cl = CL.lock().unwrap();
+    let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_parse::cl_parse_clientinfo(&mut cl, player as usize);
 }
 
 // Wired to crate::cl_fx::ClFxState::cl_clear_effects
 fn cl_clear_effects() {
-    let mut fx = FX_STATE.lock().unwrap();
+    let mut fx = FX_STATE.lock().unwrap_or_else(|e| e.into_inner());
     fx.cl_clear_effects();
 }
 
 // Wired to crate::cl_tent::cl_clear_tents
 fn cl_clear_tents() {
-    let mut ts = TENT_STATE.lock().unwrap();
+    let mut ts = TENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_tent::cl_clear_tents(&mut ts);
 }
 
 fn cl_register_sounds() {
     // Phase 1: s_begin_registration + register tent sounds (uses global SOUND_STATE lock internally)
     {
-        let mut sound = SOUND_STATE.lock().unwrap();
+        let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
         sound.s_begin_registration();
     }
     {
-        let mut tent = TENT_STATE.lock().unwrap();
+        let mut tent = TENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
         // cl_register_tent_sounds_on calls s_register_sound via global lock path,
         // so SOUND_STATE must NOT be held here.
         crate::cl_tent::cl_register_tent_sounds_on(&mut tent);
@@ -696,8 +733,8 @@ fn cl_register_sounds() {
 
     // Phase 2: register configstring sounds (needs CL for configstrings, SOUND_STATE for registration)
     {
-        let mut cl = CL.lock().unwrap();
-        let mut sound = SOUND_STATE.lock().unwrap();
+        let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let loader = crate::snd_dma::snd_load_file;
         for i in 1..MAX_SOUNDS {
             if cl.configstrings[CS_SOUNDS + i].is_empty() {
@@ -712,39 +749,39 @@ fn cl_register_sounds() {
 
     // Phase 3: s_end_registration
     {
-        let mut sound = SOUND_STATE.lock().unwrap();
+        let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
         sound.s_end_registration(crate::snd_dma::snd_load_file);
     }
 }
 fn cl_prep_refresh() {
-    // Lock order: CL → CLS → SCR_STATE → VIEW_STATE (canonical order to avoid deadlock)
-    let mut cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
-    let mut scr = SCR_STATE.lock().unwrap();
-    let mut view = VIEW_STATE.lock().unwrap();
+    // Lock order: CL â†’ CLS â†’ SCR_STATE â†’ VIEW_STATE (canonical order to avoid deadlock)
+    let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut scr = SCR_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut view = VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
     // Copy viddef from console state and drop the lock immediately to avoid deadlock:
-    // cl_prep_refresh → com_printf → con_print → cs() would re-lock CONSOLE_STATE.
+    // cl_prep_refresh â†’ com_printf â†’ con_print â†’ cs() would re-lock CONSOLE_STATE.
     let viddef = crate::console::cs().viddef;
     crate::cl_view::cl_prep_refresh(&mut view, &mut scr, &mut cls, &mut cl, &viddef);
 }
 
 fn cl_predict_movement() {
-    let mut cl = CL.lock().unwrap();
-    let cls = CLS.lock().unwrap();
-    let cl_predict_value = CL_PREDICT.lock().unwrap().value;
-    let cl_showmiss_value = CL_SHOWMISS.lock().unwrap().value;
-    let cl_paused_value = CL_PAUSED.lock().unwrap().value;
-    let mut pm_airaccelerate = PM_AIRACCELERATE.lock().unwrap();
+    let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+    let cl_predict_value = CL_PREDICT.lock().unwrap_or_else(|e| e.into_inner()).value;
+    let cl_showmiss_value = CL_SHOWMISS.lock().unwrap_or_else(|e| e.into_inner()).value;
+    let cl_paused_value = CL_PAUSED.lock().unwrap_or_else(|e| e.into_inner()).value;
+    let mut pm_airaccelerate = PM_AIRACCELERATE.lock().unwrap_or_else(|e| e.into_inner());
 
     // Snapshot data needed by pmove callbacks (cl is mutably borrowed by cl_predict_movement,
-    // so callbacks can't borrow it — we copy the small fields they need).
+    // so callbacks can't borrow it â€” we copy the small fields they need).
     let pm_frame_num_entities = cl.frame.num_entities;
     let pm_frame_parse_entities = cl.frame.parse_entities;
     let pm_playernum = cl.playernum;
     let pm_model_clip = cl.model_clip.to_vec();
     // Lock parse entities once and copy the snapshot into a boxed array.
     let pm_parse_ents: Box<[myq2_common::q_shared::EntityState; MAX_PARSE_ENTITIES]> = {
-        let guard = CL_PARSE_ENTITIES.lock().unwrap();
+        let guard = CL_PARSE_ENTITIES.lock().unwrap_or_else(|e| e.into_inner());
         let v: Vec<myq2_common::q_shared::EntityState> = guard.iter().take(MAX_PARSE_ENTITIES).cloned().collect();
         let boxed_slice = v.into_boxed_slice();
         // SAFETY: we collected exactly MAX_PARSE_ENTITIES elements from guard which has that size
@@ -820,25 +857,25 @@ fn cl_predict_movement() {
 
 // Wired to crate::cl_fx::ClFxState::cl_run_dlights
 fn cl_run_dlights() {
-    let mut fx = FX_STATE.lock().unwrap();
-    let cl = CL.lock().unwrap();
-    let cls = CLS.lock().unwrap();
+    let mut fx = FX_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     fx.cl_run_dlights(cl.time as f32, cls.frametime as f32);
 }
 
 // Wired to crate::cl_fx::ClFxState::cl_run_light_styles
 fn cl_run_light_styles() {
-    let mut fx = FX_STATE.lock().unwrap();
-    let cl = CL.lock().unwrap();
+    let mut fx = FX_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
     fx.cl_run_light_styles(cl.time);
 }
 
 fn cl_check_or_download_file(name: &str) -> bool {
-    let mut cls = CLS.lock().unwrap();
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     crate::cl_parse::cl_check_or_download_file(&mut cls, name)
 }
 fn cl_download_f() {
-    let mut cls = CLS.lock().unwrap();
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     let args_str = cmd_args();
     let args: Vec<&str> = std::iter::once("download").chain(args_str.split_whitespace()).collect();
     crate::cl_parse::cl_download_f(&mut cls, &args);
@@ -895,7 +932,7 @@ pub fn cl_playdemo(name: &str) {
     com_printf(&format!("Playing demo: {}\n", demo_path));
 
     // Start demo playback using our enhanced demo system
-    let mut playback = crate::cl_demo::DEMO_PLAYBACK.lock().unwrap();
+    let mut playback = crate::cl_demo::DEMO_PLAYBACK.lock().unwrap_or_else(|e| e.into_inner());
     if let Err(e) = playback.start(&demo_path) {
         com_printf(&format!("Failed to play demo: {}\n", e));
         return;
@@ -904,7 +941,7 @@ pub fn cl_playdemo(name: &str) {
 
     // Set client state for demo playback
     {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         cls.demo_playing = true;
         cls.demo_file_path = demo_path;
         cls.state = crate::client::ConnState::Connected;
@@ -912,7 +949,7 @@ pub fn cl_playdemo(name: &str) {
 
     // Initialize client state for the demo
     {
-        let mut cl = CL.lock().unwrap();
+        let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
         *cl = crate::client::ClientState::default();
     }
 
@@ -921,14 +958,14 @@ pub fn cl_playdemo(name: &str) {
 
 /// Stop demo playback.
 pub fn cl_stopdemo() {
-    let mut playback = crate::cl_demo::DEMO_PLAYBACK.lock().unwrap();
+    let mut playback = crate::cl_demo::DEMO_PLAYBACK.lock().unwrap_or_else(|e| e.into_inner());
     if !playback.playing {
         return;
     }
 
     playback.stop();
 
-    let mut cls = CLS.lock().unwrap();
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     cls.demo_playing = false;
     cls.demo_file_path.clear();
     cls.state = crate::client::ConnState::Disconnected;
@@ -941,7 +978,7 @@ pub fn cl_stopdemo() {
 fn cl_read_demo_message() -> bool {
     use std::io::Read;
 
-    let mut playback = crate::cl_demo::DEMO_PLAYBACK.lock().unwrap();
+    let mut playback = crate::cl_demo::DEMO_PLAYBACK.lock().unwrap_or_else(|e| e.into_inner());
 
     if !playback.playing {
         return false;
@@ -949,7 +986,7 @@ fn cl_read_demo_message() -> bool {
 
     // Check if we should process a frame (handles speed and pause)
     let frame_msec = {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         (cls.frametime * 1000.0) as i32
     };
 
@@ -996,7 +1033,7 @@ fn cl_read_demo_message() -> bool {
 
     // Read the message data into NET_MESSAGE
     {
-        let mut net_msg = NET_MESSAGE.lock().unwrap();
+        let mut net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
         let msg_len_usize = msg_len as usize;
 
         // Ensure buffer is large enough
@@ -1027,7 +1064,7 @@ fn cl_read_demo_message() -> bool {
 // ============================================================
 
 fn cl_loc_f() {
-    let cl = CL.lock().unwrap();
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
     let pos = cl.predicted_origin;
     crate::cl_loc::cmd_loc(pos);
 }
@@ -1038,7 +1075,7 @@ fn cl_loclist_f() {
 
 fn cl_locadd_f() {
     let args_str = cmd_args();
-    let cl = CL.lock().unwrap();
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
     let pos = cl.predicted_origin;
     let gamedir = fs_gamedir();
     crate::cl_loc::cmd_locadd(&args_str, pos, &gamedir);
@@ -1099,7 +1136,7 @@ fn cl_hud_reset_speed_f() {
 }
 
 fn cl_timer_start_f() {
-    let cl = CL.lock().unwrap();
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
     let server_time = cl.time;
     drop(cl);
     crate::cl_hud::hud_start_timer(server_time);
@@ -1160,7 +1197,7 @@ fn cl_browser_filter_f() {
     }
     let key = cmd_argv(1);
     let value = if argc >= 3 { cmd_argv(2) } else { String::new() };
-    let mut browser = crate::cl_browser::BROWSER.lock().unwrap();
+    let mut browser = crate::cl_browser::BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     match key.to_lowercase().as_str() {
         "name" => browser.filter.name_contains = value,
         "map" => browser.filter.map_contains = value,
@@ -1216,7 +1253,7 @@ const PORT_SERVER: u16 = myq2_common::qcommon::PORT_SERVER as u16;
 const NS_CLIENT: i32 = 0;
 const NS_SERVER: i32 = 1;
 
-// Server command bytes — imported from canonical definitions
+// Server command bytes â€” imported from canonical definitions
 use myq2_common::qcommon::{SVC_SERVERDATA, SVC_CONFIGSTRING, SVC_SPAWNBASELINE, SVC_STUFFTEXT};
 
 // MAX_PARSE_ENTITIES from crate::client, MAX_MSGLEN from qcommon, MAX_SKINNAME from qfiles
@@ -1290,7 +1327,7 @@ static NET_FROM: LazyLock<Mutex<NetAdr>> = LazyLock::new(|| Mutex::new(NetAdr::d
 static CL_TIMING: LazyLock<Mutex<ClientTiming>> = LazyLock::new(|| Mutex::new(ClientTiming::new()));
 
 // ============================================================
-// Cvar handles — module statics
+// Cvar handles â€” module statics
 // ============================================================
 
 static FREELOOK: LazyLock<Mutex<CvarHandle>> = LazyLock::new(|| Mutex::new(CvarHandle::default()));
@@ -1442,7 +1479,7 @@ pub(crate) static TENT_STATE: LazyLock<Mutex<TEntState>> = LazyLock::new(|| Mute
 pub(crate) static SOUND_STATE: LazyLock<Mutex<crate::snd_dma::SoundState>> = LazyLock::new(|| Mutex::new(crate::snd_dma::SoundState::default()));
 static SOUND_BACKEND: LazyLock<Mutex<Option<Box<dyn crate::snd_dma::AudioBackend + Send>>>> = LazyLock::new(|| Mutex::new(None));
 pub(crate) static ENT_STATE: LazyLock<Mutex<crate::cl_ents::ClientEntState>> = LazyLock::new(|| Mutex::new(crate::cl_ents::ClientEntState::default()));
-/// Global projectile state — tracks client-side projectile entities for rendering.
+/// Global projectile state â€” tracks client-side projectile entities for rendering.
 /// Corresponds to the projectile subsystem in cl_ents.c (originally #if 0'd in vanilla Q2).
 pub(crate) static PROJ_STATE: LazyLock<Mutex<crate::cl_ents::ProjectileState>> = LazyLock::new(|| Mutex::new(crate::cl_ents::ProjectileState::default()));
 static CMODEL_CTX: LazyLock<Mutex<CModelContext>> = LazyLock::new(|| Mutex::new(CModelContext::default()));
@@ -1469,7 +1506,7 @@ static PRECACHE_MODEL: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
 static ENV_SUF: [&str; 6] = ["rt", "bk", "lf", "ft", "up", "dn"];
 
-// External globals — read from cvars
+// External globals â€” read from cvars
 fn allow_download_value() -> bool { myq2_common::cvar::cvar_variable_value("allow_download") != 0.0 }
 fn allow_download_players_value() -> bool { myq2_common::cvar::cvar_variable_value("allow_download_players") != 0.0 }
 fn allow_download_models_value() -> bool { myq2_common::cvar::cvar_variable_value("allow_download_models") != 0.0 }
@@ -1550,7 +1587,7 @@ fn generate_demo_name() -> String {
 // ============================================================
 
 pub fn cl_write_demo_message() {
-    let net_msg = NET_MESSAGE.lock().unwrap();
+    let net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
 
     // the first eight bytes are just packet sequencing stuff
     let len = net_msg.cursize - 8;
@@ -1569,8 +1606,8 @@ pub fn cl_write_demo_message() {
 /// Write a demo message block, optionally with compression.
 /// Format: 4-byte length (negative if compressed) + data
 fn demo_write_message(data: &[u8]) {
-    let mut demo_file = DEMO_FILE.lock().unwrap();
-    let compressed = *DEMO_COMPRESSED.lock().unwrap();
+    let mut demo_file = DEMO_FILE.lock().unwrap_or_else(|e| e.into_inner());
+    let compressed = *DEMO_COMPRESSED.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(ref mut file) = *demo_file {
         if compressed && data.len() > 100 {
@@ -1602,7 +1639,7 @@ fn demo_write_message(data: &[u8]) {
 // ============================================================
 
 pub fn cl_stop_f() {
-    let mut cls = CLS.lock().unwrap();
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
 
     if !cls.demo_recording {
         com_printf("Not recording a demo.\n");
@@ -1611,13 +1648,13 @@ pub fn cl_stop_f() {
 
     // finish up
     let len: i32 = -1;
-    let mut demo_file = DEMO_FILE.lock().unwrap();
+    let mut demo_file = DEMO_FILE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut file) = *demo_file {
         let _ = file.write_all(&len.to_le_bytes());
         let _ = file.flush();
     }
     *demo_file = None;
-    *DEMO_COMPRESSED.lock().unwrap() = false;
+    *DEMO_COMPRESSED.lock().unwrap_or_else(|e| e.into_inner()) = false;
     cls.demo_recording = false;
     com_printf("Stopped demo.\n");
 }
@@ -1631,7 +1668,7 @@ pub fn cl_stop_f() {
 
 pub fn cl_record_f(ctx: &mut myq2_common::cmd::CmdContext) {
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.demo_recording {
             com_printf("Already recording.\n");
             return;
@@ -1662,7 +1699,7 @@ pub fn cl_record_f(ctx: &mut myq2_common::cmd::CmdContext) {
     }
 
     // Set compression flag
-    *DEMO_COMPRESSED.lock().unwrap() = compressed;
+    *DEMO_COMPRESSED.lock().unwrap_or_else(|e| e.into_inner()) = compressed;
 
     // open the demo file
     // Use .dm2z extension for compressed demos (R1Q2/Q2Pro convention)
@@ -1684,10 +1721,10 @@ pub fn cl_record_f(ctx: &mut myq2_common::cmd::CmdContext) {
         }
     };
 
-    // Lock order: CL → CLS (canonical order to avoid deadlock)
-    let cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
-    *DEMO_FILE.lock().unwrap() = Some(BufWriter::new(file));
+    // Lock order: CL â†’ CLS (canonical order to avoid deadlock)
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+    *DEMO_FILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(BufWriter::new(file));
     cls.demo_recording = true;
 
     // don't start saving messages until a non-delta compressed message is received
@@ -1723,7 +1760,7 @@ pub fn cl_record_f(ctx: &mut myq2_common::cmd::CmdContext) {
 
     // baselines
     let nullstate = EntityState::default();
-    let cl_ents = CL_ENTITIES.lock().unwrap();
+    let cl_ents = CL_ENTITIES.lock().unwrap_or_else(|e| e.into_inner());
     for i in 0..MAX_EDICTS {
         let ent = &cl_ents[i].baseline;
         if ent.modelindex == 0 {
@@ -1756,7 +1793,7 @@ pub fn cl_record_f(ctx: &mut myq2_common::cmd::CmdContext) {
 
 pub fn cl_record_from_demo_f(ctx: &mut myq2_common::cmd::CmdContext) {
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.demo_recording {
             com_printf("Already recording.\n");
             return;
@@ -1788,7 +1825,7 @@ pub fn cl_record_from_demo_f(ctx: &mut myq2_common::cmd::CmdContext) {
     }
 
     // Set compression flag
-    *DEMO_COMPRESSED.lock().unwrap() = compressed;
+    *DEMO_COMPRESSED.lock().unwrap_or_else(|e| e.into_inner()) = compressed;
 
     // open the demo file
     // Use .dm2z extension for compressed demos (R1Q2/Q2Pro convention)
@@ -1810,10 +1847,10 @@ pub fn cl_record_from_demo_f(ctx: &mut myq2_common::cmd::CmdContext) {
         }
     };
 
-    // Lock order: CL → CLS (canonical order to avoid deadlock)
-    let cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
-    *DEMO_FILE.lock().unwrap() = Some(BufWriter::new(file));
+    // Lock order: CL â†’ CLS (canonical order to avoid deadlock)
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+    *DEMO_FILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(BufWriter::new(file));
     cls.demo_recording = true;
     cls.demo_waiting = false; // Don't wait when recording from demo
 
@@ -1845,7 +1882,7 @@ pub fn cl_record_from_demo_f(ctx: &mut myq2_common::cmd::CmdContext) {
 
     // baselines
     let nullstate = EntityState::default();
-    let cl_ents = CL_ENTITIES.lock().unwrap();
+    let cl_ents = CL_ENTITIES.lock().unwrap_or_else(|e| e.into_inner());
     for i in 0..MAX_EDICTS {
         let ent = &cl_ents[i].baseline;
         if ent.modelindex == 0 {
@@ -1880,7 +1917,7 @@ pub fn cl_check_autorecord() {
         return;
     }
 
-    let cls = CLS.lock().unwrap();
+    let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     if cls.demo_recording || cls.demo_playing {
         return; // Already recording or playing a demo
     }
@@ -1904,11 +1941,11 @@ pub fn cl_check_autorecord() {
         }
     };
 
-    let cl = CL.lock().unwrap();
-    let mut cls = CLS.lock().unwrap();
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
 
-    *DEMO_FILE.lock().unwrap() = Some(BufWriter::new(file));
-    *DEMO_COMPRESSED.lock().unwrap() = false; // Auto-record uses uncompressed format
+    *DEMO_FILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(BufWriter::new(file));
+    *DEMO_COMPRESSED.lock().unwrap_or_else(|e| e.into_inner()) = false; // Auto-record uses uncompressed format
     cls.demo_recording = true;
     cls.demo_waiting = true;
 
@@ -1938,7 +1975,7 @@ pub fn cl_check_autorecord() {
     }
 
     let nullstate = EntityState::default();
-    let cl_ents = CL_ENTITIES.lock().unwrap();
+    let cl_ents = CL_ENTITIES.lock().unwrap_or_else(|e| e.into_inner());
     for i in 0..MAX_EDICTS {
         let ent = &cl_ents[i].baseline;
         if ent.modelindex == 0 {
@@ -1979,8 +2016,8 @@ pub fn cmd_forward_to_server() {
     // Check for packet loss - queue chat messages if connection is degraded
     if is_chat && cmd_argc() > 1 {
         let (packet_loss, current_time) = {
-            let cl = CL.lock().unwrap();
-            let cls = CLS.lock().unwrap();
+            let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+            let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
             (cl.packet_loss_frames > 0, cls.realtime as i32)
         };
 
@@ -1994,7 +2031,7 @@ pub fn cmd_forward_to_server() {
         }
     }
 
-    let mut cls = CLS.lock().unwrap();
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
 
     if cls.state <= crate::client::ConnState::Connected || cmd.starts_with('-') || cmd.starts_with('+') {
         com_printf(&format!("Unknown command \"{}\"\n", cmd));
@@ -2023,8 +2060,8 @@ fn cl_process_chat_queue() {
 
     // Check if packet loss has cleared
     let (packet_loss, current_time, connected) = {
-        let cl = CL.lock().unwrap();
-        let cls = CLS.lock().unwrap();
+        let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         let connected = cls.state == crate::client::ConnState::Active;
         (cl.packet_loss_frames > 0, cls.realtime as i32, connected)
     };
@@ -2040,7 +2077,7 @@ fn cl_process_chat_queue() {
 
         // Check if netchan message buffer has room before writing
         let send_ok = {
-            let mut cls = CLS.lock().unwrap();
+            let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
             // Estimate required space: 1 (clc_stringcmd) + cmd + " " + message + null
             let required = 1 + cmd.len() + 1 + queued.message.len() + 1;
             if (cls.netchan.message.cursize as usize + required) < cls.netchan.message.maxsize as usize {
@@ -2057,7 +2094,7 @@ fn cl_process_chat_queue() {
         if send_ok {
             com_dprintf(&format!("[Chat sent from queue: {}]\n", queued.message));
         } else {
-            // Buffer full — re-queue for retry on next frame
+            // Buffer full â€” re-queue for retry on next frame
             chat_retry_message(queued);
         }
     }
@@ -2095,7 +2132,7 @@ pub fn cl_setenv_f(ctx: &mut myq2_common::cmd::CmdContext) {
 // ============================================================
 
 pub fn cl_forward_to_server_f(ctx: &mut myq2_common::cmd::CmdContext) {
-    let mut cls = CLS.lock().unwrap();
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
 
     if cls.state != crate::client::ConnState::Connected && cls.state != crate::client::ConnState::Active {
         com_printf(&format!("Can't \"{}\", not connected\n", ctx.cmd_argv(0)));
@@ -2127,7 +2164,7 @@ pub fn cl_map_f(ctx: &mut myq2_common::cmd::CmdContext) {
 
     // Check if we're already connecting/connected - prevent infinite loop
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.state == crate::client::ConnState::Connecting || cls.state == crate::client::ConnState::Connected {
             // We're already connected or connecting, just forward the command to the server
             drop(cls);
@@ -2153,7 +2190,7 @@ pub fn cl_map_f(ctx: &mut myq2_common::cmd::CmdContext) {
 
     // Defer remaining commands in the buffer so they don't execute during map loading.
     // This is called here (not in sv_map) because we already hold CMD_CTX lock
-    // via cbuf_execute → cmd_execute_string, and the global cbuf_copy_to_defer()
+    // via cbuf_execute â†’ cmd_execute_string, and the global cbuf_copy_to_defer()
     // would deadlock trying to re-acquire it.
     ctx.cbuf_copy_to_defer();
 }
@@ -2169,7 +2206,7 @@ pub fn cl_pause_f() {
         return;
     }
 
-    let paused = CL_PAUSED.lock().unwrap();
+    let paused = CL_PAUSED.lock().unwrap_or_else(|e| e.into_inner());
     cvar_set_value("paused", if paused.value != 0.0 { 0.0 } else { 1.0 });
 }
 
@@ -2191,7 +2228,7 @@ pub fn cl_quit_f() {
 pub fn cl_drop() {
     let disable_servercount;
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.state == crate::client::ConnState::Uninitialized {
             return;
         }
@@ -2222,7 +2259,7 @@ pub fn cl_send_connect_packet() {
     let server_protocol;
 
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         servername = cls.servername.clone();
         challenge = cls.challenge;
         // Use server's protocol version if we received it, otherwise default
@@ -2235,7 +2272,7 @@ pub fn cl_send_connect_packet() {
 
     if !net_string_to_adr(&servername, &mut adr) {
         com_printf("Bad server address\n");
-        CLS.lock().unwrap().connect_time = 0.0;
+        CLS.lock().unwrap_or_else(|e| e.into_inner()).connect_time = 0.0;
         return;
     }
     if adr.port == 0 {
@@ -2243,7 +2280,7 @@ pub fn cl_send_connect_packet() {
     }
 
     let port = cvar_variable_value("qport") as i32;
-    *USERINFO_MODIFIED.lock().unwrap() = false;
+    *USERINFO_MODIFIED.lock().unwrap_or_else(|e| e.into_inner()) = false;
 
     netchan_out_of_band_print(
         NS_CLIENT,
@@ -2268,7 +2305,7 @@ pub fn cl_check_for_resend() {
     let mut adr = NetAdr::default();
 
     let (state, realtime, connect_time, servername) = {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         (cls.state, cls.realtime, cls.connect_time, cls.servername.clone())
     };
 
@@ -2280,7 +2317,7 @@ pub fn cl_check_for_resend() {
     // before the server is ready to accept connections.
     if state == crate::client::ConnState::Disconnected && server_state >= 2 {
         {
-            let mut cls = CLS.lock().unwrap();
+            let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
             cls.state = crate::client::ConnState::Connecting;
             cls.servername = "localhost".to_string();
             cls.connect_time = cls.realtime as f32; // set connect_time for resend tracking
@@ -2301,7 +2338,7 @@ pub fn cl_check_for_resend() {
 
     if !net_string_to_adr(&servername, &mut adr) {
         com_printf("Bad server address\n");
-        CLS.lock().unwrap().state = crate::client::ConnState::Disconnected;
+        CLS.lock().unwrap_or_else(|e| e.into_inner()).state = crate::client::ConnState::Disconnected;
         return;
     }
     if adr.port == 0 {
@@ -2309,7 +2346,7 @@ pub fn cl_check_for_resend() {
     }
 
     {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         cls.connect_time = cls.realtime as f32; // for retransmit requests
     }
 
@@ -2342,7 +2379,7 @@ pub fn cl_connect_f(ctx: &mut myq2_common::cmd::CmdContext) {
     cl_disconnect();
 
     {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         cls.state = crate::client::ConnState::Connecting;
         cls.servername = server[..std::cmp::min(server.len(), MAX_OSPATH - 1)].to_string();
         cls.connect_time = -99999.0; // CL_CheckForResend() will fire immediately
@@ -2356,7 +2393,7 @@ pub fn cl_connect_f(ctx: &mut myq2_common::cmd::CmdContext) {
 // ============================================================
 
 pub fn cl_rcon_f(ctx: &mut myq2_common::cmd::CmdContext) {
-    let rcon_password = RCON_CLIENT_PASSWORD.lock().unwrap().string.clone();
+    let rcon_password = RCON_CLIENT_PASSWORD.lock().unwrap_or_else(|e| e.into_inner()).string.clone();
 
     if rcon_password.is_empty() {
         com_printf(
@@ -2380,8 +2417,8 @@ pub fn cl_rcon_f(ctx: &mut myq2_common::cmd::CmdContext) {
     net_config(true); // allow remote
 
     let to;
-    let rcon_addr = RCON_ADDRESS.lock().unwrap().string.clone();
-    let cls = CLS.lock().unwrap();
+    let rcon_addr = RCON_ADDRESS.lock().unwrap_or_else(|e| e.into_inner()).string.clone();
+    let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
 
     // mattx86: rcon_multiple_servers
     if cls.state >= crate::client::ConnState::Connected && rcon_addr.is_empty() {
@@ -2418,21 +2455,21 @@ pub fn cl_clear_state() {
 
     // Clear projectile state on disconnect/level change
     {
-        let mut proj = PROJ_STATE.lock().unwrap();
+        let mut proj = PROJ_STATE.lock().unwrap_or_else(|e| e.into_inner());
         crate::cl_ents::cl_clear_projectiles(&mut proj);
     }
 
     // wipe the entire cl structure
     com_printf("cl_main::cl_clear_state: resetting CL to default\n");
-    *CL.lock().unwrap() = crate::client::ClientState::default();
+    *CL.lock().unwrap_or_else(|e| e.into_inner()) = crate::client::ClientState::default();
     {
-        let mut ents = CL_ENTITIES.lock().unwrap();
+        let mut ents = CL_ENTITIES.lock().unwrap_or_else(|e| e.into_inner());
         for ent in ents.iter_mut() {
             *ent = crate::client::CEntity::default();
         }
     }
 
-    CLS.lock().unwrap().netchan.message.clear();
+    CLS.lock().unwrap_or_else(|e| e.into_inner()).netchan.message.clear();
 
     // Reset HUD stat smoothing on level change (R1Q2/Q2Pro feature)
     crate::cl_hud::hud_reset_stats(0, 0, 0, 0);
@@ -2448,7 +2485,7 @@ pub fn cl_clear_state() {
 
 pub fn cl_disconnect() {
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.state == crate::client::ConnState::Disconnected {
             return;
         }
@@ -2458,9 +2495,9 @@ pub fn cl_disconnect() {
     cl_trigger_disconnect();
 
     {
-        let timedemo = CL_TIMEDEMO.lock().unwrap();
+        let timedemo = CL_TIMEDEMO.lock().unwrap_or_else(|e| e.into_inner());
         if timedemo.value != 0.0 {
-            let cl = CL.lock().unwrap();
+            let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
             let time = sys_milliseconds() - cl.timedemo_start;
             if time > 0 {
                 com_printf(&format!(
@@ -2474,7 +2511,7 @@ pub fn cl_disconnect() {
     }
 
     {
-        let cl = CL.lock().unwrap();
+        let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
         vector_clear(&mut cl.refdef.blend[0..3].try_into().unwrap());
     }
 
@@ -2482,7 +2519,7 @@ pub fn cl_disconnect() {
     m_force_menu_off();
 
     {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         cls.connect_time = 0.0;
     }
 
@@ -2498,7 +2535,7 @@ pub fn cl_disconnect() {
     crate::cl_chat::chat_clear_queue();
 
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.demo_recording {
             drop(cls);
             cl_stop_f();
@@ -2507,7 +2544,7 @@ pub fn cl_disconnect() {
 
     // send a disconnect message to the server
     {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         let mut final_msg: Vec<u8> = Vec::new();
         final_msg.push(CLC_STRINGCMD as u8);
         final_msg.extend_from_slice(b"disconnect");
@@ -2521,7 +2558,7 @@ pub fn cl_disconnect() {
 
     // stop download and reset connection state
     {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         cls.download_type = crate::client::DlType::None;
         cls.state = crate::client::ConnState::Disconnected;
         cls.server_protocol = 0; // reset for next connection
@@ -2545,13 +2582,13 @@ pub fn cl_disconnect_f() {
 /// Start an auto-reconnect sequence after an unexpected disconnect.
 /// Call this before cl_disconnect() when the disconnect is unexpected.
 fn cl_start_auto_reconnect(cls: &crate::client::ClientStatic) {
-    let autoreconnect_enabled = CL_AUTORECONNECT.lock().unwrap().value != 0.0;
+    let autoreconnect_enabled = CL_AUTORECONNECT.lock().unwrap_or_else(|e| e.into_inner()).value != 0.0;
     if !autoreconnect_enabled {
         return;
     }
 
-    let max_attempts = CL_AUTORECONNECT_MAX.lock().unwrap().value as i32;
-    let delay = CL_AUTORECONNECT_DELAY.lock().unwrap().value as i32;
+    let max_attempts = CL_AUTORECONNECT_MAX.lock().unwrap_or_else(|e| e.into_inner()).value as i32;
+    let delay = CL_AUTORECONNECT_DELAY.lock().unwrap_or_else(|e| e.into_inner()).value as i32;
 
     // Only reconnect if we were actually connected to a server
     if cls.servername.is_empty() {
@@ -2560,7 +2597,7 @@ fn cl_start_auto_reconnect(cls: &crate::client::ClientStatic) {
 
     // Store reconnect state in CLS (will be updated after disconnect)
     // We use a separate static for pending state since cls will be reset
-    let mut pending = AUTO_RECONNECT_STATE.lock().unwrap();
+    let mut pending = AUTO_RECONNECT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     pending.enabled = true;
     pending.server = cls.servername.clone();
     pending.attempts = 0;
@@ -2576,20 +2613,20 @@ fn cl_start_auto_reconnect(cls: &crate::client::ClientStatic) {
 
 /// Cancel any pending auto-reconnect.
 fn cl_cancel_auto_reconnect() {
-    let mut pending = AUTO_RECONNECT_STATE.lock().unwrap();
+    let mut pending = AUTO_RECONNECT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     pending.enabled = false;
 }
 
 /// Check if we should attempt to reconnect and do so if ready.
 /// Call this from the main frame loop.
 fn cl_check_auto_reconnect() {
-    let mut pending = AUTO_RECONNECT_STATE.lock().unwrap();
+    let mut pending = AUTO_RECONNECT_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     if !pending.enabled {
         return;
     }
 
-    let cls = CLS.lock().unwrap();
+    let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
 
     // If we're already connected or connecting, cancel
     if cls.state >= crate::client::ConnState::Connecting {
@@ -2623,7 +2660,7 @@ fn cl_check_auto_reconnect() {
 
     com_printf(&format!(
         "Auto-reconnect: attempt {}, connecting to {}\n",
-        AUTO_RECONNECT_STATE.lock().unwrap().attempts,
+        AUTO_RECONNECT_STATE.lock().unwrap_or_else(|e| e.into_inner()).attempts,
         server
     ));
 
@@ -2634,7 +2671,7 @@ fn cl_check_auto_reconnect() {
 /// Called when successfully connected to a server.
 /// Resets the auto-reconnect state.
 pub fn cl_auto_reconnect_success() {
-    let mut pending = AUTO_RECONNECT_STATE.lock().unwrap();
+    let mut pending = AUTO_RECONNECT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     if pending.enabled {
         com_printf("Auto-reconnect: connection successful\n");
         pending.enabled = false;
@@ -2720,14 +2757,14 @@ pub fn cl_packet_f(ctx: &mut myq2_common::cmd::CmdContext) {
 pub fn cl_changing_f() {
     // ZOID: if we are downloading, we don't change!
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.download_type != crate::client::DlType::None {
             return;
         }
     }
 
     scr_begin_loading_plaque();
-    CLS.lock().unwrap().state = crate::client::ConnState::Connected; // not active anymore, but not disconnected
+    CLS.lock().unwrap_or_else(|e| e.into_inner()).state = crate::client::ConnState::Connected; // not active anymore, but not disconnected
     com_printf("\nChanging map...\n");
 }
 
@@ -2740,7 +2777,7 @@ pub fn cl_changing_f() {
 pub fn cl_reconnect_f() {
     // ZOID: if we are downloading, we don't change!
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.download_type != crate::client::DlType::None {
             return;
         }
@@ -2749,7 +2786,7 @@ pub fn cl_reconnect_f() {
     s_stop_all_sounds();
 
     {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.state == crate::client::ConnState::Connected {
             com_printf("reconnecting...\n");
             cls.state = crate::client::ConnState::Connected;
@@ -2759,12 +2796,12 @@ pub fn cl_reconnect_f() {
         }
     }
 
-    let mut cls = CLS.lock().unwrap();
+    let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
     if !cls.servername.is_empty() {
         if cls.state >= crate::client::ConnState::Connected {
             drop(cls);
             cl_disconnect();
-            cls = CLS.lock().unwrap();
+            cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
             cls.connect_time = (cls.realtime - 1500) as f32;
         } else {
             cls.connect_time = -99999.0; // fire immediately
@@ -2782,11 +2819,11 @@ pub fn cl_reconnect_f() {
 // ============================================================
 
 pub fn cl_parse_status_message() {
-    let mut net_msg = NET_MESSAGE.lock().unwrap();
+    let mut net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
     let s = msg_read_string(&mut net_msg);
 
     com_printf(&format!("{}\n", s));
-    let net_from = NET_FROM.lock().unwrap();
+    let net_from = NET_FROM.lock().unwrap_or_else(|e| e.into_inner());
     m_add_to_server_list(&net_from, &s);
 }
 
@@ -2835,7 +2872,7 @@ pub fn cl_ping_servers_f() {
 // ============================================================
 
 pub fn cl_skins_f() {
-    let cl = CL.lock().unwrap();
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
 
     for i in 0..MAX_CLIENTS {
         if cl.configstrings[CS_PLAYERSKINS + i].is_empty() {
@@ -2860,13 +2897,13 @@ pub fn cl_skins_f() {
 
 pub fn cl_connectionless_packet() {
     {
-        let mut net_msg = NET_MESSAGE.lock().unwrap();
+        let mut net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
         msg_begin_reading(&mut net_msg);
         msg_read_long(&mut net_msg); // skip the -1
     }
 
     let s = {
-        let mut net_msg = NET_MESSAGE.lock().unwrap();
+        let mut net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
         msg_read_string_line(&mut net_msg)
     };
 
@@ -2875,18 +2912,18 @@ pub fn cl_connectionless_packet() {
     let c = cmd_argv(0);
 
     {
-        let net_from = NET_FROM.lock().unwrap();
+        let net_from = NET_FROM.lock().unwrap_or_else(|e| e.into_inner());
         com_printf(&format!("{}: {}\n", net_adr_to_string(&net_from), c));
     }
 
     // server connection
     if c == "client_connect" {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.state == crate::client::ConnState::Connected {
             com_printf("Dup connect received.  Ignored.\n");
             return;
         }
-        let net_from = NET_FROM.lock().unwrap();
+        let net_from = NET_FROM.lock().unwrap_or_else(|e| e.into_inner());
         let qport = cvar_variable_value("qport") as i32;
         cls.quake_port = qport;
         netchan_setup(NS_CLIENT, &mut cls.netchan, *net_from, qport);
@@ -2905,7 +2942,7 @@ pub fn cl_connectionless_packet() {
     // remote command from gui front end
     if c == "cmd" {
         {
-            let net_from = NET_FROM.lock().unwrap();
+            let net_from = NET_FROM.lock().unwrap_or_else(|e| e.into_inner());
             if !net_is_local_address(&net_from) {
                 com_printf("Command packet from remote host.  Ignored.\n");
                 return;
@@ -2913,7 +2950,7 @@ pub fn cl_connectionless_packet() {
         }
         sys_app_activate();
         let s = {
-            let mut net_msg = NET_MESSAGE.lock().unwrap();
+            let mut net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
             msg_read_string(&mut net_msg)
         };
         cbuf_add_text(&s);
@@ -2924,7 +2961,7 @@ pub fn cl_connectionless_packet() {
     // print command from somewhere
     if c == "print" {
         let s = {
-            let mut net_msg = NET_MESSAGE.lock().unwrap();
+            let mut net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
             msg_read_string(&mut net_msg)
         };
         com_printf(&s);
@@ -2933,7 +2970,7 @@ pub fn cl_connectionless_packet() {
 
     // ping from somewhere
     if c == "ping" {
-        let net_from = NET_FROM.lock().unwrap();
+        let net_from = NET_FROM.lock().unwrap_or_else(|e| e.into_inner());
         netchan_out_of_band_print(NS_CLIENT, *net_from, "ack");
         return;
     }
@@ -2952,7 +2989,7 @@ pub fn cl_connectionless_packet() {
         }
 
         {
-            let mut cls = CLS.lock().unwrap();
+            let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
             cls.challenge = challenge;
             cls.server_protocol = server_protocol;
         }
@@ -2962,7 +2999,7 @@ pub fn cl_connectionless_packet() {
 
     // echo request from server
     if c == "echo" {
-        let net_from = NET_FROM.lock().unwrap();
+        let net_from = NET_FROM.lock().unwrap_or_else(|e| e.into_inner());
         netchan_out_of_band_print(NS_CLIENT, *net_from, &cmd_argv(1));
         return;
     }
@@ -2977,8 +3014,8 @@ pub fn cl_connectionless_packet() {
 // ============================================================
 
 pub fn cl_dump_packets() {
-    let mut net_from = NET_FROM.lock().unwrap();
-    let mut net_msg = NET_MESSAGE.lock().unwrap();
+    let mut net_from = NET_FROM.lock().unwrap_or_else(|e| e.into_inner());
+    let mut net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
     while net_get_packet(NS_CLIENT, &mut net_from, &mut net_msg) {
         com_printf("dumping a packet\n");
     }
@@ -2991,7 +3028,7 @@ pub fn cl_dump_packets() {
 pub fn cl_read_packets() {
     // Check if we're playing a demo
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.demo_playing {
             drop(cls);
             // Read from demo file instead of network
@@ -3005,8 +3042,8 @@ pub fn cl_read_packets() {
 
     loop {
         let got_packet = {
-            let mut net_from = NET_FROM.lock().unwrap();
-            let mut net_msg = NET_MESSAGE.lock().unwrap();
+            let mut net_from = NET_FROM.lock().unwrap_or_else(|e| e.into_inner());
+            let mut net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
             net_get_packet(NS_CLIENT, &mut net_from, &mut net_msg)
         };
 
@@ -3016,7 +3053,7 @@ pub fn cl_read_packets() {
 
         // remote command packet
         {
-            let net_msg = NET_MESSAGE.lock().unwrap();
+            let net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
             if !net_msg.data.is_empty() && net_msg.cursize >= 4 {
                 let header = i32::from_le_bytes([
                     net_msg.data[0], net_msg.data[1], net_msg.data[2], net_msg.data[3],
@@ -3030,16 +3067,16 @@ pub fn cl_read_packets() {
         }
 
         {
-            let cls = CLS.lock().unwrap();
+            let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
             if cls.state == crate::client::ConnState::Disconnected || cls.state == crate::client::ConnState::Connecting {
                 continue; // dump it if not connected
             }
         }
 
         {
-            let net_msg = NET_MESSAGE.lock().unwrap();
+            let net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
             if net_msg.cursize < 8 {
-                let net_from = NET_FROM.lock().unwrap();
+                let net_from = NET_FROM.lock().unwrap_or_else(|e| e.into_inner());
                 com_printf(&format!("{}: Runt packet\n", net_adr_to_string(&net_from)));
                 continue;
             }
@@ -3047,8 +3084,8 @@ pub fn cl_read_packets() {
 
         // packet from server
         {
-            let net_from = NET_FROM.lock().unwrap();
-            let cls = CLS.lock().unwrap();
+            let net_from = NET_FROM.lock().unwrap_or_else(|e| e.into_inner());
+            let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
             if !net_compare_adr(&net_from, &cls.netchan.remote_address) {
                 com_dprintf(&format!(
                     "{}:sequenced packet without connection\n",
@@ -3059,8 +3096,8 @@ pub fn cl_read_packets() {
         }
 
         {
-            let mut cls = CLS.lock().unwrap();
-            let mut net_msg = NET_MESSAGE.lock().unwrap();
+            let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+            let mut net_msg = NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
             if !netchan_process(&mut cls.netchan, &mut net_msg) {
                 continue; // wasn't accepted for some reason
             }
@@ -3071,13 +3108,13 @@ pub fn cl_read_packets() {
 
     // check timeout
     {
-        let cls = CLS.lock().unwrap();
-        let timeout_val = CL_TIMEOUT.lock().unwrap().value;
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+        let timeout_val = CL_TIMEOUT.lock().unwrap_or_else(|e| e.into_inner()).value;
 
         if cls.state >= crate::client::ConnState::Connected
             && (cls.realtime - cls.netchan.last_received) as f64 > timeout_val as f64 * 1000.0
         {
-            let mut cl = CL.lock().unwrap();
+            let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
             cl.timeoutcount += 1;
             if cl.timeoutcount > 5 {
                 // timeoutcount saves debugger
@@ -3090,7 +3127,7 @@ pub fn cl_read_packets() {
                 cl_disconnect();
             }
         } else {
-            CL.lock().unwrap().timeoutcount = 0;
+            CL.lock().unwrap_or_else(|e| e.into_inner()).timeoutcount = 0;
         }
     }
 }
@@ -3100,11 +3137,11 @@ pub fn cl_read_packets() {
 // ============================================================
 
 pub fn cl_fix_up_gender() {
-    let gender_auto_val = GENDER_AUTO.lock().unwrap().value;
+    let gender_auto_val = GENDER_AUTO.lock().unwrap_or_else(|e| e.into_inner()).value;
 
     if gender_auto_val != 0.0 {
         {
-            let mut gender = GENDER.lock().unwrap();
+            let mut gender = GENDER.lock().unwrap_or_else(|e| e.into_inner());
             if gender.modified {
                 // was set directly, don't override the user
                 gender.modified = false;
@@ -3112,7 +3149,7 @@ pub fn cl_fix_up_gender() {
             }
         }
 
-        let skin_str = SKIN.lock().unwrap().string.clone();
+        let skin_str = SKIN.lock().unwrap_or_else(|e| e.into_inner()).string.clone();
 
         let mut model = skin_str.clone();
 
@@ -3126,7 +3163,7 @@ pub fn cl_fix_up_gender() {
         }
 
         // mattx86: cl_defaultskin
-        let defaultskin = CL_DEFAULTSKIN.lock().unwrap().string.clone();
+        let defaultskin = CL_DEFAULTSKIN.lock().unwrap_or_else(|e| e.into_inner()).string.clone();
 
         if !defaultskin.eq_ignore_ascii_case("male/grunt") {
             let mut model2 = defaultskin.clone();
@@ -3144,7 +3181,7 @@ pub fn cl_fix_up_gender() {
                 model2 = model2[pos + 1..].to_string();
             }
 
-            let noskins_val = CL_NOSKINS.lock().unwrap().value;
+            let noskins_val = CL_NOSKINS.lock().unwrap_or_else(|e| e.into_inner()).value;
 
             if noskins_val != 0.0 {
                 if !model2.is_empty() {
@@ -3171,7 +3208,7 @@ pub fn cl_fix_up_gender() {
             cvar_set("gender", "none");
         }
 
-        GENDER.lock().unwrap().modified = false;
+        GENDER.lock().unwrap_or_else(|e| e.into_inner()).modified = false;
     }
 }
 
@@ -3202,23 +3239,23 @@ pub fn cl_snd_restart_f() {
 
 pub fn cl_request_next_download() {
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.state != crate::client::ConnState::Connected {
             return;
         }
     }
 
-    // Skip downloads entirely on listen servers — all files are already local.
+    // Skip downloads entirely on listen servers â€” all files are already local.
     // Without this, the client sends download requests to itself which never
     // complete because the server can't process them while the client blocks.
     if myq2_common::common::com_server_state() != 0 {
-        let mut precache_check = PRECACHE_CHECK.lock().unwrap();
+        let mut precache_check = PRECACHE_CHECK.lock().unwrap_or_else(|e| e.into_inner());
         // Jump past all download sections to the final registration phase
         *precache_check = (TEXTURE_CNT + 999) as i32;
         drop(precache_check);
     }
 
-    let mut precache_check = PRECACHE_CHECK.lock().unwrap();
+    let mut precache_check = PRECACHE_CHECK.lock().unwrap_or_else(|e| e.into_inner());
 
     if !allow_download_value() && *precache_check < ENV_CNT as i32 {
         *precache_check = ENV_CNT as i32;
@@ -3230,7 +3267,7 @@ pub fn cl_request_next_download() {
     if *precache_check == CS_MODELS as i32 {
         *precache_check = (CS_MODELS + 2) as i32; // 0 isn't used
         if allow_download_maps_value() {
-            let cl = CL.lock().unwrap();
+            let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
             if !cl_check_or_download_file(&cl.configstrings[CS_MODELS + 1]) {
                 return; // started a download
             }
@@ -3239,10 +3276,10 @@ pub fn cl_request_next_download() {
 
     if *precache_check >= CS_MODELS as i32 && *precache_check < (CS_MODELS + MAX_MODELS) as i32 {
         if allow_download_models_value() {
-            let mut precache_model_skin = PRECACHE_MODEL_SKIN.lock().unwrap();
+            let mut precache_model_skin = PRECACHE_MODEL_SKIN.lock().unwrap_or_else(|e| e.into_inner());
 
             while *precache_check < (CS_MODELS + MAX_MODELS) as i32 {
-                let cl = CL.lock().unwrap();
+                let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
                 let idx = *precache_check as usize;
                 if cl.configstrings[idx].is_empty() {
                     break;
@@ -3261,7 +3298,7 @@ pub fn cl_request_next_download() {
                 }
 
                 // checking for skins in the model
-                let mut precache_model = PRECACHE_MODEL.lock().unwrap();
+                let mut precache_model = PRECACHE_MODEL.lock().unwrap_or_else(|e| e.into_inner());
                 if precache_model.is_none() {
                     let data = fs_load_file(&cl.configstrings[idx]);
                     if data.is_none() {
@@ -3328,7 +3365,7 @@ pub fn cl_request_next_download() {
                 *precache_check += 1; // zero is blank
             }
             while *precache_check < (CS_SOUNDS + MAX_SOUNDS) as i32 {
-                let cl = CL.lock().unwrap();
+                let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
                 let idx = *precache_check as usize;
                 if cl.configstrings[idx].is_empty() {
                     break;
@@ -3352,7 +3389,7 @@ pub fn cl_request_next_download() {
             *precache_check += 1; // zero is blank
         }
         while *precache_check < (CS_IMAGES + MAX_IMAGES) as i32 {
-            let cl = CL.lock().unwrap();
+            let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
             let idx = *precache_check as usize;
             if cl.configstrings[idx].is_empty() {
                 break;
@@ -3375,7 +3412,7 @@ pub fn cl_request_next_download() {
                 let i = (*precache_check as usize - CS_PLAYERSKINS) / PLAYER_MULT;
                 let mut n = (*precache_check as usize - CS_PLAYERSKINS) % PLAYER_MULT;
 
-                let cl = CL.lock().unwrap();
+                let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
                 if cl.configstrings[CS_PLAYERSKINS + i].is_empty() {
                     *precache_check = (CS_PLAYERSKINS + (i + 1) * PLAYER_MULT) as i32;
                     continue;
@@ -3451,7 +3488,7 @@ pub fn cl_request_next_download() {
         *precache_check = (ENV_CNT + 1) as i32;
 
         let mut map_checksum: u32 = 0;
-        let cl = CL.lock().unwrap();
+        let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
         let map_name = cl.configstrings[CS_MODELS + 1].clone();
         let expected_str = cl.configstrings[CS_MAPCHECKSUM].clone();
         drop(cl); // release CL lock before cm_load_map
@@ -3475,7 +3512,7 @@ pub fn cl_request_next_download() {
                 let n = *precache_check as usize - ENV_CNT - 1;
                 *precache_check += 1;
 
-                let cl = CL.lock().unwrap();
+                let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
                 let fn_name = if n & 1 != 0 {
                     format!("env/{}{}.pcx", cl.configstrings[CS_SKY], ENV_SUF[n / 2])
                 } else {
@@ -3491,13 +3528,13 @@ pub fn cl_request_next_download() {
 
     if *precache_check == TEXTURE_CNT as i32 {
         *precache_check = (TEXTURE_CNT + 1) as i32;
-        *PRECACHE_TEX.lock().unwrap() = 0;
+        *PRECACHE_TEX.lock().unwrap_or_else(|e| e.into_inner()) = 0;
     }
 
     // confirm existence of textures, download any that don't exist
     if *precache_check == (TEXTURE_CNT + 1) as i32 {
         if allow_download_value() && allow_download_maps_value() {
-            let precache_tex = PRECACHE_TEX.lock().unwrap();
+            let precache_tex = PRECACHE_TEX.lock().unwrap_or_else(|e| e.into_inner());
             // Note: numtexinfo and map_surfaces would come from cmodel module
             // Placeholder: skip texture download check
             let _unused = precache_tex;
@@ -3510,8 +3547,8 @@ pub fn cl_request_next_download() {
     cl_prep_refresh();
 
     {
-        let precache_spawncount = PRECACHE_SPAWNCOUNT.lock().unwrap();
-        let mut cls = CLS.lock().unwrap();
+        let precache_spawncount = PRECACHE_SPAWNCOUNT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         msg_write_byte(&mut cls.netchan.message, CLC_STRINGCMD.into());
         msg_write_string(
             &mut cls.netchan.message,
@@ -3533,17 +3570,17 @@ pub fn cl_precache_f(ctx: &mut myq2_common::cmd::CmdContext) {
     // Yet another hack to let old demos work -- the old precache sequence
     if ctx.cmd_argc < 2 {
         let mut map_checksum: u32 = 0;
-        let cl = CL.lock().unwrap();
+        let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
         cm_load_map(&cl.configstrings[CS_MODELS + 1], true, &mut map_checksum);
         cl_register_sounds();
         cl_prep_refresh();
         return;
     }
 
-    *PRECACHE_CHECK.lock().unwrap() = CS_MODELS as i32;
-    *PRECACHE_SPAWNCOUNT.lock().unwrap() = ctx.cmd_argv(1).parse().unwrap_or(0);
-    *PRECACHE_MODEL.lock().unwrap() = None;
-    *PRECACHE_MODEL_SKIN.lock().unwrap() = 0;
+    *PRECACHE_CHECK.lock().unwrap_or_else(|e| e.into_inner()) = CS_MODELS as i32;
+    *PRECACHE_SPAWNCOUNT.lock().unwrap_or_else(|e| e.into_inner()) = ctx.cmd_argv(1).parse().unwrap_or(0);
+    *PRECACHE_MODEL.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *PRECACHE_MODEL_SKIN.lock().unwrap_or_else(|e| e.into_inner()) = 0;
 
     cl_request_next_download();
 }
@@ -3557,7 +3594,7 @@ pub fn cl_precache_f(ctx: &mut myq2_common::cmd::CmdContext) {
 
 fn cl_write_configuration_internal(filename: Option<&str>) {
     {
-        let cls = CLS.lock().unwrap();
+        let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         if cls.state == crate::client::ConnState::Uninitialized {
             return;
         }
@@ -3636,7 +3673,7 @@ pub fn cl_init_local() {
         (*crate::console::CLS_PTR).realtime = now;
     }
     {
-        let mut cls = CLS.lock().unwrap();
+        let mut cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
         cls.state = crate::client::ConnState::Disconnected;
         cls.realtime = now;
     }
@@ -3649,128 +3686,127 @@ pub fn cl_init_local() {
     }
 
     // register our variables
-    *CL_STEREO_SEPARATION.lock().unwrap() = cvar_get("cl_stereo_separation", "0.4", CVAR_ARCHIVE);
-    *CL_STEREO.lock().unwrap() = cvar_get("cl_stereo", "0", CVAR_ARCHIVE);
+    *CL_STEREO_SEPARATION.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_stereo_separation", "0.4", CVAR_ARCHIVE);
+    *CL_STEREO.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_stereo", "0", CVAR_ARCHIVE);
 
-    *CL_ADD_BLEND.lock().unwrap() = cvar_get("cl_blend", "1", CVAR_ARCHIVE);
-    *CL_ADD_LIGHTS.lock().unwrap() = cvar_get("cl_lights", "1", CVAR_ARCHIVE);
-    *CL_ADD_PARTICLES.lock().unwrap() = cvar_get("cl_particles", "1", CVAR_ARCHIVE);
-    *CL_ADD_ENTITIES.lock().unwrap() = cvar_get("cl_entities", "1", CVAR_ARCHIVE);
-    *CL_GUN.lock().unwrap() = cvar_get("cl_gun", "1", CVAR_ARCHIVE);
-    *CL_FOOTSTEPS.lock().unwrap() = cvar_get("cl_footsteps", "1", CVAR_ARCHIVE);
-    *CL_NOSKINS.lock().unwrap() = cvar_get("cl_noskins", "0", CVAR_ARCHIVE);
-    *CL_DEFAULTSKIN.lock().unwrap() = cvar_get("cl_defaultskin", "male/grunt", CVAR_ARCHIVE);
-    *CL_PREDICT.lock().unwrap() = cvar_get("cl_predict", "1", CVAR_ARCHIVE);
-    *CL_MAXFPS.lock().unwrap() = cvar_get("cl_maxfps", "90", CVAR_ARCHIVE);
+    *CL_ADD_BLEND.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_blend", "1", CVAR_ARCHIVE);
+    *CL_ADD_LIGHTS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_lights", "1", CVAR_ARCHIVE);
+    *CL_ADD_PARTICLES.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_particles", "1", CVAR_ARCHIVE);
+    *CL_ADD_ENTITIES.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_entities", "1", CVAR_ARCHIVE);
+    *CL_GUN.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_gun", "1", CVAR_ARCHIVE);
+    *CL_FOOTSTEPS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_footsteps", "1", CVAR_ARCHIVE);
+    *CL_NOSKINS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_noskins", "0", CVAR_ARCHIVE);
+    *CL_DEFAULTSKIN.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_defaultskin", "male/grunt", CVAR_ARCHIVE);
+    *CL_PREDICT.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_predict", "1", CVAR_ARCHIVE);
+    *CL_MAXFPS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_maxfps", "90", CVAR_ARCHIVE);
 
     // cl_upspeed, cl_forwardspeed, etc. registered via cl_input
     // (they are input-related cvars, handled in cl_input.rs)
 
-    *FREELOOK.lock().unwrap() = cvar_get("freelook", "1", CVAR_ARCHIVE);
-    *LOOKSPRING.lock().unwrap() = cvar_get("lookspring", "0", CVAR_ARCHIVE);
-    *LOOKSTRAFE.lock().unwrap() = cvar_get("lookstrafe", "0", CVAR_ARCHIVE);
-    *SENSITIVITY.lock().unwrap() = cvar_get("sensitivity", "5", CVAR_ARCHIVE);
+    *FREELOOK.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("freelook", "1", CVAR_ARCHIVE);
+    *LOOKSPRING.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("lookspring", "0", CVAR_ARCHIVE);
+    *LOOKSTRAFE.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("lookstrafe", "0", CVAR_ARCHIVE);
+    *SENSITIVITY.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("sensitivity", "5", CVAR_ARCHIVE);
 
-    *M_PITCH.lock().unwrap() = cvar_get("m_pitch", "0.022", CVAR_ARCHIVE);
-    *M_YAW.lock().unwrap() = cvar_get("m_yaw", "0.022", CVAR_ARCHIVE);
-    *M_FORWARD.lock().unwrap() = cvar_get("m_forward", "1", CVAR_ARCHIVE);
-    *M_SIDE.lock().unwrap() = cvar_get("m_side", "1", CVAR_ARCHIVE);
+    *M_PITCH.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("m_pitch", "0.022", CVAR_ARCHIVE);
+    *M_YAW.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("m_yaw", "0.022", CVAR_ARCHIVE);
+    *M_FORWARD.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("m_forward", "1", CVAR_ARCHIVE);
+    *M_SIDE.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("m_side", "1", CVAR_ARCHIVE);
 
-    *CL_SHOWNET.lock().unwrap() = cvar_get("cl_shownet", "0", CVAR_ZERO);
-    *CL_SHOWMISS.lock().unwrap() = cvar_get("cl_showmiss", "0", CVAR_ZERO);
-    *CL_SHOWCLAMP.lock().unwrap() = cvar_get("showclamp", "0", CVAR_ZERO);
-    *CL_TIMEOUT.lock().unwrap() = cvar_get("cl_timeout", "120", CVAR_ZERO);
-    *CL_PAUSED.lock().unwrap() = cvar_get("paused", "0", CVAR_ZERO);
-    *CL_TIMEDEMO.lock().unwrap() = cvar_get("timedemo", "0", CVAR_ZERO);
+    *CL_SHOWNET.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_shownet", "0", CVAR_ZERO);
+    *CL_SHOWMISS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_showmiss", "0", CVAR_ZERO);
+    *CL_SHOWCLAMP.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("showclamp", "0", CVAR_ZERO);
+    *CL_TIMEOUT.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_timeout", "120", CVAR_ZERO);
+    *CL_PAUSED.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("paused", "0", CVAR_ZERO);
+    *CL_TIMEDEMO.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("timedemo", "0", CVAR_ZERO);
 
-    *RCON_CLIENT_PASSWORD.lock().unwrap() = cvar_get("rcon_password", "", CVAR_ZERO);
-    *RCON_ADDRESS.lock().unwrap() = cvar_get("rcon_address", "", CVAR_ZERO);
+    *RCON_CLIENT_PASSWORD.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("rcon_password", "", CVAR_ZERO);
+    *RCON_ADDRESS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("rcon_address", "", CVAR_ZERO);
 
-    *CL_LIGHTLEVEL.lock().unwrap() = cvar_get("r_lightlevel", "0", CVAR_ZERO);
+    *CL_LIGHTLEVEL.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("r_lightlevel", "0", CVAR_ZERO);
 
     // userinfo
-    *INFO_PASSWORD.lock().unwrap() = cvar_get("password", "", CVAR_USERINFO);
-    *INFO_SPECTATOR.lock().unwrap() = cvar_get("spectator", "0", CVAR_USERINFO);
-    *CVAR_NAME.lock().unwrap() = cvar_get("name", "Player", CVAR_USERINFO | CVAR_ARCHIVE);
-    *SKIN.lock().unwrap() = cvar_get("skin", "male/grunt", CVAR_USERINFO | CVAR_ARCHIVE);
-    *RATE.lock().unwrap() = cvar_get("rate", "25000", CVAR_USERINFO | CVAR_ARCHIVE);
-    *MSG_LEVEL.lock().unwrap() = cvar_get("msg", "1", CVAR_USERINFO | CVAR_ARCHIVE);
-    *HAND.lock().unwrap() = cvar_get("hand", "2", CVAR_USERINFO | CVAR_ARCHIVE);
-    *FOV.lock().unwrap() = cvar_get("fov", "90", CVAR_USERINFO | CVAR_ARCHIVE);
-    *GENDER.lock().unwrap() = cvar_get("gender", "male", CVAR_USERINFO | CVAR_ARCHIVE);
-    *GENDER_AUTO.lock().unwrap() = cvar_get("gender_auto", "1", CVAR_ARCHIVE);
-    GENDER.lock().unwrap().modified = false; // clear this so we know when user sets it manually
+    *INFO_PASSWORD.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("password", "", CVAR_USERINFO);
+    *INFO_SPECTATOR.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("spectator", "0", CVAR_USERINFO);
+    *CVAR_NAME.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("name", "Player", CVAR_USERINFO | CVAR_ARCHIVE);
+    *SKIN.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("skin", "male/grunt", CVAR_USERINFO | CVAR_ARCHIVE);
+    *RATE.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("rate", "25000", CVAR_USERINFO | CVAR_ARCHIVE);
+    *MSG_LEVEL.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("msg", "1", CVAR_USERINFO | CVAR_ARCHIVE);
+    *HAND.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hand", "2", CVAR_USERINFO | CVAR_ARCHIVE);
+    *FOV.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("fov", "90", CVAR_USERINFO | CVAR_ARCHIVE);
+    *GENDER.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("gender", "male", CVAR_USERINFO | CVAR_ARCHIVE);
+    *GENDER_AUTO.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("gender_auto", "1", CVAR_ARCHIVE);
+    GENDER.lock().unwrap_or_else(|e| e.into_inner()).modified = false; // clear this so we know when user sets it manually
 
-    *CL_VWEP.lock().unwrap() = cvar_get("cl_vwep", "1", CVAR_ARCHIVE);
+    *CL_VWEP.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_vwep", "1", CVAR_ARCHIVE);
 
     // Event trigger cvars (R1Q2/Q2Pro feature)
-    *CL_BEGINMAPCMD.lock().unwrap() = cvar_get("cl_beginmapcmd", "", CVAR_ARCHIVE);
-    *CL_CHANGEMAPCMD.lock().unwrap() = cvar_get("cl_changemapcmd", "", CVAR_ARCHIVE);
-    *CL_DISCONNECTCMD.lock().unwrap() = cvar_get("cl_disconnectcmd", "", CVAR_ARCHIVE);
+    *CL_BEGINMAPCMD.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_beginmapcmd", "", CVAR_ARCHIVE);
+    *CL_CHANGEMAPCMD.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_changemapcmd", "", CVAR_ARCHIVE);
+    *CL_DISCONNECTCMD.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_disconnectcmd", "", CVAR_ARCHIVE);
 
     // Auto-reconnect cvars (R1Q2/Q2Pro feature)
-    *CL_AUTORECONNECT.lock().unwrap() = cvar_get("cl_autoreconnect", "0", CVAR_ARCHIVE);
-    *CL_AUTORECONNECT_DELAY.lock().unwrap() = cvar_get("cl_autoreconnect_delay", "3000", CVAR_ARCHIVE);
-    *CL_AUTORECONNECT_MAX.lock().unwrap() = cvar_get("cl_autoreconnect_max", "3", CVAR_ARCHIVE);
+    *CL_AUTORECONNECT.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_autoreconnect", "0", CVAR_ARCHIVE);
+    *CL_AUTORECONNECT_DELAY.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_autoreconnect_delay", "3000", CVAR_ARCHIVE);
+    *CL_AUTORECONNECT_MAX.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_autoreconnect_max", "3", CVAR_ARCHIVE);
 
     // Decoupled frame timing cvars (R1Q2/Q2Pro cl_async feature)
     // cl_async: 0=legacy (all subsystems run together), 1=enabled (decoupled timing)
-    *CL_ASYNC.lock().unwrap() = cvar_get("cl_async", "1", CVAR_ARCHIVE);
+    *CL_ASYNC.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_async", "1", CVAR_ARCHIVE);
     // r_maxfps: Maximum render FPS (0=unlimited, follows vsync)
-    *R_MAXFPS.lock().unwrap() = cvar_get("r_maxfps", "0", CVAR_ARCHIVE);
+    *R_MAXFPS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("r_maxfps", "0", CVAR_ARCHIVE);
     // cl_maxpackets: Maximum network packets per second
-    *CL_MAXPACKETS.lock().unwrap() = cvar_get("cl_maxpackets", "30", CVAR_ARCHIVE);
+    *CL_MAXPACKETS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_maxpackets", "30", CVAR_ARCHIVE);
     // cl_packetdup: Number of duplicate packets to send for lossy connections
-    *CL_PACKETDUP.lock().unwrap() = cvar_get("cl_packetdup", "0", CVAR_ARCHIVE);
+    *CL_PACKETDUP.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_packetdup", "0", CVAR_ARCHIVE);
 
     // FPS-independent strafe jumping (R1Q2/Q2Pro feature)
-    *CL_STRAFEJUMP_FIX.lock().unwrap() = cvar_get("cl_strafejump_fix", "1", CVAR_ARCHIVE);
-    *CL_PHYSICS_FPS.lock().unwrap() = cvar_get("cl_physics_fps", "125", CVAR_ARCHIVE);
+    *CL_STRAFEJUMP_FIX.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_strafejump_fix", "1", CVAR_ARCHIVE);
+    *CL_PHYSICS_FPS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_physics_fps", "125", CVAR_ARCHIVE);
 
     // Chat enhancements (R1Q2/Q2Pro feature)
-    *CL_FILTER_CHAT.lock().unwrap() = cvar_get("cl_filter_chat", "1", CVAR_ARCHIVE);
-    *CL_CHAT_LOG.lock().unwrap() = cvar_get("cl_chat_log", "0", CVAR_ARCHIVE);
+    *CL_FILTER_CHAT.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_filter_chat", "1", CVAR_ARCHIVE);
+    *CL_CHAT_LOG.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_chat_log", "0", CVAR_ARCHIVE);
 
     // Crosshair customization cvars (R1Q2/Q2Pro feature)
     // crosshair cvar itself is registered in v_init for style (0=none, 1-5=procedural, 6+=image)
-    *CROSSHAIR_SIZE.lock().unwrap() = cvar_get("crosshair_size", "1.0", CVAR_ARCHIVE);
-    *CROSSHAIR_COLOR.lock().unwrap() = cvar_get("crosshair_color", "240", CVAR_ARCHIVE); // 0xf0 = bright white
-    *CROSSHAIR_ALPHA.lock().unwrap() = cvar_get("crosshair_alpha", "1.0", CVAR_ARCHIVE);
-    *CROSSHAIR_GAP.lock().unwrap() = cvar_get("crosshair_gap", "2", CVAR_ARCHIVE);
-    *CROSSHAIR_THICKNESS.lock().unwrap() = cvar_get("crosshair_thickness", "2", CVAR_ARCHIVE);
-    *CROSSHAIR_DYNAMIC.lock().unwrap() = cvar_get("crosshair_dynamic", "0", CVAR_ARCHIVE);
-    *CH_HEALTH.lock().unwrap() = cvar_get("ch_health", "0", CVAR_ARCHIVE); // R1Q2/Q2Pro health-based crosshair color
+    *CROSSHAIR_SIZE.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("crosshair_size", "1.0", CVAR_ARCHIVE);
+    *CROSSHAIR_COLOR.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("crosshair_color", "240", CVAR_ARCHIVE); // 0xf0 = bright white
+    *CROSSHAIR_ALPHA.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("crosshair_alpha", "1.0", CVAR_ARCHIVE);
+    *CROSSHAIR_GAP.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("crosshair_gap", "2", CVAR_ARCHIVE);
+    *CROSSHAIR_THICKNESS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("crosshair_thickness", "2", CVAR_ARCHIVE);
+    *CROSSHAIR_DYNAMIC.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("crosshair_dynamic", "0", CVAR_ARCHIVE);
+    *CH_HEALTH.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("ch_health", "0", CVAR_ARCHIVE); // R1Q2/Q2Pro health-based crosshair color
 
     // HUD customization cvars (R1Q2/Q2Pro feature)
-    *HUD_SCALE.lock().unwrap() = cvar_get("hud_scale", "1.0", CVAR_ARCHIVE);
-    eprintln!("cl_init_local: HUD cvars registered");
-    *HUD_ALPHA.lock().unwrap() = cvar_get("hud_alpha", "1.0", CVAR_ARCHIVE);
-    *HUD_SHOW_HEALTH.lock().unwrap() = cvar_get("hud_show_health", "1", CVAR_ARCHIVE);
-    *HUD_SHOW_ARMOR.lock().unwrap() = cvar_get("hud_show_armor", "1", CVAR_ARCHIVE);
-    *HUD_SHOW_AMMO.lock().unwrap() = cvar_get("hud_show_ammo", "1", CVAR_ARCHIVE);
-    *HUD_SHOW_TIMER.lock().unwrap() = cvar_get("hud_show_timer", "0", CVAR_ARCHIVE);
-    *HUD_SHOW_FPS.lock().unwrap() = cvar_get("hud_show_fps", "0", CVAR_ARCHIVE);
-    *HUD_SHOW_SPEED.lock().unwrap() = cvar_get("hud_show_speed", "0", CVAR_ARCHIVE);
-    *HUD_SHOW_NETSTATS.lock().unwrap() = cvar_get("hud_show_netstats", "0", CVAR_ARCHIVE);
-    *HUD_MINIMAL.lock().unwrap() = cvar_get("hud_minimal", "0", CVAR_ARCHIVE);
+    *HUD_SCALE.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hud_scale", "1.0", CVAR_ARCHIVE);
+    *HUD_ALPHA.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hud_alpha", "1.0", CVAR_ARCHIVE);
+    *HUD_SHOW_HEALTH.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hud_show_health", "1", CVAR_ARCHIVE);
+    *HUD_SHOW_ARMOR.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hud_show_armor", "1", CVAR_ARCHIVE);
+    *HUD_SHOW_AMMO.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hud_show_ammo", "1", CVAR_ARCHIVE);
+    *HUD_SHOW_TIMER.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hud_show_timer", "0", CVAR_ARCHIVE);
+    *HUD_SHOW_FPS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hud_show_fps", "0", CVAR_ARCHIVE);
+    *HUD_SHOW_SPEED.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hud_show_speed", "0", CVAR_ARCHIVE);
+    *HUD_SHOW_NETSTATS.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hud_show_netstats", "0", CVAR_ARCHIVE);
+    *HUD_MINIMAL.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("hud_minimal", "0", CVAR_ARCHIVE);
     // HUD stat smoothing: enable smooth value transitions for health/armor/ammo
     cvar_get("hud_stat_smoothing", "1", CVAR_ARCHIVE);
 
     // Demo recording enhancement cvars (R1Q2/Q2Pro feature)
-    *CL_AUTORECORD.lock().unwrap() = cvar_get("cl_autorecord", "0", CVAR_ARCHIVE);
+    *CL_AUTORECORD.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_autorecord", "0", CVAR_ARCHIVE);
 
     // HTTP download cvars (R1Q2-style)
     cvar_get("cl_http_downloads", "1", CVAR_ARCHIVE);  // enabled by default
 
     // Network smoothing cvars (R1Q2/Q2Pro feature)
-    *CL_TIMENUDGE.lock().unwrap() = cvar_get("cl_timenudge", "0", CVAR_ARCHIVE);
-    *CL_EXTRAPOLATE.lock().unwrap() = cvar_get("cl_extrapolate", "1", CVAR_ARCHIVE);
-    *CL_EXTRAPOLATE_MAX.lock().unwrap() = cvar_get("cl_extrapolate_max", "50", CVAR_ARCHIVE);
-    *CL_ANIM_CONTINUE.lock().unwrap() = cvar_get("cl_anim_continue", "1", CVAR_ARCHIVE);
-    *CL_PROJECTILE_PREDICT.lock().unwrap() = cvar_get("cl_projectile_predict", "1", CVAR_ARCHIVE);
-    *CL_CUBIC_INTERP.lock().unwrap() = cvar_get("cl_cubic_interp", "1", CVAR_ARCHIVE);
-    *CL_VIEW_SMOOTH.lock().unwrap() = cvar_get("cl_view_smooth", "1", CVAR_ARCHIVE);
-    *CL_ADAPTIVE_INTERP.lock().unwrap() = cvar_get("cl_adaptive_interp", "1", CVAR_ARCHIVE);
+    *CL_TIMENUDGE.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_timenudge", "0", CVAR_ARCHIVE);
+    *CL_EXTRAPOLATE.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_extrapolate", "1", CVAR_ARCHIVE);
+    *CL_EXTRAPOLATE_MAX.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_extrapolate_max", "50", CVAR_ARCHIVE);
+    *CL_ANIM_CONTINUE.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_anim_continue", "1", CVAR_ARCHIVE);
+    *CL_PROJECTILE_PREDICT.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_projectile_predict", "1", CVAR_ARCHIVE);
+    *CL_CUBIC_INTERP.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_cubic_interp", "1", CVAR_ARCHIVE);
+    *CL_VIEW_SMOOTH.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_view_smooth", "1", CVAR_ARCHIVE);
+    *CL_ADAPTIVE_INTERP.lock().unwrap_or_else(|e| e.into_inner()) = cvar_get("cl_adaptive_interp", "1", CVAR_ARCHIVE);
 
     // register our commands
     myq2_common::cmd::cmd_add_command("cmd", Some(Box::new(cl_forward_to_server_f)));
@@ -3921,15 +3957,15 @@ static CHEATVARS: LazyLock<Mutex<Vec<CheatVar>>> = LazyLock::new(|| Mutex::new(v
 static NUM_CHEATVARS: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(0));
 
 pub fn cl_fix_cvar_cheats() {
-    let cl = CL.lock().unwrap();
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
 
     if cl.configstrings[CS_MAXCLIENTS] == "1" || cl.configstrings[CS_MAXCLIENTS].is_empty() {
         return; // single player can cheat
     }
     drop(cl);
 
-    let mut cheatvars = CHEATVARS.lock().unwrap();
-    let mut num = NUM_CHEATVARS.lock().unwrap();
+    let mut cheatvars = CHEATVARS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut num = NUM_CHEATVARS.lock().unwrap_or_else(|e| e.into_inner());
 
     // find all the cvars if we haven't done it yet
     if *num == 0 {
@@ -3995,7 +4031,7 @@ pub fn cl_frame(_msec: i32) {
 
     // Decoupled frame processing - render, physics, and network run at different rates.
     // Update timing and get cvar values
-    // NOTE: cl_frame uses lock_recover() instead of .lock().unwrap() to prevent
+    // NOTE: cl_frame uses lock_recover() instead of .lock().unwrap_or_else(|e| e.into_inner()) to prevent
     // PoisonError cascades. If any subsystem panics while holding a Mutex (e.g.,
     // renderer crash), the Mutex becomes poisoned. Without recovery, every subsequent
     // frame would also panic, freezing the game forever.
@@ -4158,14 +4194,6 @@ pub fn cl_frame(_msec: i32) {
             }
         }
 
-        // Update audio before rendering
-        // Get sound data from CL, then drop lock before calling s_update to avoid deadlock
-        let (vieworg, v_forward, v_right, v_up) = {
-            let cl = lock_recover(&CL);
-            (cl.refdef.vieworg, cl.v_forward, cl.v_right, cl.v_up)
-        };
-        s_update(&vieworg, &v_forward, &v_right, &v_up);
-
         // Check for renderer changes
         vid_check_changes();
         {
@@ -4181,8 +4209,9 @@ pub fn cl_frame(_msec: i32) {
         // Update the screen
         scr_update_screen();
 
-        // Update audio after rendering
-        // Get sound data from CL, then drop lock before calling s_update to avoid deadlock
+        // Update audio once per frame, after the screen update (matches original
+        // Quake 2 CL_Frame, which calls S_Update a single time after SCR_UpdateScreen).
+        // Get sound data from CL, then drop lock before calling s_update to avoid deadlock.
         let (vieworg, v_forward, v_right, v_up) = {
             let cl = lock_recover(&CL);
             (cl.refdef.vieworg, cl.v_forward, cl.v_right, cl.v_up)
@@ -4253,7 +4282,7 @@ pub fn cl_init() {
     m_init();
 
     scr_init();
-    CLS.lock().unwrap().disable_screen = 1.0; // don't draw yet
+    CLS.lock().unwrap_or_else(|e| e.into_inner()).disable_screen = 1.0; // don't draw yet
 
     cl_init_local();
     in_init();
@@ -4263,7 +4292,7 @@ pub fn cl_init() {
 
     // Enable screen drawing now that initialization is complete
     com_printf("cl_init: enabling screen (disable_screen=0.0)\n");
-    CLS.lock().unwrap().disable_screen = 0.0;
+    CLS.lock().unwrap_or_else(|e| e.into_inner()).disable_screen = 0.0;
 
     // Register console print callback NOW that all subsystems are initialized
     // This routes future Com_Printf calls to the console display
@@ -4282,7 +4311,7 @@ pub fn cl_init() {
 static IS_SHUTDOWN: Mutex<bool> = Mutex::new(false);
 
 pub fn cl_shutdown() {
-    let mut isdown = IS_SHUTDOWN.lock().unwrap();
+    let mut isdown = IS_SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner());
     if *isdown {
         com_printf("recursive shutdown\n");
         return;
@@ -4297,33 +4326,33 @@ pub fn cl_shutdown() {
     vid_shutdown();
 }
 
-/// IN_CenterView — centers the player's vertical view angle.
+/// IN_CenterView â€” centers the player's vertical view angle.
 /// Called from the platform layer (myq2-sys) when +mlook is released with lookspring enabled.
 pub fn cl_center_view() {
-    let mut cl = CL.lock().unwrap();
+    let mut cl = CL.lock().unwrap_or_else(|e| e.into_inner());
     let delta_angles = cl.frame.playerstate.pmove.delta_angles;
     crate::cl_input::in_center_view(&mut cl.viewangles, &delta_angles);
 }
 
-/// S_RegisterSound — public accessor for cl_tent and other modules.
+/// S_RegisterSound â€” public accessor for cl_tent and other modules.
 pub fn cl_s_register_sound(name: &str) -> i32 {
-    let mut sound = SOUND_STATE.lock().unwrap();
+    let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let loader = |n: &str| myq2_common::files::fs_load_file(n);
     sound.s_register_sound(name, &loader).map(|i| i as i32).unwrap_or(0)
 }
 
-/// S_RawSamples — queue streaming audio for cinematics.
+/// S_RawSamples â€” queue streaming audio for cinematics.
 pub fn cl_s_raw_samples(count: i32, rate: i32, width: i32, channels: i32, data: &[u8]) {
-    let mut sound = SOUND_STATE.lock().unwrap();
-    let mut backend = SOUND_BACKEND.lock().unwrap();
+    let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut backend = SOUND_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut be) = *backend {
         sound.s_raw_samples(count, rate, width, channels, data, be.as_mut());
     }
 }
 
 pub fn cl_s_start_sound(origin: Option<&Vec3>, entnum: i32, channel: i32, sfx: i32, volume: f32, attenuation: f32, timeofs: f32) {
-    let mut sound = SOUND_STATE.lock().unwrap();
-    let cl = CL.lock().unwrap();
+    let mut sound = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let cl = CL.lock().unwrap_or_else(|e| e.into_inner());
     if sfx > 0 {
         sound.s_start_sound(
             origin.copied(),

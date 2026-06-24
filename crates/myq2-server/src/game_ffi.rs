@@ -1,4 +1,4 @@
-// game_ffi.rs — FFI wrapper functions for game DLL import table
+// game_ffi.rs â€” FFI wrapper functions for game DLL import table
 //
 // These extern "C" functions implement the game_import_t interface
 // that external C game DLLs will call. They convert between C types
@@ -45,12 +45,12 @@ static FFI_SERVER_CTX: Mutex<Option<SendPtr>> = Mutex::new(None);
 /// Must be called before loading a game DLL and the context must
 /// remain valid for the lifetime of the DLL.
 pub unsafe fn set_ffi_server_context(ctx: *mut ServerContext) {
-    *FFI_SERVER_CTX.lock().unwrap() = Some(SendPtr(ctx));
+    *FFI_SERVER_CTX.lock().unwrap_or_else(|e| e.into_inner()) = Some(SendPtr(ctx));
 }
 
 /// Clear the FFI server context
 pub fn clear_ffi_server_context() {
-    *FFI_SERVER_CTX.lock().unwrap() = None;
+    *FFI_SERVER_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Access the server context from FFI callbacks
@@ -58,7 +58,7 @@ fn with_ffi_ctx<F, R>(f: F) -> R
 where
     F: FnOnce(&mut ServerContext) -> R,
 {
-    let guard = FFI_SERVER_CTX.lock().unwrap();
+    let guard = FFI_SERVER_CTX.lock().unwrap_or_else(|e| e.into_inner());
     let ptr = guard.as_ref().expect("FFI ServerContext not set").0;
     let ctx = unsafe { &mut *ptr };
     f(ctx)
@@ -341,7 +341,7 @@ unsafe extern "C" fn gi_trace(
     let surface_ptr = if let Some(surf) = rust_trace.surface {
         let boxed = Box::new(surf);
         let ptr = &*boxed as *const CSurface as *mut CSurface;
-        SURFACE_STORAGE.lock().unwrap().0.push(boxed);
+        SURFACE_STORAGE.lock().unwrap_or_else(|e| e.into_inner()).0.push(boxed);
         ptr
     } else {
         std::ptr::null_mut()
@@ -796,7 +796,7 @@ static SURFACE_STORAGE: Mutex<SurfaceStorageWrapper> = Mutex::new(SurfaceStorage
 
 /// Clear the surface storage (call on map change or periodically)
 pub fn clear_surface_storage() {
-    SURFACE_STORAGE.lock().unwrap().0.clear();
+    SURFACE_STORAGE.lock().unwrap_or_else(|e| e.into_inner()).0.clear();
 }
 
 // Static storage for cvar return values
@@ -850,7 +850,7 @@ unsafe extern "C" fn gi_cvar(
 
     let ptr = &mut storage.cvar as *mut cvar_t;
 
-    let mut guard = CVAR_STORAGE.lock().unwrap();
+    let mut guard = CVAR_STORAGE.lock().unwrap_or_else(|e| e.into_inner());
     guard.0.push(storage);
 
     ptr
@@ -889,7 +889,7 @@ unsafe extern "C" fn gi_argv(n: c_int) -> *mut c_char {
     let ptr = c_arg.as_ptr() as *mut c_char;
 
     // Store to keep alive
-    let mut guard = ARGV_STORAGE.lock().unwrap();
+    let mut guard = ARGV_STORAGE.lock().unwrap_or_else(|e| e.into_inner());
     guard.push(c_arg);
 
     ptr
@@ -901,7 +901,7 @@ unsafe extern "C" fn gi_args() -> *mut c_char {
     let c_args = CString::new(args).unwrap_or_default();
     let ptr = c_args.as_ptr() as *mut c_char;
 
-    let mut guard = ARGV_STORAGE.lock().unwrap();
+    let mut guard = ARGV_STORAGE.lock().unwrap_or_else(|e| e.into_inner());
     guard.push(c_args);
 
     ptr

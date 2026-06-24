@@ -339,6 +339,39 @@ pub mod presets {
         lut
     }
 
+    /// Enhanced Q2 look — reduces orange cast, opens up shadows, improves contrast.
+    ///
+    /// Designed as the default `r_color_grade 1` preset: desaturates the warm
+    /// orange-brown tones that dominate Q2 BSP textures, adds a cool lift to
+    /// shadow areas (mimicking ambient sky bounce), and preserves bright highlights.
+    pub fn enhanced() -> Lut3D {
+        let mut lut = Lut3D::identity();
+        lut.name = "Enhanced".to_string();
+
+        for b in 0..lut.size {
+            for g in 0..lut.size {
+                for r in 0..lut.size {
+                    let c = lut.get(r, g, b);
+
+                    // Warmth: how orange/brown this color is (excess red over blue)
+                    let warmth = (c.r - c.b).max(0.0);
+
+                    // Colour-only correction: reduce orange cast, add slight blue/green
+                    // on warm tones. Shadow lifting is handled by the r_shadowlift cvar.
+                    let new_c = Color::new(
+                        (c.r - warmth * 0.12).max(0.0),
+                        (c.g + warmth * 0.02).min(1.0),
+                        (c.b + warmth * 0.09).min(1.0),
+                    );
+
+                    lut.set(r, g, b, new_c);
+                }
+            }
+        }
+
+        lut
+    }
+
     /// Cyberpunk neon look.
     pub fn cyberpunk() -> Lut3D {
         let mut lut = Lut3D::identity();

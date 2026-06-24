@@ -1717,17 +1717,23 @@ fn w_bfg_touch(
 // --- g_func context helpers ---
 
 fn make_func_ctx(edicts: &[Edict], level: &LevelLocals) -> GameContext {
-    let (st, deathmatch) =
+    let (st, deathmatch, num_edicts) =
         crate::g_local::with_global_game_ctx(|gctx| {
-            (gctx.st.clone(), gctx.deathmatch)
-        }).unwrap_or_else(|| (SpawnTemp::default(), 0.0));
-    GameContext {
+            (gctx.st.clone(), gctx.deathmatch, gctx.num_edicts)
+        }).unwrap_or_else(|| (SpawnTemp::default(), 0.0, edicts.len() as i32));
+    let num_edicts = if num_edicts > 0 { num_edicts } else { edicts.len() as i32 };
+    let mut ctx = GameContext {
         edicts: edicts.to_vec(),
         level: level.clone(),
         st,
         deathmatch,
+        num_edicts,
         ..GameContext::default()
-    }
+    };
+    // Build entity lookup indices so g_find/g_pick_target work correctly inside
+    // think functions dispatched via this temporary context.
+    ctx.build_entity_indices();
+    ctx
 }
 
 fn sync_func_ctx(edicts: &mut [Edict], level: &mut LevelLocals, ctx: &GameContext) {

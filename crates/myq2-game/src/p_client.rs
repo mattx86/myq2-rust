@@ -1619,9 +1619,10 @@ pub fn client_think(ctx: &mut GameContext, ent_idx: usize, ucmd: &UserCmd) {
                 crate::g_chase::get_chase_target(ctx,ent_idx);
             }
         } else if !ctx.clients[ci].weapon_thunk {
+            // Call Think_Weapon from ClientThink when attack is pressed
+            // (matches original C: p_client.c lines 1729-1732)
             ctx.clients[ci].weapon_thunk = true;
-            eprintln!("player_think: calling think_weapon for entity {}", ent_idx);
-            crate::p_weapon::think_weapon(ctx,ent_idx);
+            crate::p_weapon::think_weapon(ctx, ent_idx);
         }
     }
 
@@ -1677,8 +1678,9 @@ pub fn client_begin_server_frame(ctx: &mut GameContext, ent_idx: usize) {
     }
 
     // run weapon animations if it hasn't been done by a ucmd_t
+    // (matches original C: p_client.c lines 1783-1786)
     if !ctx.clients[ci].weapon_thunk && !ctx.clients[ci].resp.spectator {
-        crate::p_weapon::think_weapon(ctx,ent_idx);
+        crate::p_weapon::think_weapon(ctx, ent_idx);
     } else {
         ctx.clients[ci].weapon_thunk = false;
     }

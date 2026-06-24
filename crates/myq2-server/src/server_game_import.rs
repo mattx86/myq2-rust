@@ -1,4 +1,4 @@
-// server_game_import.rs — Real GameImport implementation backed by server state.
+// server_game_import.rs â€” Real GameImport implementation backed by server state.
 //
 // This struct implements myq2_game::game_import::GameImport, bridging the game
 // module to the server without introducing a circular dependency. The server
@@ -47,12 +47,12 @@ static SERVER_CTX: Mutex<Option<SendPtr>> = Mutex::new(None);
 /// The caller must guarantee that `ctx` lives at least as long as any game
 /// code that might call back through the GameImport trait.
 pub unsafe fn set_server_context(ctx: *mut ServerContext) {
-    *SERVER_CTX.lock().unwrap() = Some(SendPtr(ctx));
+    *SERVER_CTX.lock().unwrap_or_else(|e| e.into_inner()) = Some(SendPtr(ctx));
 }
 
 /// Clear the global server context pointer.
 pub fn clear_server_context() {
-    *SERVER_CTX.lock().unwrap() = None;
+    *SERVER_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Access the server context. Panics if not set.
@@ -60,7 +60,7 @@ fn with_ctx<F, R>(f: F) -> R
 where
     F: FnOnce(&mut ServerContext) -> R,
 {
-    let guard = SERVER_CTX.lock().unwrap();
+    let guard = SERVER_CTX.lock().unwrap_or_else(|e| e.into_inner());
     let ptr = guard.as_ref().expect("ServerContext not set").0;
     // SAFETY: The server sets this pointer before calling game code and
     // clears it after. The pointer is valid for the duration of the game call.
@@ -251,9 +251,8 @@ impl GameImport for ServerGameImport {
 
     // ---- Collision ----
 
-    fn trace(&self, start: &Vec3, mins: &Vec3, maxs: &Vec3, end: &Vec3, _passent: i32, contentmask: i32) -> Trace {
-        // Delegate to cmodel collision
-        // Full implementation would use SV_Trace from sv_world.rs
+    fn trace(&self, start: &Vec3, mins: &Vec3, maxs: &Vec3, end: &Vec3, passent: i32, contentmask: i32) -> Trace {
+        // Trace against world BSP
         let mut tr = myq2_common::cmodel::with_cmodel_ctx(|cctx| {
             let headnode = if cctx.numcmodels > 0 {
                 cctx.map_cmodels[0].headnode
@@ -262,10 +261,72 @@ impl GameImport for ServerGameImport {
             };
             cctx.box_trace(start, end, mins, maxs, headnode, contentmask)
         }).unwrap_or_default();
-        // In C Q2, SV_Trace always ensures trace.ent points to g_edicts[0] (world entity)
-        // when no specific entity was hit. Match that behavior.
         if tr.ent_index < 0 {
             tr.ent_index = 0; // world entity
+        }
+        if tr.fraction == 0.0 {
+            return tr; // blocked immediately by world
+        }
+
+        // Collect Solid::Bsp entities (trains, doors, platforms).
+        // Their inline BSP headnodes are stored in sv.models[modelindex].
+        let bsp_ents: Vec<(i32, i32, [f32; 3])> = with_ctx(|ctx| {
+            let mut result = Vec::new();
+            if let Some(ge) = ctx.ge.as_ref() {
+                for (i, ent) in ge.edicts.iter().enumerate().skip(1) {
+                    if !ent.inuse || ent.solid != Solid::Bsp {
+                        continue;
+                    }
+                    if i as i32 == passent {
+                        continue;
+                    }
+                    let model_idx = ent.s.modelindex as usize;
+                    if model_idx == 0 || model_idx >= ctx.sv.models.len() {
+                        continue;
+                    }
+                    let headnode = ctx.sv.models[model_idx];
+                    if headnode == 0 {
+                        continue;
+                    }
+                    result.push((i as i32, headnode, ent.s.origin));
+                }
+            }
+            result
+        });
+
+        // Trace against each Solid::Bsp entity
+        for (ent_idx, headnode, ent_origin) in bsp_ents {
+            // Transform into model space by subtracting entity origin.
+            // Brush entities (trains, doors) translate but do not rotate.
+            let local_start = [
+                start[0] - ent_origin[0],
+                start[1] - ent_origin[1],
+                start[2] - ent_origin[2],
+            ];
+            let local_end = [
+                end[0] - ent_origin[0],
+                end[1] - ent_origin[1],
+                end[2] - ent_origin[2],
+            ];
+            let entity_tr = myq2_common::cmodel::cm_box_trace(
+                &local_start, &local_end, mins, maxs, headnode, contentmask,
+            );
+            if entity_tr.allsolid || entity_tr.startsolid || entity_tr.fraction < tr.fraction {
+                let mut new_tr = entity_tr;
+                new_tr.ent_index = ent_idx;
+                if tr.startsolid {
+                    tr = new_tr;
+                    tr.startsolid = true;
+                } else {
+                    tr = new_tr;
+                }
+            } else if entity_tr.startsolid {
+                tr.startsolid = true;
+            }
+        }
+
+        if tr.ent_index < 0 {
+            tr.ent_index = 0;
         }
         tr
     }
@@ -401,7 +462,7 @@ impl GameImport for ServerGameImport {
                     // up-to-date origin/mins/maxs/solid for PVS computation.
                     // In original C Q2, these are shared memory; here we must sync explicitly.
                     //
-                    // NOTE: We do NOT copy modelindex here — it's already set on ge.edicts
+                    // NOTE: We do NOT copy modelindex here â€” it's already set on ge.edicts
                     // by setmodel. Copying from GAME_CONTEXT would overwrite it with stale
                     // data (0) when called from dispatch wrapper contexts.
                     //
@@ -474,7 +535,7 @@ impl GameImport for ServerGameImport {
                     //
                     // Dispatch wrappers may overwrite these with stale clone data, but
                     // the next linkentity call will recompute them. The critical case is
-                    // the player edict, which goes through client_think → gi_linkentity
+                    // the player edict, which goes through client_think â†’ gi_linkentity
                     // directly (not through dispatch), so the values stay current.
                     with_game_ctx_ptr(|ptr| {
                         let game_ctx = unsafe { &mut *ptr };

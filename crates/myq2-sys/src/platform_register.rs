@@ -1,4 +1,4 @@
-// platform_register.rs — Register myq2-sys platform callbacks with myq2-renderer
+// platform_register.rs â€” Register myq2-sys platform callbacks with myq2-renderer
 //
 // Stores GlImpContext and VidState in a global Mutex so the callback
 // closures registered with myq2_renderer::platform can access them.
@@ -28,7 +28,7 @@ pub fn with_platform<F, R>(f: F) -> R
 where
     F: FnOnce(&mut SharedPlatformState) -> R,
 {
-    let mut guard = PLATFORM_STATE.lock().unwrap();
+    let mut guard = PLATFORM_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let state = guard.as_mut().expect("platform not initialized");
     f(state)
 }
@@ -55,7 +55,7 @@ pub fn glimp_set_mode_direct(vk_imp: &mut GlImpContext, width: &mut i32, height:
 /// with the renderer crate.
 pub fn platform_init() {
     // Store initial state
-    *PLATFORM_STATE.lock().unwrap() = Some(SharedPlatformState {
+    *PLATFORM_STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(SharedPlatformState {
         vk_imp: GlImpContext::default(),
         vid: VidState::default(),
     });
@@ -87,7 +87,7 @@ pub fn platform_init() {
             }
         })),
         vid_menu_init: Some(Box::new(|| {
-            // vid_menu_init requires CvarContext and VidDef — for now just log
+            // vid_menu_init requires CvarContext and VidDef â€” for now just log
             myq2_common::common::com_printf("VID_MenuInit (platform dispatch)\n");
         })),
         update_gamma_ramp: Some(Box::new(|| {
@@ -102,7 +102,7 @@ pub fn platform_init() {
     client_platform_register(ClientPlatformDispatch {
         vid_init: Some(Box::new(|| {
             // Temporarily extract platform callbacks to avoid holding PLATFORM_STATE during initialization
-            // This prevents nested mutex deadlocks when vid_init→r_init→r_set_mode calls glimp_* functions
+            // This prevents nested mutex deadlocks when vid_initâ†’r_initâ†’r_set_mode calls glimp_* functions
             myq2_common::common::com_printf("vid_init: Starting\n");
 
             // Phase 1: Call glimp_init while holding PLATFORM_STATE lock
@@ -114,20 +114,20 @@ pub fn platform_init() {
 
             // Phase 2: Extract vid_state first without holding any locks
             let mut vid_state = {
-                let mut guard = PLATFORM_STATE.lock().unwrap();
+                let mut guard = PLATFORM_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let s = guard.as_mut().expect("platform not initialized");
                 std::mem::take(&mut s.vid)
             };
 
             // Phase 3: Call vid_dll::vid_init_wrapper WITHOUT holding CVAR_CTX
-            // CRITICAL: vid_init→vid_check_changes→vid_load_refresh→r_init→r_register
+            // CRITICAL: vid_initâ†’vid_check_changesâ†’vid_load_refreshâ†’r_initâ†’r_register
             // will internally call cvar_get which acquires CVAR_CTX, so we must NOT
             // hold it here or we'll deadlock
             crate::vid_dll::vid_init_wrapper(&mut vid_state, 0, 0);
 
             // Phase 4: Put vid_state back
             {
-                let mut guard = PLATFORM_STATE.lock().unwrap();
+                let mut guard = PLATFORM_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 let s = guard.as_mut().expect("platform not initialized");
                 s.vid = vid_state;
             }

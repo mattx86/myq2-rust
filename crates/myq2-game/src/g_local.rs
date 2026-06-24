@@ -1,4 +1,4 @@
-// g_local.rs — Local definitions for game module
+// g_local.rs â€” Local definitions for game module
 // Converted from: myq2-original/game/g_local.h
 
 // Re-export all q_shared items so monster files can access them via `use crate::g_local::*`
@@ -8,7 +8,7 @@ pub use crate::game::{AreaLink, Solid};
 
 pub const GAMEVERSION: &str = "baseq2";
 
-// Protocol bytes — imported from the canonical definitions in myq2_common::qcommon
+// Protocol bytes â€” imported from the canonical definitions in myq2_common::qcommon
 pub use myq2_common::qcommon::{
     SVC_MUZZLEFLASH, SVC_MUZZLEFLASH2, SVC_TEMP_ENTITY,
     SVC_LAYOUT, SVC_INVENTORY, SVC_STUFFTEXT,
@@ -142,7 +142,7 @@ pub const MOVETYPE_TOSS: i32 = 7;
 pub const MOVETYPE_FLYMISSILE: i32 = 8;
 pub const MOVETYPE_BOUNCE: i32 = 9;
 
-// Solid type constants — imported from canonical game_api definitions
+// Solid type constants â€” imported from canonical game_api definitions
 pub use myq2_common::game_api::{SOLID_NOT, SOLID_TRIGGER, SOLID_BBOX, SOLID_BSP};
 
 // Dead flags
@@ -345,7 +345,7 @@ pub const ITEM_TARGETS_USED: i32 = 0x00040000;
 pub const FFL_SPAWNTEMP: i32 = 1;
 pub const FFL_NOSPAWN: i32 = 2;
 
-// Multicast types — imported from canonical game_api definitions
+// Multicast types â€” imported from canonical game_api definitions
 pub use myq2_common::game_api::{
     MULTICAST_ALL, MULTICAST_PHS, MULTICAST_PVS,
     MULTICAST_ALL_R, MULTICAST_PHS_R, MULTICAST_PVS_R,
@@ -565,7 +565,7 @@ pub struct MonsterInfo {
     pub linkcount: i32,
     pub power_armor_type: i32,
     pub power_armor_power: i32,
-    // AI function callbacks — stored as indices into dispatch tables
+    // AI function callbacks â€” stored as indices into dispatch tables
     pub stand_fn: Option<usize>,
     pub idle_fn: Option<usize>,
     pub search_fn: Option<usize>,
@@ -783,7 +783,7 @@ pub struct Edict {
     pub ideal_yaw: f32,
 
     pub nextthink: f32,
-    // Function callbacks — stored as indices into dispatch tables
+    // Function callbacks â€” stored as indices into dispatch tables
     pub prethink_fn: Option<usize>,
     pub think_fn: Option<usize>,
     pub blocked_fn: Option<usize>,
@@ -996,7 +996,7 @@ impl Default for PlayerTrailState {
 // Unified Game Context
 // ============================================================
 
-/// Unified game context — replaces all per-module GameContext variants.
+/// Unified game context â€” replaces all per-module GameContext variants.
 /// Holds all game state needed by any game module.
 pub struct GameCtx {
     // Core state
@@ -1277,7 +1277,7 @@ static GLOBAL_GAME_CTX: Mutex<Option<GameCtx>> = Mutex::new(None);
 
 /// Initialize the global game context. Called once at game init time.
 pub fn init_global_game_ctx(ctx: GameCtx) {
-    *GLOBAL_GAME_CTX.lock().unwrap() = Some(ctx);
+    *GLOBAL_GAME_CTX.lock().unwrap_or_else(|e| e.into_inner()) = Some(ctx);
 }
 
 /// Access the global game context via a closure.
@@ -1286,13 +1286,13 @@ pub fn with_global_game_ctx<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut GameCtx) -> R,
 {
-    let mut guard = GLOBAL_GAME_CTX.lock().unwrap();
+    let mut guard = GLOBAL_GAME_CTX.lock().unwrap_or_else(|e| e.into_inner());
     guard.as_mut().map(f)
 }
 
 /// Take the global game context out (for transferring ownership).
 pub fn take_global_game_ctx() -> Option<GameCtx> {
-    GLOBAL_GAME_CTX.lock().unwrap().take()
+    GLOBAL_GAME_CTX.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
 // ============================================================

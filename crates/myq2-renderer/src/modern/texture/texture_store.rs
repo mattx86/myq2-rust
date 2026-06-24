@@ -213,6 +213,7 @@ pub fn create_descriptor_for_view(
     id: i32,
     image_view: vk::ImageView,
     sampler: vk::Sampler,
+    image_layout: vk::ImageLayout,
 ) {
     let mut guard = TEXTURE_STORE.lock().unwrap_or_else(|e| e.into_inner());
     let store = match guard.as_mut() {
@@ -242,7 +243,7 @@ pub fn create_descriptor_for_view(
             let image_info_desc = vk::DescriptorImageInfo::default()
                 .sampler(sampler)
                 .image_view(image_view)
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                .image_layout(image_layout);
 
             let write = vk::WriteDescriptorSet::default()
                 .dst_set(ds)

@@ -1,4 +1,4 @@
-// cvar.rs — dynamic variable tracking
+// cvar.rs â€” dynamic variable tracking
 // Converted from: myq2-original/qcommon/cvar.c
 
 use crate::common::{com_printf, com_dprintf};
@@ -22,7 +22,7 @@ pub struct Cvar {
 }
 
 /// Deferred actions that must be executed AFTER releasing the CVAR_CTX lock.
-/// This prevents CVAR_CTX → FS_CTX deadlocks from callbacks that call into
+/// This prevents CVAR_CTX â†’ FS_CTX deadlocks from callbacks that call into
 /// the filesystem (fs_set_gamedir, fs_exec_autoexec).
 #[derive(Clone, Debug)]
 pub enum DeferredCvarAction {
@@ -511,22 +511,22 @@ fn take_deferred_actions(ctx: &mut CvarContext) -> Vec<DeferredCvarAction> {
 }
 
 pub fn cvar_init() {
-    let mut g = CVAR_CTX.lock().unwrap();
+    let mut g = CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner());
     *g = Some(CvarContext::new());
 }
 
 pub fn cvar_shutdown() {
-    let mut g = CVAR_CTX.lock().unwrap();
+    let mut g = CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner());
     *g = None;
 }
 
 pub fn cvar_get(name: &str, value: &str, flags: i32) -> Option<usize> {
-    CVAR_CTX.lock().unwrap().as_mut().and_then(|c| c.get(name, Some(value), flags))
+    CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|c| c.get(name, Some(value), flags))
 }
 
 pub fn cvar_set(name: &str, value: &str) {
     let actions = {
-        let mut g = CVAR_CTX.lock().unwrap();
+        let mut g = CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref mut c) = *g {
             c.set(name, value);
             take_deferred_actions(c)
@@ -539,7 +539,7 @@ pub fn cvar_set(name: &str, value: &str) {
 
 pub fn cvar_set_value(name: &str, value: f32) {
     let actions = {
-        let mut g = CVAR_CTX.lock().unwrap();
+        let mut g = CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref mut c) = *g {
             c.set_value(name, value);
             take_deferred_actions(c)
@@ -552,7 +552,7 @@ pub fn cvar_set_value(name: &str, value: f32) {
 
 pub fn cvar_force_set(name: &str, value: &str) {
     let actions = {
-        let mut g = CVAR_CTX.lock().unwrap();
+        let mut g = CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref mut c) = *g {
             c.force_set(name, value);
             take_deferred_actions(c)
@@ -564,42 +564,42 @@ pub fn cvar_force_set(name: &str, value: &str) {
 }
 
 pub fn cvar_variable_value(name: &str) -> f32 {
-    CVAR_CTX.lock().unwrap().as_ref().map_or(0.0, |c| c.variable_value(name))
+    CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0.0, |c| c.variable_value(name))
 }
 
 pub fn cvar_variable_string(name: &str) -> String {
-    CVAR_CTX.lock().unwrap().as_ref().map_or(String::new(), |c| c.variable_string(name).to_string())
+    CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(String::new(), |c| c.variable_string(name).to_string())
 }
 
 pub fn cvar_userinfo() -> String {
-    CVAR_CTX.lock().unwrap().as_ref().map_or(String::new(), |c| c.userinfo())
+    CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(String::new(), |c| c.userinfo())
 }
 
 pub fn cvar_serverinfo() -> String {
-    CVAR_CTX.lock().unwrap().as_ref().map_or(String::new(), |c| c.serverinfo())
+    CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(String::new(), |c| c.serverinfo())
 }
 
 pub fn cvar_write_variables(f: &mut dyn std::io::Write) {
-    if let Some(ref c) = *CVAR_CTX.lock().unwrap() {
+    if let Some(ref c) = *CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()) {
         let _ = c.write_variables(f);
     }
 }
 
 pub fn cvar_write_address_book(f: &mut dyn std::io::Write) {
-    if let Some(ref c) = *CVAR_CTX.lock().unwrap() {
+    if let Some(ref c) = *CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()) {
         let _ = c.write_address_book(f);
     }
 }
 
 pub fn cvar_full_set(name: &str, value: &str, flags: i32) {
-    if let Some(ref mut c) = *CVAR_CTX.lock().unwrap() {
+    if let Some(ref mut c) = *CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()) {
         c.full_set(name, value, flags);
     }
 }
 
 pub fn cvar_get_latched_vars() {
     let actions = {
-        let mut g = CVAR_CTX.lock().unwrap();
+        let mut g = CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref mut c) = *g {
             c.get_latched_vars();
             take_deferred_actions(c)
@@ -617,7 +617,7 @@ where
     F: FnOnce(&mut CvarContext) -> R,
 {
     let (result, actions) = {
-        let mut g = CVAR_CTX.lock().unwrap();
+        let mut g = CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner());
         match g.as_mut() {
             Some(c) => {
                 let r = f(c);
@@ -633,21 +633,21 @@ where
 
 /// Get a cvar's float value by handle (index). Returns 0.0 if invalid.
 pub fn cvar_value_by_handle(handle: usize) -> f32 {
-    CVAR_CTX.lock().unwrap().as_ref().map_or(0.0, |c| {
+    CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0.0, |c| {
         c.cvar_vars.get(handle).map_or(0.0, |v| v.value)
     })
 }
 
 /// Check if a cvar has been modified, by handle (index). Returns false if invalid.
 pub fn cvar_modified_by_handle(handle: usize) -> bool {
-    CVAR_CTX.lock().unwrap().as_ref().is_some_and(|c| {
+    CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|c| {
         c.cvar_vars.get(handle).is_some_and(|v| v.modified)
     })
 }
 
 /// Clear the modified flag on a cvar, by handle (index).
 pub fn cvar_clear_modified_by_handle(handle: usize) {
-    if let Some(ref mut c) = *CVAR_CTX.lock().unwrap() {
+    if let Some(ref mut c) = *CVAR_CTX.lock().unwrap_or_else(|e| e.into_inner()) {
         if let Some(v) = c.cvar_vars.get_mut(handle) {
             v.modified = false;
         }

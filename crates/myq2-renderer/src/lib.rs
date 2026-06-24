@@ -1,4 +1,4 @@
-#![allow(dead_code, unused_variables, unused_assignments, unused_mut, static_mut_refs, non_upper_case_globals, unused_unsafe)]
+#![allow(dead_code, unused_variables, unused_assignments, unused_mut, static_mut_refs, non_upper_case_globals)]
 #![allow(clippy::needless_return, clippy::too_many_arguments, clippy::collapsible_if,
          clippy::collapsible_else_if, clippy::field_reassign_with_default,
          clippy::manual_range_contains, clippy::single_match, clippy::comparison_chain,

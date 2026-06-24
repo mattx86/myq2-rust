@@ -15,7 +15,7 @@ static GLOBAL_VID_STATE: Mutex<Option<VidState>> = Mutex::new(None);
 
 /// Store a VidState in the global so console commands can access it.
 pub fn vid_set_global_state(vid: VidState) {
-    *GLOBAL_VID_STATE.lock().unwrap() = Some(vid);
+    *GLOBAL_VID_STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(vid);
 }
 
 /// Access the global VidState with a closure.
@@ -23,7 +23,7 @@ pub fn with_vid_state<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut VidState) -> R,
 {
-    GLOBAL_VID_STATE.lock().unwrap().as_mut().map(f)
+    GLOBAL_VID_STATE.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(f)
 }
 
 // ============================================================
@@ -137,7 +137,7 @@ impl VidState {
 // Win32 helper stubs
 // ============================================================
 
-/// WIN_DisableAltTab — no-op on modern Windows.
+/// WIN_DisableAltTab â€” no-op on modern Windows.
 /// The original Win95/NT RegisterHotKey approach is obsolete; modern games use
 /// borderless fullscreen or the OS's built-in game mode instead.
 pub fn win_disable_alt_tab(vid: &mut VidState) {
@@ -147,7 +147,7 @@ pub fn win_disable_alt_tab(vid: &mut VidState) {
     vid.s_alttab_disabled = true;
 }
 
-/// WIN_EnableAltTab — no-op on modern Windows.
+/// WIN_EnableAltTab â€” no-op on modern Windows.
 /// See win_disable_alt_tab for rationale.
 pub fn win_enable_alt_tab(vid: &mut VidState) {
     if vid.s_alttab_disabled {
@@ -159,7 +159,7 @@ pub fn win_enable_alt_tab(vid: &mut VidState) {
 // DLL glue
 // ============================================================
 
-/// VID_Printf — route print messages by level.
+/// VID_Printf â€” route print messages by level.
 pub fn vid_printf(print_level: i32, msg: &str) {
     match print_level {
         x if x == PRINT_ALL => {
@@ -186,7 +186,7 @@ pub fn vid_printf(print_level: i32, msg: &str) {
 // Key mapping
 // ============================================================
 
-/// MapKey — map from Windows key lParam to Quake keynum.
+/// MapKey â€” map from Windows key lParam to Quake keynum.
 pub fn map_key(key: i32) -> i32 {
     let modified = ((key >> 16) & 255) as usize;
     if modified > 127 {
@@ -221,7 +221,7 @@ pub fn map_key(key: i32) -> i32 {
     }
 }
 
-/// AppActivate — handle window activation/deactivation.
+/// AppActivate â€” handle window activation/deactivation.
 pub fn app_activate(
     vid: &mut VidState,
     cvars: &CvarContext,
@@ -256,7 +256,7 @@ pub fn app_activate(
     }
 }
 
-/// MainWndProc — stub; in the Rust port, window messages will be handled by
+/// MainWndProc â€” stub; in the Rust port, window messages will be handled by
 /// the windowing library (e.g., winit). This is kept as documentation of the
 /// original message handling flow.
 pub fn main_wnd_proc_stub() {
@@ -273,12 +273,12 @@ pub fn main_wnd_proc_stub() {
 // Video mode queries
 // ============================================================
 
-/// VID_Restart_f — console command to re-start video mode.
+/// VID_Restart_f â€” console command to re-start video mode.
 pub fn vid_restart_f(vid: &mut VidState) {
     vid.vid_ref_modified = true;
 }
 
-/// VID_Front_f — bring game window to foreground.
+/// VID_Front_f â€” bring game window to foreground.
 pub fn vid_front_f() {
     if let Ok(guard) = crate::platform_register::PLATFORM_STATE.lock() {
         if let Some(ref state) = *guard {
@@ -289,7 +289,7 @@ pub fn vid_front_f() {
     }
 }
 
-/// VID_GetModeInfo — retrieve width/height for a given video mode.
+/// VID_GetModeInfo â€” retrieve width/height for a given video mode.
 pub fn vid_get_mode_info(mode: i32) -> Option<(i32, i32)> {
     if mode < 0 || (mode as usize) >= VID_NUM_MODES {
         return None;
@@ -298,7 +298,7 @@ pub fn vid_get_mode_info(mode: i32) -> Option<(i32, i32)> {
     Some((m.width, m.height))
 }
 
-/// VID_UpdateWindowPosAndSize — reposition window via winit.
+/// VID_UpdateWindowPosAndSize â€” reposition window via winit.
 pub fn vid_update_window_pos_and_size(_vid: &VidState, x: f32, y: f32) {
     // NOTE: This function may be called while PLATFORM_STATE is already locked
     // (from vid_check_changes callback). Use try_lock to avoid deadlock,
@@ -315,7 +315,7 @@ pub fn vid_update_window_pos_and_size(_vid: &VidState, x: f32, y: f32) {
     // The caller (vid_check_changes) should pass the window or vk_imp reference directly.
 }
 
-/// VID_UpdateWindowPosAndSize — called when already holding PLATFORM_STATE lock.
+/// VID_UpdateWindowPosAndSize â€” called when already holding PLATFORM_STATE lock.
 /// Accepts a GlImpContext reference to avoid re-locking.
 pub fn vid_update_window_pos_direct(vk_imp: &crate::glw_imp::GlImpContext, x: f32, y: f32) {
     if let Some(window) = vk_imp.window() {
@@ -337,7 +337,7 @@ pub fn vid_free_reflib(vid: &mut VidState) {
     vid.reflib_active = false;
 }
 
-/// VID_LoadRefresh — load/initialize the OpenGL renderer.
+/// VID_LoadRefresh â€” load/initialize the OpenGL renderer.
 pub fn vid_load_refresh(vid: &mut VidState, hinstance: usize, hwnd: usize) -> bool {
     com_printf("VID_LoadRefresh: Starting\n");
     com_printf(&format!("VID_LoadRefresh: reflib_active = {}\n", vid.reflib_active));
@@ -365,7 +365,7 @@ pub fn vid_load_refresh(vid: &mut VidState, hinstance: usize, hwnd: usize) -> bo
     true
 }
 
-/// VID_CheckChanges — called once per frame before drawing to check for video
+/// VID_CheckChanges â€” called once per frame before drawing to check for video
 /// mode parameter changes.
 /// `vk_imp` is passed when called from within with_platform() to avoid re-locking PLATFORM_STATE.
 pub fn vid_check_changes(vid: &mut VidState, cvars: &mut CvarContext, cls_disable_screen: &mut bool, force_refdef: &mut bool, refresh_prepped: &mut bool, hinstance: usize, hwnd: usize, key_dest: i32, vk_imp: Option<&crate::glw_imp::GlImpContext>) {
@@ -483,7 +483,7 @@ pub fn vid_init_wrapper(vid: &mut VidState, hinstance: usize, hwnd: usize) {
     vid.vid_ref_modified = true;
 
     // Phase 2: Start the graphics mode WITHOUT holding CVAR_CTX
-    // This allows r_init→r_register→cvar_get to acquire CVAR_CTX without deadlock
+    // This allows r_initâ†’r_registerâ†’cvar_get to acquire CVAR_CTX without deadlock
     // TEMP: Call vid_check_changes_no_cvars which will be a simplified version
     let mut disable_screen = false;
     let mut force_refdef = false;
@@ -499,7 +499,7 @@ pub fn vid_init_wrapper(vid: &mut VidState, hinstance: usize, hwnd: usize) {
     }
 }
 
-/// VID_Init — initialize the video subsystem.
+/// VID_Init â€” initialize the video subsystem.
 pub fn vid_init(vid: &mut VidState, cvars: &mut CvarContext, hinstance: usize, hwnd: usize) {
     vid.vid_ref = Some(cvars.get_or_create("vid_ref", "gl", CVAR_ARCHIVE));
     vid.vid_xpos = Some(cvars.get_or_create("vid_xpos", "3", CVAR_ARCHIVE));

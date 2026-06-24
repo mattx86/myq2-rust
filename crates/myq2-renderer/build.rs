@@ -67,6 +67,11 @@ fn main() {
         "fsr2_temporal.frag.glsl",
         "motion_vectors.vert.glsl",
         "motion_vectors.frag.glsl",
+        // D3 lighting / shadow cubemap shaders
+        "shadow_cube.vert.glsl",
+        "shadow_cube.frag.glsl",
+        "world_lit.vert.glsl",
+        "world_lit.frag.glsl",
     ];
 
     // Ray tracing shaders (in rt/ subdirectory)

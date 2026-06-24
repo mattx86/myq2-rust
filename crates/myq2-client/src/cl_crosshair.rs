@@ -267,7 +267,7 @@ impl CrosshairConfig {
         let thickness = self.effective_thickness();
 
         // Calculate diagonal positions
-        let offset = ((gap as f32) * 0.707) as i32; // cos(45) ≈ 0.707
+        let offset = ((gap as f32) * 0.707) as i32; // cos(45) â‰ˆ 0.707
         let arm_len = ((length as f32) * 0.707) as i32;
 
         // Four diagonal arms (approximated with small rectangles)
@@ -340,43 +340,43 @@ pub static CROSSHAIR_CONFIG: LazyLock<Mutex<CrosshairConfig>> =
 
 /// Check if the current crosshair style is procedural (not image-based)
 pub fn crosshair_is_procedural() -> bool {
-    let config = CROSSHAIR_CONFIG.lock().unwrap();
+    let config = CROSSHAIR_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     config.style != CrosshairStyle::None && config.style != CrosshairStyle::Image
 }
 
 /// Update crosshair configuration from cvars
 pub fn crosshair_update_config() {
-    let mut config = CROSSHAIR_CONFIG.lock().unwrap();
+    let mut config = CROSSHAIR_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     config.update_from_cvars();
 }
 
 /// Update dynamic crosshair state
 pub fn crosshair_update_dynamic(moving: bool, attacking: bool, delta_time: f32) {
-    let mut config = CROSSHAIR_CONFIG.lock().unwrap();
+    let mut config = CROSSHAIR_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     config.update_dynamic(moving, attacking, delta_time);
 }
 
 /// Draw the crosshair at the screen center
 pub fn crosshair_draw(center_x: i32, center_y: i32) {
-    let config = CROSSHAIR_CONFIG.lock().unwrap();
+    let config = CROSSHAIR_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     config.draw(center_x, center_y);
 }
 
 /// Draw the crosshair at the screen center with health-based coloring
 pub fn crosshair_draw_with_health(center_x: i32, center_y: i32, health: i32) {
-    let config = CROSSHAIR_CONFIG.lock().unwrap();
+    let config = CROSSHAIR_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     config.draw_with_health(center_x, center_y, Some(health));
 }
 
 /// Check if health-based crosshair coloring is enabled
 pub fn crosshair_health_enabled() -> bool {
-    let config = CROSSHAIR_CONFIG.lock().unwrap();
+    let config = CROSSHAIR_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     config.ch_health
 }
 
 /// Print crosshair info
 pub fn cmd_crosshair_info() {
-    let config = CROSSHAIR_CONFIG.lock().unwrap();
+    let config = CROSSHAIR_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     com_printf(&format!(
         "Crosshair Info:\n  Style: {:?}\n  Size: {:.1}x\n  Color: {}\n  Alpha: {:.2}\n  Gap: {}\n  Thickness: {}\n  Dynamic: {}\n  Health-based (ch_health): {}\n",
         config.style,

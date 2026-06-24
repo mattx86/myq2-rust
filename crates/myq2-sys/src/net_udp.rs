@@ -59,7 +59,7 @@ impl Default for NetState {
 // Address helpers
 // =============================================================================
 
-// Address helpers — re-exported from myq2_common::net
+// Address helpers â€” re-exported from myq2_common::net
 pub use myq2_common::net::{
     net_compare_adr, net_compare_base_adr, net_adr_to_string,
     net_is_local_adr, net_string_to_adr, net_is_local_address,
@@ -347,7 +347,7 @@ impl NetState {
         }
     }
 
-    /// NET_Sleep — sleeps msec or until net socket is ready.
+    /// NET_Sleep â€” sleeps msec or until net socket is ready.
     /// With async I/O, this just does a simple sleep since I/O threads handle reception.
     pub fn net_sleep(&self, msec: i32) {
         // Only sleep for dedicated servers
@@ -561,7 +561,7 @@ mod tests {
 }
 
 // =============================================================================
-// Global networking context — mirrors C's global socket state
+// Global networking context â€” mirrors C's global socket state
 // =============================================================================
 
 use std::sync::{Mutex, OnceLock};
@@ -577,7 +577,7 @@ pub fn with_net_state<F, R>(f: F) -> R
 where
     F: FnOnce(&mut NetState) -> R,
 {
-    let mut guard = global_net_state().lock().unwrap();
+    let mut guard = global_net_state().lock().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
 }
 

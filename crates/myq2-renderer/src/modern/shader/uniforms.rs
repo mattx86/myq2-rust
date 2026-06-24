@@ -267,22 +267,33 @@ impl<T> Drop for UniformBuffer<T> {
 
 /// Uniforms for the postprocess (fullscreen quad) pass.
 ///
-/// Layout matches `postprocess.frag.glsl` FragUniforms:
-///   vec4  u_PolyBlend
-///   int   u_EnablePolyBlend
-///   float u_Gamma
-///   int   u_EnableGamma
+/// Layout matches `postprocess.frag.glsl` PushConstants (64 bytes):
+///   vec4  u_PolyBlend          — 16 bytes
+///   int   u_EnablePolyBlend    — 4 bytes
+///   float u_Gamma              — 4 bytes
+///   int   u_EnableGamma        — 4 bytes
+///   float u_Saturation         — 4 bytes
+///   float u_Contrast           — 4 bytes
+///   float u_Brightness         — 4 bytes
+///   float u_ShadowLift         — 4 bytes
+///   int   u_LutEnabled         — 4 bytes
+///   float u_LutIntensity       — 4 bytes
 ///
-/// Uploaded via push constants (32 bytes, well within the 128-byte minimum).
+/// Uploaded via push constants (56 bytes, within the 128-byte minimum).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct PostProcessUniforms {
-    pub polyblend_color: [f32; 4],
-    pub enable_polyblend: i32,
-    pub gamma: f32,
-    pub enable_gamma: i32,
-    pub _pad: i32,
-}
+    pub polyblend_color: [f32; 4],  // 16 bytes
+    pub enable_polyblend: i32,      // 4 bytes
+    pub gamma: f32,                 // 4 bytes
+    pub enable_gamma: i32,          // 4 bytes
+    pub saturation: f32,            // 4 bytes
+    pub contrast: f32,              // 4 bytes
+    pub brightness: f32,            // 4 bytes
+    pub shadow_lift: f32,           // 4 bytes
+    pub lut_enabled: i32,           // 4 bytes
+    pub lut_intensity: f32,         // 4 bytes
+}                                   // 56 bytes total
 
 impl Default for PostProcessUniforms {
     fn default() -> Self {
@@ -291,7 +302,80 @@ impl Default for PostProcessUniforms {
             enable_polyblend: 0,
             gamma: 1.0,
             enable_gamma: 0,
-            _pad: 0,
+            saturation: 1.0,
+            contrast: 1.0,
+            brightness: 1.0,
+            shadow_lift: 0.0,
+            lut_enabled: 0,
+            lut_intensity: 1.0,
         }
     }
 }
+
+// ============================================================================
+// Real-time point light list (set = 3, binding = 0 in world shader)
+// ============================================================================
+
+/// Extended per-light data for Doom 3 style stencil shadow rendering.
+
+/// std430-compatible: four vec4 slots = 64 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GpuLightD3 {
+    /// World-space position.
+    pub pos: [f32; 3],
+    /// Attenuation radius.
+    pub radius: f32,
+    /// Normalized RGB color.
+    pub color: [f32; 3],
+    /// Normalized brightness (BSP intensity / 300).
+    pub intensity: f32,
+    /// Specular tint color (usually same as color).
+    pub specular: [f32; 3],
+    /// Blinn-Phong specular exponent.
+    pub spec_pow: f32,
+}
+
+impl Default for GpuLightD3 {
+    fn default() -> Self {
+        Self {
+            pos: [0.0; 3],
+            radius: 300.0,
+            color: [1.0; 3],
+            intensity: 1.0,
+            specular: [1.0; 3],
+            spec_pow: 32.0,
+        }
+    }
+}
+
+impl GpuLightD3 {
+    pub fn from_static_light(sl: &crate::vk_rsurf::StaticLight) -> Self {
+        let max_c = sl.color[0].max(sl.color[1]).max(sl.color[2]);
+        let color = if max_c > 2.0 {
+            [sl.color[0] / 255.0, sl.color[1] / 255.0, sl.color[2] / 255.0]
+        } else {
+            sl.color
+        };
+        // Visual radius: Q2 intensity values (50–500) are BSP bake parameters, not physical
+        // radii.  Scale to a pool-of-light size so each light covers its immediate area.
+        let radius = (sl.intensity * 1.5).max(350.0_f32);
+        // Intensity: the lightmap shadow mask (shadow = lm_lum²) reduces the average
+        // effective brightness significantly — a typical lit surface with lm_lum=0.6
+        // gives shadow=0.36, so an uncapped 0.20 light becomes only 0.072 effective.
+        // Raise the cap to 0.50 so lit areas get good brightness while shadow zones
+        // (lm_lum near 0 → shadow near 0) stay dark.  Screen blend prevents over-
+        // saturation if many lights overlap in very bright areas.
+        let intensity = (sl.intensity / 400.0).clamp(0.05, 0.50);
+        Self {
+            pos: sl.origin,
+            radius,
+            color,
+            intensity,
+            specular: color,
+            spec_pow: 32.0,
+        }
+    }
+}
+
+

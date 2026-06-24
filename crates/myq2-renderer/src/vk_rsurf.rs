@@ -18,8 +18,14 @@ const DYNAMIC_LIGHT_HEIGHT: i32 = 128;
 
 const LIGHTMAP_BYTES: i32 = 4;
 
-const BLOCK_WIDTH: i32 = 128;
-const BLOCK_HEIGHT: i32 = 128;
+/// Lightmap atlas dimensions. 16x the original Q2 value (128→2048) so each surface's
+/// lightmap data is bicubic-upscaled 16x, giving high-quality smooth shadow gradients.
+const BLOCK_WIDTH: i32 = 2048;
+const BLOCK_HEIGHT: i32 = 2048;
+
+/// Upscale factor applied to each surface lightmap when building the atlas.
+/// 16 means each source texel expands to a 16×16 block with bicubic blending.
+const LM_UPSCALE: i32 = 16;
 
 const MAX_LIGHTMAPS: usize = 128;
 
@@ -37,6 +43,94 @@ const BACKFACE_EPSILON: f32 = 0.01;
 /// Each entry is the RGBA pixel data for one 128x128 lightmap block (layer).
 /// Index 0 is unused (dynamic lightmap); static layers start at index 1.
 pub static LIGHTMAP_LAYER_DATA: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+
+/// A static (BSP-baked) light parsed from the map entity string.
+/// Used to render persistent glow discs at light fixture positions.
+#[derive(Clone, Debug)]
+pub struct StaticLight {
+    pub origin: [f32; 3],
+    pub color:  [f32; 3],   // RGB, each 0–1
+    pub intensity: f32,      // raw "light" key value (default 300)
+    /// BSP cluster this light occupies (-1 = in solid / unknown).
+    /// Pre-computed at BSP load for O(1) PVS membership tests.
+    pub cluster: i32,
+}
+
+/// Static lights parsed from the current map's entity string.
+/// Populated by `parse_static_lights()` at end of world load.
+pub static STATIC_LIGHTS: std::sync::Mutex<Vec<StaticLight>> = std::sync::Mutex::new(Vec::new());
+
+/// Parse `light` entities out of the BSP entity string and store them in STATIC_LIGHTS.
+pub fn parse_static_lights() {
+    let entity_str = myq2_common::cmodel::cm_entity_string();
+    let mut lights: Vec<StaticLight> = Vec::new();
+
+    // Walk entity blocks: { key "val" key "val" ... }
+    let mut rest = entity_str.as_str();
+    while let Some(start) = rest.find('{') {
+        rest = &rest[start + 1..];
+        let end = rest.find('}').unwrap_or(rest.len());
+        let block = &rest[..end];
+        rest = &rest[end..];
+
+        // Collect key→value pairs for this entity block
+        let mut classname = String::new();
+        let mut origin = [0.0f32; 3];
+        let mut color = [1.0f32; 3];
+        let mut intensity = 300.0f32;
+
+        let mut block_rest = block;
+        while let Some(q1) = block_rest.find('"') {
+            block_rest = &block_rest[q1 + 1..];
+            let q2 = block_rest.find('"').unwrap_or(block_rest.len());
+            let key = &block_rest[..q2];
+            block_rest = &block_rest[q2 + 1..];
+
+            // skip whitespace between key and value
+            block_rest = block_rest.trim_start();
+            if !block_rest.starts_with('"') { continue; }
+            block_rest = &block_rest[1..];
+            let vq = block_rest.find('"').unwrap_or(block_rest.len());
+            let val = &block_rest[..vq];
+            block_rest = &block_rest[vq + 1..];
+
+            match key {
+                "classname" => classname = val.to_string(),
+                "origin" => {
+                    let mut parts = val.split_ascii_whitespace();
+                    if let (Some(x), Some(y), Some(z)) = (parts.next(), parts.next(), parts.next()) {
+                        origin[0] = x.parse().unwrap_or(0.0);
+                        origin[1] = y.parse().unwrap_or(0.0);
+                        origin[2] = z.parse().unwrap_or(0.0);
+                    }
+                }
+                "light" | "_light" => {
+                    intensity = val.parse().unwrap_or(300.0);
+                }
+                "_color" | "color" => {
+                    let mut parts = val.split_ascii_whitespace();
+                    if let (Some(r), Some(g), Some(b)) = (parts.next(), parts.next(), parts.next()) {
+                        color[0] = r.parse().unwrap_or(1.0);
+                        color[1] = g.parse().unwrap_or(1.0);
+                        color[2] = b.parse().unwrap_or(1.0);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if classname == "light" && intensity > 0.0 {
+            // Look up the BSP cluster for this light position so update_d3_lights can
+            // filter by PVS without a per-frame BSP traversal.
+            let pos: Vec3 = origin;
+            let leafnum = myq2_common::cmodel::cm_point_leafnum(&pos) as i32;
+            let cluster = myq2_common::cmodel::cm_leaf_cluster(leafnum as usize);
+            lights.push(StaticLight { origin, color, intensity, cluster });
+        }
+    }
+
+    *STATIC_LIGHTS.lock().unwrap_or_else(|e| e.into_inner()) = lights;
+}
 
 // ============================================================
 // Lightmap state
@@ -665,6 +759,88 @@ unsafe fn lm_alloc_block(ss: &mut SurfaceState, w: i32, h: i32, x: &mut i32, y: 
     true
 }
 
+/// Pre-blur native-resolution lightmap data in-place using N passes of 3×3 box blur.
+///
+/// Runs on the tiny native buffer (typically 5-20 texels per side) BEFORE bilinear upscaling.
+/// Each pass softens shadow edges by ~16 world units — far more effective than blurring after
+/// upscaling where the same kernel only covers ~1 world unit.
+/// RGB channels blurred; alpha channel preserved.
+fn blur_native_lightmap(data: &mut [u8], smax: usize, tmax: usize, passes: u32) {
+    for _ in 0..passes {
+        let src = data.to_vec();
+        for y in 0..tmax {
+            for x in 0..smax {
+                for c in 0..3usize {
+                    let mut sum = 0u32;
+                    for dy in -1i32..=1 {
+                        for dx in -1i32..=1 {
+                            // Replicate-pad: clamp to valid range so edge/corner texels
+                            // are sampled from themselves when out-of-bounds. This keeps
+                            // count=9 for all pixels and prevents edge-darkening that
+                            // causes visible seam lines where BSP surfaces meet.
+                            let nx = (x as i32 + dx).clamp(0, smax as i32 - 1) as usize;
+                            let ny = (y as i32 + dy).clamp(0, tmax as i32 - 1) as usize;
+                            sum += src[(ny * smax + nx) * 4 + c] as u32;
+                        }
+                    }
+                    data[(y * smax + x) * 4 + c] = (sum / 9) as u8;
+                }
+            }
+        }
+    }
+}
+
+/// Upscale a native-resolution lightmap by `scale` using bilinear interpolation.
+///
+/// Bilinear has no negative lobes, so it produces no overshoot or ringing at surface
+/// edges. This prevents seam artifacts where two BSP surfaces meet in the atlas — the
+/// Catmull-Rom bicubic caused visible bright/dark lines at every surface boundary due to
+/// its negative outer lobes being clamped to the edge texel value.
+///
+/// Shadow gradient smoothing is handled by the native pre-blur (blur_native_lightmap)
+/// which runs before this step on the small native buffer.
+///
+/// # Safety
+/// `dst` must point to at least `(tmax * scale) * dst_stride` writable bytes.
+unsafe fn bilinear_upscale_lightmap(src: &[u8], smax: usize, tmax: usize, scale: usize, dst: *mut u8, dst_stride: usize) {
+    // Clamp-to-edge fetch from native-res source
+    let get = |x: usize, y: usize, c: usize| -> u32 {
+        let xi = x.min(smax.saturating_sub(1));
+        let yi = y.min(tmax.saturating_sub(1));
+        src[(yi * smax + xi) * 4 + c] as u32
+    };
+
+    for sy in 0..tmax {
+        for sx in 0..smax {
+            for j in 0..scale {
+                for k in 0..scale {
+                    let ox = sx * scale + k;
+                    let oy = sy * scale + j;
+
+                    // Bilinear weights: frac = k/scale, 1-frac = (scale-k)/scale
+                    let wx1 = k as u32;
+                    let wx0 = scale as u32 - wx1;
+                    let wy1 = j as u32;
+                    let wy0 = scale as u32 - wy1;
+                    let total = (scale * scale) as u32;
+
+                    for c in 0..4usize {
+                        let s00 = get(sx,     sy,     c);
+                        let s10 = get(sx + 1, sy,     c);
+                        let s01 = get(sx,     sy + 1, c);
+                        let s11 = get(sx + 1, sy + 1, c);
+
+                        let val = (s00 * wx0 * wy0 + s10 * wx1 * wy0
+                                 + s01 * wx0 * wy1 + s11 * wx1 * wy1
+                                 + total / 2) / total;
+                        *dst.add(oy * dst_stride + ox * 4 + c) = val as u8;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Build polygon vertex data from surface edges.
 ///
 /// # Safety
@@ -705,23 +881,30 @@ pub unsafe fn vk_build_polygon_from_surface(fa: &mut MSurface) {
         glpoly_set_st(poly, i, s, t);
 
         // lightmap texture coordinates
+        // With LM_UPSCALE=8: atlas is 1024 wide, each upscaled texel covers 2 world units.
+        // Formula: (world - texturemins + light_s * texel_size + half_texel) / (BLOCK_WIDTH * texel_size)
+        //   texel_size = 16 / LM_UPSCALE = 2,  half_texel = 2 / LM_UPSCALE = 1
+        //   denominator = 1024 * 2 = 2048  (same as original 128 * 16 = 2048, unchanged)
+        let texel_world: f32 = 16.0 / LM_UPSCALE as f32;
+        let half_texel: f32 = texel_world * 0.5;
+
         let mut ls = dot_product(
             &vec,
             &[texinfo.vecs[0][0], texinfo.vecs[0][1], texinfo.vecs[0][2]],
         ) + texinfo.vecs[0][3];
         ls -= fa.texturemins[0] as f32;
-        ls += fa.light_s as f32 * 16.0;
-        ls += 8.0;
-        ls /= (BLOCK_WIDTH * 16) as f32;
+        ls += fa.light_s as f32 * texel_world;
+        ls += half_texel;
+        ls /= (BLOCK_WIDTH as f32) * texel_world;
 
         let mut lt = dot_product(
             &vec,
             &[texinfo.vecs[1][0], texinfo.vecs[1][1], texinfo.vecs[1][2]],
         ) + texinfo.vecs[1][3];
         lt -= fa.texturemins[1] as f32;
-        lt += fa.light_t as f32 * 16.0;
-        lt += 8.0;
-        lt /= (BLOCK_HEIGHT * 16) as f32;
+        lt += fa.light_t as f32 * texel_world;
+        lt += half_texel;
+        lt /= (BLOCK_HEIGHT as f32) * texel_world;
 
         glpoly_set_lm_st(poly, i, ls, lt);
     }
@@ -740,31 +923,91 @@ pub unsafe fn vk_create_surface_lightmap(surf: &mut MSurface) {
         return;
     }
 
+    // Native lightmap size (1 texel per 16 world units)
     let smax = (surf.extents[0] as i32 >> 4) + 1;
     let tmax = (surf.extents[1] as i32 >> 4) + 1;
 
-    if !lm_alloc_block(&mut ss, smax, tmax, &mut surf.light_s, &mut surf.light_t) {
+    // Allocate LM_UPSCALE× space in the atlas, plus a 1-pixel border on each side
+    // to prevent bilinear sampling from bleeding into adjacent face data at seam edges.
+    let smax_up = smax * LM_UPSCALE;
+    let tmax_up = tmax * LM_UPSCALE;
+    let alloc_w = smax_up + 2;  // +2 for left/right border
+    let alloc_h = tmax_up + 2;  // +2 for top/bottom border
+
+    if !lm_alloc_block(&mut ss, alloc_w, alloc_h, &mut surf.light_s, &mut surf.light_t) {
         lm_upload_block(&mut ss, false);
         lm_init_block(&mut ss);
-        if !lm_alloc_block(&mut ss, smax, tmax, &mut surf.light_s, &mut surf.light_t) {
+        if !lm_alloc_block(&mut ss, alloc_w, alloc_h, &mut surf.light_s, &mut surf.light_t) {
             vid_printf(ERR_FATAL, &format!(
                 "Consecutive calls to LM_AllocBlock({},{}) failed\n",
-                smax, tmax
+                alloc_w, alloc_h
             ));
         }
     }
 
+    // Skip past the border to the interior content area.
+    surf.light_s += 1;
+    surf.light_t += 1;
+
     surf.lightmaptexturenum = ss.vk_lms.current_lightmap_texture;
 
-    let base_offset =
-        (surf.light_t * BLOCK_WIDTH + surf.light_s) * LIGHTMAP_BYTES;
-    let base = ss.vk_lms
-        .lightmap_buffer
-        .as_mut_ptr()
-        .offset(base_offset as isize);
-
+    // Build native-size lightmap into a temporary buffer
+    let native_stride = smax * LIGHTMAP_BYTES;
+    let native_size = (native_stride * tmax) as usize;
+    let mut native_buf = vec![0u8; native_size];
     r_set_cache_state(surf);
-    r_build_light_map(surf, base, BLOCK_WIDTH * LIGHTMAP_BYTES);
+    r_build_light_map(surf, native_buf.as_mut_ptr(), native_stride);
+
+    // Pre-blur native lightmap before upscaling: 3 passes of 3×3 box blur on the small
+    // native buffer (typically 5-20 texels/side). Each pass ≈ 16 world units of softening —
+    // orders of magnitude more effective than blurring after upscaling.  3 passes gives a
+    // slightly softer gradient at face edges, which reduces visible seam contrast.
+    blur_native_lightmap(&mut native_buf, smax as usize, tmax as usize, 3);
+
+    // Bicubic-upscale into the atlas at the interior (post-border) position
+    let base_offset = (surf.light_t * BLOCK_WIDTH + surf.light_s) * LIGHTMAP_BYTES;
+    let base = ss.vk_lms.lightmap_buffer.as_mut_ptr().offset(base_offset as isize);
+    let dst_stride = (BLOCK_WIDTH * LIGHTMAP_BYTES) as usize;
+    bilinear_upscale_lightmap(&native_buf, smax as usize, tmax as usize, LM_UPSCALE as usize, base, dst_stride);
+
+    // Fill the 1-pixel border by replicating the nearest edge pixel.
+    // This ensures bilinear sampling never bleeds into a neighbouring face's data.
+    {
+        let ls = surf.light_s as usize;
+        let lt = surf.light_t as usize;
+        let sw = smax_up as usize;
+        let sh = tmax_up as usize;
+        let bw = BLOCK_WIDTH as usize;
+        let lb = LIGHTMAP_BYTES as usize;  // 4 bytes (RGBA)
+        let buf_ptr = ss.vk_lms.lightmap_buffer.as_mut_ptr();
+
+        // Top border row (lt-1): replicate row lt, clamping x to content columns for corners
+        for x in ls - 1..=ls + sw {
+            let cx = x.clamp(ls, ls + sw - 1);
+            let src = (lt * bw + cx) * lb;
+            let dst = ((lt - 1) * bw + x) * lb;
+            std::ptr::copy_nonoverlapping(buf_ptr.add(src), buf_ptr.add(dst), lb);
+        }
+        // Bottom border row (lt+sh): replicate row lt+sh-1
+        for x in ls - 1..=ls + sw {
+            let cx = x.clamp(ls, ls + sw - 1);
+            let src = ((lt + sh - 1) * bw + cx) * lb;
+            let dst = ((lt + sh) * bw + x) * lb;
+            std::ptr::copy_nonoverlapping(buf_ptr.add(src), buf_ptr.add(dst), lb);
+        }
+        // Left border column (ls-1): replicate column ls (interior rows only)
+        for y in lt..lt + sh {
+            let src = (y * bw + ls) * lb;
+            let dst = (y * bw + (ls - 1)) * lb;
+            std::ptr::copy_nonoverlapping(buf_ptr.add(src), buf_ptr.add(dst), lb);
+        }
+        // Right border column (ls+sw): replicate column ls+sw-1 (interior rows only)
+        for y in lt..lt + sh {
+            let src = (y * bw + (ls + sw - 1)) * lb;
+            let dst = (y * bw + (ls + sw)) * lb;
+            std::ptr::copy_nonoverlapping(buf_ptr.add(src), buf_ptr.add(dst), lb);
+        }
+    }
 }
 
 /// Create the stain map buffer for a surface.
@@ -788,11 +1031,139 @@ pub unsafe fn vk_create_surface_stainmap(surf: &mut MSurface) {
     }
 }
 
+/// Average BSP lightmap samples at shared face edges to eliminate seam discontinuities.
+///
+/// Adjacent BSP faces are lit independently by the Q2 BSP compiler, causing brightness/color
+/// jumps at shared edges.  This function walks every edge shared by two opaque faces, samples
+/// N world-space points along it, computes the corresponding native-resolution texel in each
+/// face's lightmap, and replaces both texels with their average.  The result is called before
+/// `r_build_light_map` / `bilinear_upscale_lightmap`, so the smoother data is what gets
+/// written into the atlas.
+///
+/// # Safety
+/// Reads and mutates `surf.samples` raw BSP lightmap data.
+unsafe fn fix_lightmap_seams(model: *mut Model) {
+    let m = &*model;
+    if m.numsurfaces <= 0 || m.numedges <= 0 || m.numsurfedges <= 0 { return; }
+
+    let nsurfs  = m.numsurfaces  as usize;
+    let nedges  = m.numedges     as usize;
+    let nsverts = m.numvertexes  as usize;
+    let nse     = m.numsurfedges as usize;
+
+    let surfaces  = std::slice::from_raw_parts(m.surfaces,  nsurfs);
+    let edges     = std::slice::from_raw_parts(m.edges,     nedges);
+    let vertexes  = std::slice::from_raw_parts(m.vertexes,  nsverts);
+    let surfedges = std::slice::from_raw_parts(m.surfedges, nse);
+
+    // Build edge → [face_a, face_b] (-1 = unset).
+    let mut edge_faces: Vec<[i32; 2]> = vec![[-1, -1]; nedges];
+
+    for (fi, surf) in surfaces.iter().enumerate() {
+        if surf.flags & (SURF_DRAWSKY | SURF_DRAWTURB) != 0 { continue; }
+        if surf.samples.is_null() || surf.texinfo.is_null() { continue; }
+
+        for j in 0..surf.numedges {
+            let raw_se = surfedges[(surf.firstedge + j) as usize];
+            let ei = raw_se.unsigned_abs() as usize;
+            if ei >= nedges { continue; }
+            let ef = &mut edge_faces[ei];
+            if ef[0] < 0 {
+                ef[0] = fi as i32;
+            } else if ef[1] < 0 && ef[0] != fi as i32 {
+                ef[1] = fi as i32;
+            }
+        }
+    }
+
+    // For every edge shared by exactly two faces, average the boundary lightmap texels.
+    for (ei, ef) in edge_faces.iter().enumerate() {
+        if ef[0] < 0 || ef[1] < 0 { continue; }
+        let fi_a = ef[0] as usize;
+        let fi_b = ef[1] as usize;
+
+        let sa = &surfaces[fi_a];
+        let sb = &surfaces[fi_b];
+        if sa.texinfo.is_null() || sb.texinfo.is_null() { continue; }
+        if sa.samples.is_null() || sb.samples.is_null() { continue; }
+
+        let smax_a = ((sa.extents[0] as i32 >> 4) + 1) as usize;
+        let tmax_a = ((sa.extents[1] as i32 >> 4) + 1) as usize;
+        let smax_b = ((sb.extents[0] as i32 >> 4) + 1) as usize;
+        let tmax_b = ((sb.extents[1] as i32 >> 4) + 1) as usize;
+
+        // How many light styles are active on each face?
+        let nstyles_a = sa.styles.iter().take_while(|&&s| s != 255).count();
+        let nstyles_b = sb.styles.iter().take_while(|&&s| s != 255).count();
+        let nstyles = nstyles_a.min(nstyles_b);
+        if nstyles == 0 { continue; }
+
+        // World-space endpoints of the shared edge.
+        let edge = &edges[ei];
+        if edge.v[0] as usize >= nsverts || edge.v[1] as usize >= nsverts { continue; }
+        let p0 = vertexes[edge.v[0] as usize].position;
+        let p1 = vertexes[edge.v[1] as usize].position;
+
+        // Sample 8 evenly-spaced points along the edge (midpoints of eighths).
+        const N_SAMPLES: usize = 8;
+        let samples_a = sa.samples;
+        let samples_b = sb.samples;
+
+        for k in 0..N_SAMPLES {
+            let frac = (k as f32 + 0.5) / N_SAMPLES as f32;
+            let p: Vec3 = [
+                p0[0] + (p1[0] - p0[0]) * frac,
+                p0[1] + (p1[1] - p0[1]) * frac,
+                p0[2] + (p1[2] - p0[2]) * frac,
+            ];
+
+            // Native texel index in face A.
+            let idx_a = {
+                let ti = &*sa.texinfo;
+                let sv: Vec3 = [ti.vecs[0][0], ti.vecs[0][1], ti.vecs[0][2]];
+                let tv: Vec3 = [ti.vecs[1][0], ti.vecs[1][1], ti.vecs[1][2]];
+                let sf = (dot_product(&p, &sv) + ti.vecs[0][3] - sa.texturemins[0] as f32) / 16.0;
+                let tf = (dot_product(&p, &tv) + ti.vecs[1][3] - sa.texturemins[1] as f32) / 16.0;
+                let si = sf.floor() as i32;
+                let ti_ = tf.floor() as i32;
+                if si < 0 || ti_ < 0 || si >= smax_a as i32 || ti_ >= tmax_a as i32 { continue; }
+                ti_ as usize * smax_a + si as usize
+            };
+
+            // Native texel index in face B.
+            let idx_b = {
+                let ti = &*sb.texinfo;
+                let sv: Vec3 = [ti.vecs[0][0], ti.vecs[0][1], ti.vecs[0][2]];
+                let tv: Vec3 = [ti.vecs[1][0], ti.vecs[1][1], ti.vecs[1][2]];
+                let sf = (dot_product(&p, &sv) + ti.vecs[0][3] - sb.texturemins[0] as f32) / 16.0;
+                let tf = (dot_product(&p, &tv) + ti.vecs[1][3] - sb.texturemins[1] as f32) / 16.0;
+                let si = sf.floor() as i32;
+                let ti_ = tf.floor() as i32;
+                if si < 0 || ti_ < 0 || si >= smax_b as i32 || ti_ >= tmax_b as i32 { continue; }
+                ti_ as usize * smax_b + si as usize
+            };
+
+            // Average the RGB bytes for each active style.
+            for style_idx in 0..nstyles {
+                let off_a = (style_idx * smax_a * tmax_a + idx_a) * 3;
+                let off_b = (style_idx * smax_b * tmax_b + idx_b) * 3;
+                for c in 0..3_usize {
+                    let va = *samples_a.add(off_a + c) as u16;
+                    let vb = *samples_b.add(off_b + c) as u16;
+                    let avg = ((va + vb + 1) / 2) as u8;
+                    *samples_a.add(off_a + c) = avg;
+                    *samples_b.add(off_b + c) = avg;
+                }
+            }
+        }
+    }
+}
+
 /// Begin building lightmaps for a model.
 ///
 /// # Safety
 /// Accesses GL state and lightmap system.
-pub unsafe fn vk_begin_building_lightmaps(_m: *mut Model) {
+pub unsafe fn vk_begin_building_lightmaps(m: *mut Model) {
     // Clear collected lightmap data from previous level
     {
         let mut lm_data = LIGHTMAP_LAYER_DATA.lock().unwrap_or_else(|e| e.into_inner());
@@ -847,7 +1218,8 @@ pub unsafe fn vk_begin_building_lightmaps(_m: *mut Model) {
     qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MIN_FILTER, VK_LINEAR as f32);
     qvk_tex_parameterf(VK_TEXTURE_2D, VK_TEXTURE_MAG_FILTER, VK_LINEAR as f32);
 
-    let dummy = [0u32; 128 * 128];
+    // Use heap allocation — 256×256×4 bytes = 256KB, too large for stack
+    let dummy = vec![0u32; BLOCK_WIDTH as usize * BLOCK_HEIGHT as usize];
     qvk_tex_image_2d(
         VK_TEXTURE_2D,
         0,
@@ -869,6 +1241,8 @@ pub unsafe fn vk_end_building_lightmaps() {
     let mut ss = SURFACE_STATE.lock().unwrap_or_else(|e| e.into_inner());
     lm_upload_block(&mut ss, false);
     vk_enable_multitexture(false);
+    drop(ss); // release lock before calling parse_static_lights
+    parse_static_lights();
 }
 
 // MAX_MAP_LEAFS imported from myq2_common::qfiles
@@ -1113,8 +1487,9 @@ mod tests {
     #[test]
     fn test_lightmap_block_constants() {
         // Verify block constants used in lightmap allocation
-        assert_eq!(BLOCK_WIDTH, 128);
-        assert_eq!(BLOCK_HEIGHT, 128);
+        assert_eq!(BLOCK_WIDTH, 2048);
+        assert_eq!(BLOCK_HEIGHT, 2048);
+        assert_eq!(LM_UPSCALE, 16);
         assert_eq!(LIGHTMAP_BYTES, 4);
     }
 

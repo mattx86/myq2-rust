@@ -1,4 +1,4 @@
-// cmd.rs — Quake script command processing module
+// cmd.rs â€” Quake script command processing module
 // Converted from: myq2-original/qcommon/cmd.c
 
 use crate::common::{com_printf, ComArgs};
@@ -336,7 +336,7 @@ impl CmdContext {
                 break;
             }
 
-            // Check for unbalanced quotes — skip inside quotes
+            // Check for unbalanced quotes â€” skip inside quotes
             let scan_bytes = scan.as_bytes();
             let mut inquote = false;
             let mut found_dollar = false;
@@ -389,7 +389,7 @@ impl CmdContext {
             new_scan.push_str(&scan[total_consumed..]);
 
             scan = new_scan;
-            // Don't advance i — re-check from the same position in case of nested expansion
+            // Don't advance i â€” re-check from the same position in case of nested expansion
             count += 1;
             if count == 100 {
                 com_printf("Macro expansion loop, discarded.\n");
@@ -614,7 +614,7 @@ impl CmdContext {
                     self.cmd_functions[idx].function = Some(f);
                 }
                 None => {
-                    // No function — forward to server command
+                    // No function â€” forward to server command
                     let forwarded = format!("cmd {}", text);
                     self.cmd_execute_string(&forwarded);
                 }
@@ -655,13 +655,13 @@ impl CmdContext {
     // Built-in command handlers
     // ========================================================
 
-    /// Cmd_Wait_f — causes execution of the remainder of the command buffer
+    /// Cmd_Wait_f â€” causes execution of the remainder of the command buffer
     /// to be delayed until the next frame.
     pub fn cmd_wait_f(&mut self) {
         self.cmd_wait = true;
     }
 
-    /// Cmd_Echo_f — just prints the rest of the line to the console.
+    /// Cmd_Echo_f â€” just prints the rest of the line to the console.
     pub fn cmd_echo_f(&self) {
         for i in 1..self.cmd_argc {
             com_printf(&format!("{} ", self.cmd_argv(i)));
@@ -669,7 +669,7 @@ impl CmdContext {
         com_printf("\n");
     }
 
-    /// Cmd_Exec_f — execute a script file.
+    /// Cmd_Exec_f â€” execute a script file.
     pub fn cmd_exec_f(&mut self) {
         if self.cmd_argc != 2 {
             com_printf("exec <filename> : execute a script file\n");
@@ -702,7 +702,7 @@ impl CmdContext {
         }
     }
 
-    /// Cmd_Alias_f — creates a new command that executes a command string.
+    /// Cmd_Alias_f â€” creates a new command that executes a command string.
     pub fn cmd_alias_f(&mut self) {
         let c = self.cmd_argc;
 
@@ -731,7 +731,7 @@ impl CmdContext {
         self.cmd_alias_set(&name, &cmd);
     }
 
-    /// Cmd_AliasList_f — lists all aliases, optionally filtered by wildcard.
+    /// Cmd_AliasList_f â€” lists all aliases, optionally filtered by wildcard.
     pub fn cmd_alias_list_f(&self) {
         self.cmd_alias_list_f_inner();
     }
@@ -745,7 +745,7 @@ impl CmdContext {
         self.cmd_alias_list(pattern);
     }
 
-    /// Cmd_List_f — lists all registered commands.
+    /// Cmd_List_f â€” lists all registered commands.
     pub fn cmd_list_f(&self) {
         let pattern = if self.cmd_argc == 2 {
             Some(self.cmd_argv(1))
@@ -1113,11 +1113,11 @@ mod tests {
 
         let mut ctx = CmdContext::new();
         ctx.cmd_add_command("mytest", Some(Box::new(move |_ctx: &mut CmdContext| {
-            *called_clone.lock().unwrap() = true;
+            *called_clone.lock().unwrap_or_else(|e| e.into_inner()) = true;
         })));
 
         ctx.cmd_execute_string("mytest");
-        assert!(*called.lock().unwrap());
+        assert!(*called.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
     #[test]

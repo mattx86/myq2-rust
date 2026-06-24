@@ -1270,13 +1270,21 @@ pub fn angle_vectors(
         fwd[2] = -sp;
     }
     if let Some(r) = right {
-        r[0] = -sr * sp * cy + -cr * sy;
-        r[1] = -sr * sp * sy + cr * cy;
+        // Matches C AngleVectors (myq2-original/game/q_shared.c:117-119):
+        //   right[0] = (-1*sr*sp*cy + -1*cr*-sy);
+        //   right[1] = (-1*sr*sp*sy + -1*cr*cy);
+        //   right[2] = -1*sr*cp;
+        r[0] = -sr * sp * cy + cr * sy;
+        r[1] = -sr * sp * sy - cr * cy;
         r[2] = -sr * cp;
     }
     if let Some(u) = up {
-        u[0] = cr * sp * cy + -sr * sy;
-        u[1] = cr * sp * sy + sr * cy;
+        // Matches C AngleVectors (myq2-original/game/q_shared.c:121-123):
+        //   up[0] = (cr*sp*cy + -sr*-sy);
+        //   up[1] = (cr*sp*sy + -sr*cy);
+        //   up[2] = cr*cp;
+        u[0] = cr * sp * cy + sr * sy;
+        u[1] = cr * sp * sy - sr * cy;
         u[2] = cr * cp;
     }
 }

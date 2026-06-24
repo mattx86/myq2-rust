@@ -300,7 +300,7 @@ pub fn in_mouse_move(
         viewangles[YAW] -= m_yaw_value * mouse_x_f;
     }
 
-    if (input.mlooking || freelook_value != 0.0) && (in_strafe_state & 1) == 0 {
+    if input.mlooking || freelook_value != 0.0 {
         viewangles[PITCH] += m_pitch_value * mouse_y_f;
     } else {
         cmd.forwardmove = cmd.forwardmove.saturating_sub((m_forward_value * mouse_y_f) as i16);

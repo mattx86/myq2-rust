@@ -1,4 +1,4 @@
-// client.rs — primary header for client
+// client.rs â€” primary header for client
 // Converted from: myq2-original/client/client.h
 
 use myq2_common::q_shared::{
@@ -37,7 +37,7 @@ pub const API_VERSION: i32 = 3;
 // Ref types (from ref.h)
 // ============================================================
 
-/// entity_t — renderer entity
+/// entity_t â€” renderer entity
 #[derive(Debug, Clone)]
 pub struct Entity {
     pub model: isize,           // opaque model handle (pointer-sized for 64-bit safety)
@@ -77,7 +77,7 @@ pub use myq2_common::q_shared::{DLight, StainType, DStain};
 
 pub use myq2_common::q_shared::{Particle, LightStyle};
 
-/// refdef_t — renderer scene definition
+/// refdef_t â€” renderer scene definition
 #[derive(Debug, Clone)]
 pub struct RefDef {
     pub x: i32,
@@ -153,7 +153,7 @@ pub const BLASTER_PARTICLE_COLOR: i32 = 0xE0;
 pub const INSTANT_PARTICLE: f32 = -10000.0;
 pub const BEAMLENGTH: f32 = 16.0;
 
-// Image type — canonical definition in myq2_common::q_shared::ImageType
+// Image type â€” canonical definition in myq2_common::q_shared::ImageType
 pub use myq2_common::q_shared::ImageType;
 
 // NOTE: The renderer owns the canonical Image struct (vk_model_types::Image).
@@ -191,7 +191,7 @@ impl Default for Frame {
 }
 
 // ============================================================
-// centity_t — client entity
+// centity_t â€” client entity
 // ============================================================
 
 /// Frame sample for animation history (used in spline interpolation)
@@ -458,7 +458,7 @@ impl Default for ClientInfo {
 }
 
 // ============================================================
-// client_state_t — wiped completely at every server map change
+// client_state_t â€” wiped completely at every server map change
 // ============================================================
 
 #[derive(Debug)]
@@ -645,7 +645,7 @@ impl Default for ClientState {
 }
 
 // ============================================================
-// connstate_t — connection state
+// connstate_t â€” connection state
 // ============================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -659,7 +659,7 @@ pub enum ConnState {
 }
 
 // ============================================================
-// dltype_t — download type
+// dltype_t â€” download type
 // ============================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -674,7 +674,7 @@ pub enum DlType {
 }
 
 // ============================================================
-// keydest_t — key destination
+// keydest_t â€” key destination
 // ============================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -688,7 +688,7 @@ pub enum KeyDest {
 }
 
 // ============================================================
-// client_static_t — persistent through server connections
+// client_static_t â€” persistent through server connections
 // ============================================================
 
 pub struct ClientStatic {
@@ -779,7 +779,7 @@ impl Default for ClientStatic {
 }
 
 // ============================================================
-// cl_sustain_t — ROGUE sustained effects
+// cl_sustain_t â€” ROGUE sustained effects
 // ============================================================
 
 #[derive(Debug, Clone)]
@@ -821,7 +821,7 @@ impl Default for ClSustain {
 }
 
 // ============================================================
-// kbutton_t — input button state
+// kbutton_t â€” input button state
 // ============================================================
 
 #[derive(Debug, Clone, Copy)]
@@ -1537,7 +1537,7 @@ mod tests {
 
 /// Get the current client connection state as a human-readable string.
 pub fn cls_state_string() -> &'static str {
-    let cls = crate::cl_main::CLS.lock().unwrap();
+    let cls = crate::cl_main::CLS.lock().unwrap_or_else(|e| e.into_inner());
     match cls.state {
         ConnState::Uninitialized => "Uninitialized",
         ConnState::Disconnected => "Disconnected",
@@ -1549,6 +1549,6 @@ pub fn cls_state_string() -> &'static str {
 
 /// Get the current disable_screen value from ClientStatic.
 pub fn cls_disable_screen() -> f32 {
-    crate::cl_main::CLS.lock().unwrap().disable_screen
+    crate::cl_main::CLS.lock().unwrap_or_else(|e| e.into_inner()).disable_screen
 }
 

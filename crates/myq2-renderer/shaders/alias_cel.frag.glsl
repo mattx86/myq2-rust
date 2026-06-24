@@ -18,12 +18,10 @@ void main() {
     vec4 texColor = texture(u_DiffuseTexture, v_TexCoord);
     vec3 normal = normalize(v_Normal);
 
-    // Cel-shading: quantize lighting into bands
+    // Smooth shading: soft diffuse with a raised ambient floor so backfaces
+    // don't go black.  Avoids hard-band artifacts on geometric model details.
     float ndotl = dot(normal, normalize(u_LightDir));
-    float shade;
-    if (ndotl > 0.5) shade = 1.0;
-    else if (ndotl > 0.0) shade = 0.7;
-    else shade = 0.4;
+    float shade = mix(0.4, 1.0, clamp(ndotl * 0.5 + 0.5, 0.0, 1.0));
 
     vec3 finalColor = texColor.rgb * u_ShadeLight * shade;
     FragColor = vec4(finalColor, texColor.a * u_Alpha);

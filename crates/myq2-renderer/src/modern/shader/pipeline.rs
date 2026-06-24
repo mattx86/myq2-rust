@@ -52,6 +52,12 @@ const FSR2_TEMPORAL_FRAG_SPV: &[u8] = spv!("fsr2_temporal.frag.spv");
 const MOTION_VECTORS_VERT_SPV: &[u8] = spv!("motion_vectors.vert.spv");
 const MOTION_VECTORS_FRAG_SPV: &[u8] = spv!("motion_vectors.frag.spv");
 
+// D3 lighting / shadow cubemap
+const SHADOW_CUBE_VERT_SPV: &[u8] = spv!("shadow_cube.vert.spv");
+const SHADOW_CUBE_FRAG_SPV: &[u8] = spv!("shadow_cube.frag.spv");
+const WORLD_LIT_VERT_SPV: &[u8] = spv!("world_lit.vert.spv");
+const WORLD_LIT_FRAG_SPV: &[u8] = spv!("world_lit.frag.spv");
+
 // ============================================================================
 // Pipeline variant (blend/depth/cull state baked into pipeline)
 // ============================================================================
@@ -75,6 +81,10 @@ pub enum PipelineVariant {
     /// Depth test on, depth write off, cull none, multiplicative blend (dst_color, zero).
     /// Used for detail texture overlay pass.
     Multiplicative,
+    /// Depth-only pass (no color attachment). Used for shadow cubemap rendering.
+    ShadowDepth,
+    /// Additive blend for D3 per-pixel lit pass (depth test on, no depth write, additive blend).
+    LitAdditive,
 }
 
 // ============================================================================
@@ -115,6 +125,8 @@ pub struct PipelineManager {
     lightmap_set_layout: Option<vk::DescriptorSetLayout>,
     /// Shared pipeline layout.
     pipeline_layout: Option<vk::PipelineLayout>,
+    /// Minimal pipeline layout for shadow passes (push constants only, no descriptor sets).
+    shadow_pipeline_layout: Option<vk::PipelineLayout>,
     initialized: bool,
     color_format: vk::Format,
     depth_format: vk::Format,
@@ -139,6 +151,7 @@ impl PipelineManager {
             ui_texture_set_layout: None,
             lightmap_set_layout: None,
             pipeline_layout: None,
+            shadow_pipeline_layout: None,
             initialized: false,
             color_format,
             depth_format,
@@ -290,6 +303,8 @@ impl PipelineManager {
             ShaderType::FsrRcas => (POSTPROCESS_VERT_SPV, FSR_RCAS_FRAG_SPV),
             ShaderType::Fsr2Temporal => (POSTPROCESS_VERT_SPV, FSR2_TEMPORAL_FRAG_SPV),
             ShaderType::MotionVectors => (MOTION_VECTORS_VERT_SPV, MOTION_VECTORS_FRAG_SPV),
+            ShaderType::ShadowCube => (SHADOW_CUBE_VERT_SPV, SHADOW_CUBE_FRAG_SPV),
+            ShaderType::WorldLitAdditive => (WORLD_LIT_VERT_SPV, WORLD_LIT_FRAG_SPV),
         }
     }
 
@@ -325,10 +340,10 @@ impl PipelineManager {
                 (binding, attrs)
             }
             ShaderType::World | ShaderType::WorldFlowing | ShaderType::Sky | ShaderType::Water => {
-                // BspVertex: pos3 + tex2 + lm2 + lm_layer = 32 bytes
+                // BspVertex: pos3(12) + tex2(8) + lm2(8) + lm_layer(4) + normal3(12) + tangent4(16) = 60 bytes
                 let binding = vec![vk::VertexInputBindingDescription::default()
                     .binding(0)
-                    .stride(32)
+                    .stride(60)
                     .input_rate(vk::VertexInputRate::VERTEX)];
                 let attrs = vec![
                     vk::VertexInputAttributeDescription::default()
@@ -457,6 +472,52 @@ impl PipelineManager {
                 ];
                 (binding, attrs)
             }
+            ShaderType::ShadowCube => {
+                // Depth-only pass: only position needed.
+                // BspVertex stride is 60 bytes; position is at offset 0.
+                let binding = vec![vk::VertexInputBindingDescription::default()
+                    .binding(0)
+                    .stride(60)
+                    .input_rate(vk::VertexInputRate::VERTEX)];
+                let attrs = vec![
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(0)
+                        .format(vk::Format::R32G32B32_SFLOAT)
+                        .offset(0),
+                ];
+                (binding, attrs)
+            }
+            ShaderType::WorldLitAdditive => {
+                // BspVertex: pos3(12) + tex2(8) + lm2(8) + lm_layer(4) + normal3(12) + tangent4(16) = 60 bytes
+                let binding = vec![vk::VertexInputBindingDescription::default()
+                    .binding(0)
+                    .stride(60)
+                    .input_rate(vk::VertexInputRate::VERTEX)];
+                let attrs = vec![
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(0)
+                        .format(vk::Format::R32G32B32_SFLOAT)
+                        .offset(0),     // position
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(1)
+                        .format(vk::Format::R32G32_SFLOAT)
+                        .offset(12),    // tex_coord
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(2)
+                        .format(vk::Format::R32G32_SFLOAT)
+                        .offset(20),    // lm_coord (unused in lit shader, but must match binding)
+                    vk::VertexInputAttributeDescription::default()
+                        .binding(0)
+                        .location(3)
+                        .format(vk::Format::R32_SFLOAT)
+                        .offset(28),    // lm_layer (unused in lit shader)
+                ];
+                (binding, attrs)
+            }
             _ => {
                 // Default: pos3 + tex2 + norm3 = 32 bytes
                 let binding = vec![vk::VertexInputBindingDescription::default()
@@ -556,6 +617,9 @@ impl PipelineManager {
                     PipelineVariant::Ui | PipelineVariant::PostProcess => {
                         (vk::CullModeFlags::NONE, false)
                     }
+                    // Shadow depth: cull back faces to avoid self-shadowing
+                    PipelineVariant::ShadowDepth => (vk::CullModeFlags::BACK, false),
+                    PipelineVariant::LitAdditive => (vk::CullModeFlags::NONE, false),
                 };
 
                 let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
@@ -578,6 +642,8 @@ impl PipelineManager {
                     PipelineVariant::Opaque => (true, true),
                     PipelineVariant::AlphaBlend | PipelineVariant::Additive | PipelineVariant::Multiplicative => (true, false),
                     PipelineVariant::Ui | PipelineVariant::PostProcess => (false, false),
+                    PipelineVariant::ShadowDepth => (true, true),
+                    PipelineVariant::LitAdditive => (true, false),
                 };
 
                 let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
@@ -588,6 +654,9 @@ impl PipelineManager {
                     .stencil_test_enable(false);
 
                 // Blend state based on variant
+                // ShadowDepth has no color attachment; other variants get a color blend attachment.
+                let has_color_attachment = variant != PipelineVariant::ShadowDepth;
+
                 let color_blend_attachment = match variant {
                     PipelineVariant::Opaque | PipelineVariant::PostProcess => {
                         vk::PipelineColorBlendAttachmentState::default()
@@ -605,7 +674,7 @@ impl PipelineManager {
                             .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
                             .alpha_blend_op(vk::BlendOp::ADD)
                     }
-                    PipelineVariant::Additive => {
+                    PipelineVariant::Additive | PipelineVariant::LitAdditive => {
                         vk::PipelineColorBlendAttachmentState::default()
                             .color_write_mask(vk::ColorComponentFlags::RGBA)
                             .blend_enable(true)
@@ -628,29 +697,41 @@ impl PipelineManager {
                             .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
                             .alpha_blend_op(vk::BlendOp::ADD)
                     }
+                    // ShadowDepth: no color attachment — this value is unused
+                    PipelineVariant::ShadowDepth => {
+                        vk::PipelineColorBlendAttachmentState::default()
+                            .color_write_mask(vk::ColorComponentFlags::empty())
+                            .blend_enable(false)
+                    }
                 };
 
-                let color_blend_attachments = [color_blend_attachment];
+                let color_blend_attachments_slice: &[vk::PipelineColorBlendAttachmentState] =
+                    if has_color_attachment { std::slice::from_ref(&color_blend_attachment) } else { &[] };
                 let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
                     .logic_op_enable(false)
-                    .attachments(&color_blend_attachments);
+                    .attachments(color_blend_attachments_slice);
 
                 // Dynamic rendering info (Vulkan 1.3)
                 // 3D variants (Opaque, AlphaBlend, Additive) render to scene_fbo
                 // UI and PostProcess render to swapchain
+                // ShadowDepth: no color attachment (depth-only cubemap face)
                 let color_fmt = match variant {
-                    PipelineVariant::Opaque | PipelineVariant::AlphaBlend | PipelineVariant::Additive | PipelineVariant::Multiplicative => {
+                    PipelineVariant::Opaque | PipelineVariant::AlphaBlend | PipelineVariant::Additive
+                    | PipelineVariant::Multiplicative | PipelineVariant::LitAdditive => {
                         self.scene_color_format
                     }
                     _ => self.color_format,
                 };
-                let color_formats = [color_fmt];
+                let color_formats_arr = [color_fmt];
+                let color_formats_slice: &[vk::Format] =
+                    if has_color_attachment { &color_formats_arr } else { &[] };
                 let depth_fmt = match variant {
                     PipelineVariant::Ui | PipelineVariant::PostProcess => vk::Format::UNDEFINED,
+                    PipelineVariant::ShadowDepth => vk::Format::D32_SFLOAT,
                     _ => self.depth_format,
                 };
                 let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-                    .color_attachment_formats(&color_formats)
+                    .color_attachment_formats(color_formats_slice)
                     .depth_attachment_format(depth_fmt);
 
                 // Create pipeline
@@ -676,6 +757,155 @@ impl PipelineManager {
                 ctx.device.destroy_shader_module(frag_module, None);
 
                 // Store pipeline
+                self.pipelines.insert(
+                    key,
+                    GraphicsPipeline {
+                        pipeline: pipelines[0],
+                        layout: pipeline_layout,
+                    },
+                );
+
+                Ok(())
+            }
+        }).ok_or_else(|| "No Vulkan context".to_string())?
+    }
+
+    /// Create the shadow cubemap depth pipeline using a traditional render pass.
+    ///
+    /// This must be called separately from `create_pipeline` because depth-only
+    /// pipelines use a traditional render pass, not dynamic rendering.
+    pub fn create_shadow_pipeline(&mut self, render_pass: vk::RenderPass) -> Result<(), String> {
+        let key = PipelineKey { shader: ShaderType::ShadowCube, variant: PipelineVariant::ShadowDepth };
+        if self.pipelines.contains_key(&key) {
+            return Ok(());
+        }
+
+        // Create a minimal pipeline layout for the shadow pass: push constants only,
+        // no descriptor sets.  Using the shared layout (which declares sets 0/1/2) would
+        // require those sets to be bound before the shadow draw even though the shadow
+        // shaders never access them.  Some drivers (notably Intel) silently discard draw
+        // calls when descriptor sets declared in the layout are not bound.
+        let pipeline_layout = if let Some(existing) = self.shadow_pipeline_layout {
+            existing
+        } else {
+            let new_layout = gpu_device::with_device(|ctx| {
+                unsafe {
+                    let push_range = vk::PushConstantRange {
+                        stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        offset: 0,
+                        size: 80, // ShadowCubePushConstants: mat4(64) + vec3(12) + f32(4)
+                    };
+                    let layout_info = vk::PipelineLayoutCreateInfo::default()
+                        .push_constant_ranges(std::slice::from_ref(&push_range));
+                    ctx.device.create_pipeline_layout(&layout_info, None).ok()
+                }
+            }).flatten().ok_or("Failed to create shadow pipeline layout")?;
+            self.shadow_pipeline_layout = Some(new_layout);
+            new_layout
+        };
+
+        gpu_device::with_device(|ctx| {
+            // SAFETY: Vulkan context is valid; render_pass is a valid handle.
+            unsafe {
+                let vert_module = Self::create_shader_module(&ctx.device, SHADOW_CUBE_VERT_SPV)
+                    .map_err(|e| format!("Failed to create shadow vert shader: {:?}", e))?;
+                let frag_module = Self::create_shader_module(&ctx.device, SHADOW_CUBE_FRAG_SPV)
+                    .map_err(|e| format!("Failed to create shadow frag shader: {:?}", e))?;
+
+                let entry_name = std::ffi::CString::new("main").unwrap();
+
+                let shader_stages = [
+                    vk::PipelineShaderStageCreateInfo::default()
+                        .stage(vk::ShaderStageFlags::VERTEX)
+                        .module(vert_module)
+                        .name(&entry_name),
+                    vk::PipelineShaderStageCreateInfo::default()
+                        .stage(vk::ShaderStageFlags::FRAGMENT)
+                        .module(frag_module)
+                        .name(&entry_name),
+                ];
+
+                // Position-only vertex input (stride=60 matches BspVertex, position at offset 0)
+                let binding = [vk::VertexInputBindingDescription::default()
+                    .binding(0)
+                    .stride(60)
+                    .input_rate(vk::VertexInputRate::VERTEX)];
+                let attrs = [vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(0)
+                    .format(vk::Format::R32G32B32_SFLOAT)
+                    .offset(0)];
+
+                let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+                    .vertex_binding_descriptions(&binding)
+                    .vertex_attribute_descriptions(&attrs);
+
+                let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+                    .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+                    .primitive_restart_enable(false);
+
+                let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+                let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+                    .dynamic_states(&dynamic_states);
+
+                let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+                    .viewport_count(1)
+                    .scissor_count(1);
+
+                let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+                    .depth_clamp_enable(false)
+                    .rasterizer_discard_enable(false)
+                    .polygon_mode(vk::PolygonMode::FILL)
+                    .line_width(1.0)
+                    // Shadow pass uses a standard (non-Y-flipped) viewport, so triangles
+                    // appear in their natural CCW winding.  The main 3D pass uses CLOCKWISE
+                    // because it flips viewport height; the shadow pass does not.
+                    // Use CULL_NONE to match the main world pipeline and avoid accidentally
+                    // discarding all geometry (which would leave depth maps at clear=1.0).
+                    .cull_mode(vk::CullModeFlags::NONE)
+                    .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+                    .depth_bias_enable(false);
+
+                let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+                    .sample_shading_enable(false)
+                    .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+                let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+                    .depth_test_enable(true)
+                    .depth_write_enable(true)
+                    .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+                    .depth_bounds_test_enable(false)
+                    .stencil_test_enable(false);
+
+                // One R32_SFLOAT colour attachment — writes dist/radius (no blending needed).
+                let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+                    .color_write_mask(vk::ColorComponentFlags::R)
+                    .blend_enable(false);
+                let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
+                    .logic_op_enable(false)
+                    .attachments(std::slice::from_ref(&color_blend_attachment));
+
+                let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+                    .stages(&shader_stages)
+                    .vertex_input_state(&vertex_input)
+                    .input_assembly_state(&input_assembly)
+                    .viewport_state(&viewport_state)
+                    .rasterization_state(&rasterizer)
+                    .multisample_state(&multisampling)
+                    .depth_stencil_state(&depth_stencil)
+                    .color_blend_state(&color_blending)
+                    .dynamic_state(&dynamic_state)
+                    .layout(pipeline_layout)
+                    .render_pass(render_pass)
+                    .subpass(0);
+
+                let pipelines = ctx.device
+                    .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                    .map_err(|e| format!("Failed to create shadow pipeline: {:?}", e.1))?;
+
+                ctx.device.destroy_shader_module(vert_module, None);
+                ctx.device.destroy_shader_module(frag_module, None);
+
                 self.pipelines.insert(
                     key,
                     GraphicsPipeline {
@@ -733,7 +963,10 @@ impl PipelineManager {
                     ctx.device.destroy_pipeline(pipeline.pipeline, None);
                 }
 
-                // Destroy pipeline layout
+                // Destroy pipeline layouts
+                if let Some(layout) = self.shadow_pipeline_layout.take() {
+                    ctx.device.destroy_pipeline_layout(layout, None);
+                }
                 if let Some(layout) = self.pipeline_layout.take() {
                     ctx.device.destroy_pipeline_layout(layout, None);
                 }
@@ -762,6 +995,7 @@ impl Default for PipelineManager {
             ui_texture_set_layout: None,
             lightmap_set_layout: None,
             pipeline_layout: None,
+            shadow_pipeline_layout: None,
             initialized: false,
             color_format: vk::Format::R8G8B8A8_UNORM,
             depth_format: vk::Format::D32_SFLOAT,

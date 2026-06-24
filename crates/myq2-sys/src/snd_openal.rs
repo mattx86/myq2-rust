@@ -240,10 +240,12 @@ impl ReverbEnvironment {
 }
 
 /// Number of streaming buffers for cinematic audio.
-const STREAMING_BUFFER_COUNT: usize = 4;
+/// Increased from the original 4 to 32 to give the streaming path generous
+/// headroom against buffer underruns during cinematic playback.
+const STREAMING_BUFFER_COUNT: usize = 32;
 
-/// Size of each streaming buffer in bytes (~0.25 seconds at 44100 Hz stereo 16-bit).
-const STREAMING_BUFFER_SIZE: usize = 44100;
+/// Size of each streaming buffer in bytes (~0.5 seconds at 44100 Hz stereo 16-bit).
+const STREAMING_BUFFER_SIZE: usize = 88200;
 
 /// OpenAL Soft backend with HRTF support.
 pub struct OpenAlBackend {
@@ -281,6 +283,10 @@ pub struct OpenAlBackend {
     streaming_buffers: [al::ALuint; STREAMING_BUFFER_COUNT],
     /// Whether streaming is initialized.
     streaming_initialized: bool,
+    /// Track buffer underruns for debugging/recovery.
+    streaming_underrun_count: usize,
+    /// Last time we detected a potential underrun.
+    last_underrun_time: std::time::Instant,
 }
 
 impl OpenAlBackend {
@@ -303,6 +309,8 @@ impl OpenAlBackend {
             streaming_source: 0,
             streaming_buffers: [0; STREAMING_BUFFER_COUNT],
             streaming_initialized: false,
+            streaming_underrun_count: 0,
+            last_underrun_time: std::time::Instant::now(),
         }
     }
 
@@ -769,7 +777,13 @@ impl AudioBackend for OpenAlBackend {
         }
     }
 
-    fn update_listener(&mut self, origin: &[f32; 3], forward: &[f32; 3], up: &[f32; 3]) {
+    fn update_listener(
+        &mut self,
+        origin: &[f32; 3],
+        velocity: &[f32; 3],
+        forward: &[f32; 3],
+        up: &[f32; 3],
+    ) {
         if !self.initialized {
             return;
         }
@@ -778,6 +792,16 @@ impl AudioBackend for OpenAlBackend {
         unsafe {
             let (px, py, pz) = Self::q2_to_al(origin);
             al::alListener3f(al::AL_POSITION, px, py, pz);
+
+            // Listener velocity drives OpenAL's native Doppler model (paired with
+            // per-source velocities). Zeroed when Doppler is disabled so a stale
+            // velocity cannot keep shifting pitch.
+            if self.doppler_enabled {
+                let (vx, vy, vz) = Self::q2_to_al(velocity);
+                al::alListener3f(al::AL_VELOCITY, vx, vy, vz);
+            } else {
+                al::alListener3f(al::AL_VELOCITY, 0.0, 0.0, 0.0);
+            }
 
             let (fx, fy, fz) = Self::q2_to_al(forward);
             let (ux, uy, uz) = Self::q2_to_al(up);
@@ -989,6 +1013,9 @@ impl AudioBackend for OpenAlBackend {
             return;
         }
 
+        // Check for and recover from buffer underruns
+        self.check_and_recover_underrun();
+
         // SAFETY: OpenAL is initialized; streaming source and buffers are valid.
         unsafe {
             // Unqueue any processed buffers first
@@ -1005,7 +1032,27 @@ impl AudioBackend for OpenAlBackend {
             let mut queued: al::ALint = 0;
             al::alGetSourcei(self.streaming_source, al::AL_BUFFERS_QUEUED, &mut queued);
 
-            // Find a free buffer to use
+            // If all buffers are queued, try to reclaim processed ones
+            if (queued as usize) >= STREAMING_BUFFER_COUNT {
+                let mut processed: al::ALint = 0;
+                al::alGetSourcei(self.streaming_source, al::AL_BUFFERS_PROCESSED, &mut processed);
+
+                if processed == 0 {
+                    // All buffers still playing — skip this frame rather than
+                    // force-unqueueing a playing buffer (which causes stutter)
+                    return;
+                }
+
+                // Unqueue processed buffers normally
+                while processed > 0 {
+                    let mut buffer: al::ALuint = 0;
+                    al::alSourceUnqueueBuffers(self.streaming_source, 1, &mut buffer);
+                    processed -= 1;
+                    queued -= 1;
+                }
+            }
+
+            // Now we should have room to queue new data
             if (queued as usize) < STREAMING_BUFFER_COUNT {
                 // Find an unused buffer
                 let buffer = self.streaming_buffers[queued as usize];
@@ -1039,6 +1086,9 @@ impl AudioBackend for OpenAlBackend {
                 if state != al::AL_PLAYING {
                     al::alSourcePlay(self.streaming_source);
                 }
+            } else {
+                // Still can't queue - log for debugging
+                eprintln!("OpenAL: Streaming buffer queue full, dropping audio data");
             }
         }
     }
@@ -1074,6 +1124,41 @@ impl AudioBackend for OpenAlBackend {
                 al::alSourceUnqueueBuffers(self.streaming_source, 1, &mut buffer);
                 queued -= 1;
             }
+        }
+    }
+}
+
+impl OpenAlBackend {
+    /// Check for buffer underruns and attempt recovery.
+    /// Returns true if an underrun was detected and recovered from.
+    fn check_and_recover_underrun(&mut self) -> bool {
+        if !self.initialized || !self.streaming_initialized {
+            return false;
+        }
+
+        // SAFETY: OpenAL is initialized; streaming source is valid.
+        unsafe {
+            let mut state: al::ALint = 0;
+            al::alGetSourcei(self.streaming_source, al::AL_SOURCE_STATE, &mut state);
+
+            // When the source has stopped due to buffer underrun (ran out of queued buffers),
+            // just track the event. The source will be restarted naturally when new buffers
+            // are queued (see queue_streaming_samples line that calls alSourcePlay when
+            // state != AL_PLAYING). No need to aggressively stop/reset which causes audible gaps.
+            if state == al::AL_STOPPED {
+                self.streaming_underrun_count += 1;
+                let now = std::time::Instant::now();
+                let time_since_last = now.duration_since(self.last_underrun_time).as_secs();
+
+                if time_since_last >= 1 {
+                    eprintln!("OpenAL: Buffer underrun detected (count: {})", self.streaming_underrun_count);
+                    self.last_underrun_time = now;
+                }
+
+                return true;
+            }
+
+            false
         }
     }
 }
@@ -1201,13 +1286,13 @@ mod tests {
 
     #[test]
     fn test_streaming_buffer_count() {
-        assert_eq!(STREAMING_BUFFER_COUNT, 4);
+        assert_eq!(STREAMING_BUFFER_COUNT, 32);
     }
 
     #[test]
     fn test_streaming_buffer_size() {
-        // ~0.25 seconds at 44100 Hz stereo 16-bit
-        assert_eq!(STREAMING_BUFFER_SIZE, 44100);
+        // ~0.5 seconds at 44100 Hz stereo 16-bit
+        assert_eq!(STREAMING_BUFFER_SIZE, 88200);
     }
 
     // ========================================================================

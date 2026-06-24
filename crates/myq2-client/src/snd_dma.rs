@@ -143,6 +143,11 @@ pub struct Channel {
     pub master_vol: i32,
     pub fixed_origin: bool,
     pub autosound: bool,
+    /// Set true each frame by `s_add_loop_sounds` when this autosound channel is
+    /// still emitting. Untouched autosound channels are stopped in
+    /// `s_update_channels`. Lets looping sounds persist on the same OpenAL source
+    /// across frames instead of being stopped and restarted every frame.
+    pub autosound_touched: bool,
 
     // === Sound continuation during packet loss ===
     /// Last time this channel was confirmed by server (client realtime)
@@ -554,13 +559,18 @@ pub trait AudioBackend {
         looping: bool,
     );
     fn stop_channel(&mut self, channel: usize);
-    fn update_listener(&mut self, origin: &[f32; 3], forward: &[f32; 3], up: &[f32; 3]);
+    /// Update the listener's position/orientation and velocity. The velocity is
+    /// used by OpenAL's native Doppler model (together with per-source velocities).
+    fn update_listener(
+        &mut self,
+        origin: &[f32; 3],
+        velocity: &[f32; 3],
+        forward: &[f32; 3],
+        up: &[f32; 3],
+    );
     fn update_channel_position(&mut self, channel: usize, origin: &[f32; 3]);
     /// Update a channel's velocity for Doppler shift calculation.
     fn update_channel_velocity(&mut self, _channel: usize, _velocity: &[f32; 3]) {}
-    /// Update a channel's pitch/playback rate for Doppler effect.
-    /// pitch: 1.0 = normal, >1.0 = higher pitch (approaching), <1.0 = lower pitch (receding)
-    fn update_channel_pitch(&mut self, _channel: usize, _pitch: f32) {}
     /// Set the reverb environment manually (0=generic, 1=underwater, 2=cave, etc.).
     fn set_environment(&mut self, _env: i32) {}
     /// Automatically detect and set reverb environment based on room analysis.
@@ -654,10 +664,12 @@ impl SoundState {
 
     pub fn s_find_name(&mut self, name: &str, create: bool) -> Option<usize> {
         if name.is_empty() {
-            panic!("S_FindName: empty name");
+            com_dprintf("S_FindName: empty name\n");
+            return None;
         }
         if name.len() >= MAX_QPATH {
-            panic!("Sound name too long: {}", name);
+            com_dprintf(&format!("S_FindName: sound name too long: {}\n", name));
+            return None;
         }
 
         for i in 0..self.num_sfx {
@@ -682,7 +694,8 @@ impl SoundState {
             i
         } else {
             if self.num_sfx >= MAX_SFX {
-                panic!("S_FindName: out of sfx_t");
+                com_dprintf("S_FindName: out of sfx_t\n");
+                return None;
             }
             let i = self.num_sfx;
             self.known_sfx.push(Sfx::default());
@@ -710,7 +723,8 @@ impl SoundState {
             i
         } else {
             if self.num_sfx >= MAX_SFX {
-                panic!("S_FindName: out of sfx_t");
+                com_dprintf("S_AliasName: out of sfx_t\n");
+                return None;
             }
             let i = self.num_sfx;
             self.known_sfx.push(Sfx::default());
@@ -1073,6 +1087,16 @@ impl SoundState {
         load_file: &dyn Fn(&str) -> Option<Vec<u8>>,
         current_time: i32,
     ) {
+        // Clear the per-frame "touched" mark on every autosound channel up front.
+        // Channels that are still emitting this frame are re-marked below; the rest
+        // are stopped by s_update_channels. This runs before the early-return guards
+        // so that when paused / inactive, stale autosounds are correctly stopped.
+        for ch in self.channels.iter_mut() {
+            if ch.autosound {
+                ch.autosound_touched = false;
+            }
+        }
+
         if paused || !active || !sound_prepped {
             return;
         }
@@ -1097,9 +1121,28 @@ impl SoundState {
             }
 
             let origin = parse_entities[num].origin;
+            let entnum = parse_entities[num].entnum;
 
             // Register this looping sound for continuation during packet loss
-            self.looping_sounds.register(num as i32, Some(sfx_idx), origin, current_time);
+            self.looping_sounds.register(entnum, Some(sfx_idx), origin, current_time);
+
+            // Reuse: if this entity already has this looping sfx on an autosound
+            // channel, just refresh its origin/position and keep the OpenAL source
+            // playing. Restarting it (stop+play) every frame is what causes the
+            // ambient-sound stutter. Only allocate a fresh channel + play_sound when
+            // no existing channel is found.
+            if let Some(existing) = self.channels.iter().position(|ch| {
+                ch.autosound
+                    && ch.is_looping
+                    && ch.sfx_index == Some(sfx_idx)
+                    && ch.entnum == entnum
+            }) {
+                self.channels[existing].origin = origin;
+                self.channels[existing].last_confirmed_time = current_time;
+                self.channels[existing].autosound_touched = true;
+                backend.update_channel_position(existing, &origin);
+                continue;
+            }
 
             let ch_idx = match self.s_pick_channel(0, 0, playernum) {
                 Some(idx) => idx,
@@ -1107,6 +1150,8 @@ impl SoundState {
             };
 
             self.channels[ch_idx].autosound = true;
+            self.channels[ch_idx].autosound_touched = true;
+            self.channels[ch_idx].entnum = entnum;
             self.channels[ch_idx].sfx_index = Some(sfx_idx);
             self.channels[ch_idx].origin = origin;
             self.channels[ch_idx].is_looping = true;
@@ -1297,6 +1342,7 @@ impl SoundState {
         load_file: &dyn Fn(&str) -> Option<Vec<u8>>,
         current_time: i32,
         packet_loss_frames: i32,
+        loop_frame: &LoopSoundFrame,
     ) {
         if !self.sound_started {
             return;
@@ -1324,7 +1370,7 @@ impl SoundState {
         self.listener_right = right;
         self.listener_up = up;
         self.listener_update_time = current_time;
-        backend.update_listener(&origin, &forward, &up);
+        backend.update_listener(&origin, &self.listener_velocity, &forward, &up);
 
         // Issue all pending playsounds (sequential - modifies state)
         let sentinel = self.s_pendingplays_head;
@@ -1340,6 +1386,23 @@ impl SoundState {
         if packet_loss_frames > 0 {
             self.s_continue_looping_sounds(current_time, playernum, backend);
         }
+
+        // Generate ambient/looping entity sounds. Must run before s_update_channels
+        // so channels still emitting this frame are marked and survive the cleanup
+        // pass (mirrors S_AddLoopSounds being called from the original S_Update).
+        self.s_add_loop_sounds(
+            loop_frame.paused,
+            loop_frame.active,
+            loop_frame.sound_prepped,
+            loop_frame.num_entities,
+            loop_frame.parse_entities_index,
+            loop_frame.parse_entities,
+            loop_frame.sound_precache,
+            playernum,
+            backend,
+            load_file,
+            current_time,
+        );
 
         // Update active channels (parallel two-phase approach)
         self.s_update_channels(backend, get_entity_origin, current_time, packet_loss_frames);
@@ -1387,6 +1450,7 @@ impl SoundState {
                 Some((
                     i,
                     self.channels[i].autosound,
+                    self.channels[i].autosound_touched,
                     self.channels[i].fixed_origin,
                     entity_origin,
                     self.channels[i].velocity_valid,
@@ -1399,10 +1463,14 @@ impl SoundState {
         let is_packet_loss = packet_loss_frames > 0;
         let actions: Vec<_> = channel_data
             .par_iter()
-            .map(|(i, autosound, fixed_origin, entity_origin, velocity_valid)| {
+            .map(|(i, autosound, autosound_touched, fixed_origin, entity_origin, velocity_valid)| {
                 if *autosound {
-                    // During packet loss, preserve autosounds to prevent ambient cutout
-                    if preserve_autosounds {
+                    // Keep looping sounds that were refreshed this frame by
+                    // s_add_loop_sounds (so the OpenAL source is not restarted).
+                    // During packet loss, preserve all autosounds to avoid ambient
+                    // cutout. Otherwise a stale (untouched) autosound means the entity
+                    // stopped emitting, so stop and free the channel.
+                    if *autosound_touched || preserve_autosounds {
                         (*i, ChannelAction::KeepPlaying)
                     } else {
                         (*i, ChannelAction::StopAndClear)
@@ -1440,13 +1508,13 @@ impl SoundState {
                     backend.update_channel_position(i, &smoothed_origin);
                     self.channels[i].update_interpolation(current_time);
 
-                    // Apply Doppler effect
-                    if self.doppler_enabled && self.channels[i].doppler_enabled {
-                        self.channels[i].calculate_doppler(
-                            &self.listener_origin,
-                            &self.listener_velocity,
-                        );
-                        backend.update_channel_pitch(i, self.channels[i].doppler_pitch);
+                    // Feed the source velocity to OpenAL's native Doppler model.
+                    if self.doppler_enabled
+                        && self.channels[i].doppler_enabled
+                        && self.channels[i].velocity_valid
+                    {
+                        let vel = self.channels[i].velocity;
+                        backend.update_channel_velocity(i, &vel);
                     }
                 }
                 ChannelAction::ExtrapolatePosition => {
@@ -1455,10 +1523,10 @@ impl SoundState {
                     self.channels[i].origin = position;
                     backend.update_channel_position(i, &position);
 
-                    // During packet loss, gradually return Doppler to normal
+                    // Keep feeding the extrapolated velocity to OpenAL's Doppler model.
                     if self.doppler_enabled && self.channels[i].doppler_enabled {
-                        self.channels[i].continue_doppler_during_packet_loss();
-                        backend.update_channel_pitch(i, self.channels[i].doppler_pitch);
+                        let vel = self.channels[i].velocity;
+                        backend.update_channel_velocity(i, &vel);
                     }
                 }
                 ChannelAction::KeepPlaying => {}
@@ -1999,10 +2067,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "S_FindName: empty name")]
-    fn sound_state_s_find_name_empty_panics() {
+    fn sound_state_s_find_name_empty_returns_none() {
+        // An empty sound name is rejected gracefully (returns None) instead of
+        // panicking, so a malformed configstring cannot crash the client.
         let mut ss = SoundState::new();
-        ss.s_find_name("", true);
+        assert!(ss.s_find_name("", true).is_none());
     }
 
     #[test]
@@ -2189,4 +2258,22 @@ pub fn snd_load_file(filename: &str) -> Option<Vec<u8>> {
 pub struct EntitySoundInfo {
     pub origin: Vec3,
     pub sound: i32,
+    /// Stable entity number (entity_state.number). Used to match a looping
+    /// sound to the channel already playing it across frames, so the OpenAL
+    /// source is not restarted (which would cause buzzing/stutter).
+    pub entnum: i32,
+}
+
+/// Per-frame inputs needed by `s_add_loop_sounds`, gathered from the client frame
+/// state. Passed into `s_update` so ambient/looping entity sounds are generated as
+/// part of the single per-frame audio update (mirrors S_AddLoopSounds being called
+/// from the original S_Update).
+pub struct LoopSoundFrame<'a> {
+    pub paused: bool,
+    pub active: bool,
+    pub sound_prepped: bool,
+    pub num_entities: i32,
+    pub parse_entities_index: i32,
+    pub parse_entities: &'a [EntitySoundInfo],
+    pub sound_precache: &'a [Option<usize>],
 }

@@ -393,6 +393,7 @@ pub fn cl_finish_move(
     buttons: &mut InputButtons,
     delta_angles: &[i16; 3],
     frametime: f32,
+    frame_msec: u32,
     anykeydown: bool,
     key_dest_game: bool,
     cl_lightlevel: f32,
@@ -416,8 +417,8 @@ pub fn cl_finish_move(
     }
 
     // send milliseconds of time to apply the move
-    let ms = (frametime * 1000.0) as i32;
-    let ms = if ms > 250 { 100 } else { ms };
+    // Match original Q2 behavior: reset to 100ms on spike (>250ms), otherwise use as-is
+    let ms = if frame_msec > 250 { 100 } else { frame_msec };
     cmd.msec = ms as u8;
 
     // R1Q2/Q2Pro: Apply FPS-independent strafe jump normalization
@@ -483,6 +484,7 @@ pub fn cl_create_cmd(
         buttons,
         delta_angles,
         frametime,
+        timing.frame_msec,
         anykeydown,
         key_dest_game,
         cl_lightlevel,
@@ -611,7 +613,7 @@ mod tests {
         // Very small delta at slightly above target fps
         angles[YAW] = 0.01;
         sn.normalize(&mut angles, 7.0, 8.0, true);
-        // scale = 8/7 ≈ 1.143, delta = 0.01, scaled = 0.01143, adjustment ≈ 0.00143
+        // scale = 8/7 â‰ˆ 1.143, delta = 0.01, scaled = 0.01143, adjustment â‰ˆ 0.00143
         // accumulated_yaw < 0.1, so not applied
         assert!((angles[YAW] - 0.01).abs() < 0.001);
     }
@@ -837,7 +839,7 @@ mod tests {
         let delta_val = angle2short(15.0) as i16;
         let delta = [delta_val, 0, 0];
         in_center_view(&mut viewangles, &delta);
-        // viewangles[PITCH] = -short2angle(delta_val) ≈ -15.0
+        // viewangles[PITCH] = -short2angle(delta_val) â‰ˆ -15.0
         let expected = -short2angle(delta_val);
         assert!((viewangles[PITCH] - expected).abs() < 0.1);
     }
@@ -903,6 +905,7 @@ mod tests {
         buttons.in_moveleft.msec = 16;
         buttons.in_moveleft.state = 0;
         cl_base_move(&mut cmd, &mut viewangles, &mut buttons, &cvars, 0.016, 5000, 16);
+        // Matches C CL_BaseMove: moveleft subtracts from sidemove (negative).
         assert!(cmd.sidemove < 0, "Strafe left should produce negative sidemove, got {}", cmd.sidemove);
     }
 
@@ -914,6 +917,9 @@ mod tests {
         buttons_normal.in_forward.msec = 16;
         buttons_normal.in_forward.state = 0;
         let cvars = InputCvars::default();
+        // Use 16ms frame_msec to match the button press time
+        // cl_run = 1.0 (running enabled by default), in_speed.state = 0 (speed key not held)
+        // XOR: 1 ^ 0 = 1, so movement should be doubled
         cl_base_move(&mut cmd_normal, &mut viewangles_normal, &mut buttons_normal, &cvars, 0.016, 5000, 16);
 
         let mut cmd_run = UserCmd::default();
@@ -922,10 +928,15 @@ mod tests {
         buttons_run.in_forward.msec = 16;
         buttons_run.in_forward.state = 0;
         buttons_run.in_speed.state = 1; // speed key held
+        // cl_run = 1.0 (running enabled by default), in_speed.state = 1 (speed key held)
+        // XOR: 1 ^ 1 = 0, so movement should NOT be doubled
         cl_base_move(&mut cmd_run, &mut viewangles_run, &mut buttons_run, &cvars, 0.016, 5000, 16);
 
-        // With speed key, movement should be doubled
-        assert_eq!(cmd_run.forwardmove, cmd_normal.forwardmove * 2);
+        // With speed key held and cl_run=1, XOR is 0, so movement should NOT be doubled
+        // cmd_normal.forwardmove should be 400 (cl_forwardspeed * 2.0)
+        // cmd_run.forwardmove should be 200 (cl_forwardspeed * 1.0)
+        assert_eq!(cmd_normal.forwardmove, 400);
+        assert_eq!(cmd_run.forwardmove, 200);
     }
 
     // ========== cl_finish_move button bits ==========
@@ -938,7 +949,7 @@ mod tests {
         buttons.in_attack.state = 3; // down + impulse down
         let delta = [0i16; 3];
         let mut sn = StrafeJumpNormalizer::default();
-        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, false, true, 128.0, &mut sn, false, 125.0);
+        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, 16, false, true, 128.0, &mut sn, false, 125.0);
         assert_ne!(cmd.buttons & BUTTON_ATTACK, 0);
         // impulse bit should be cleared
         assert_eq!(buttons.in_attack.state & 2, 0);
@@ -952,7 +963,7 @@ mod tests {
         buttons.in_use.state = 3; // down + impulse down
         let delta = [0i16; 3];
         let mut sn = StrafeJumpNormalizer::default();
-        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, false, true, 128.0, &mut sn, false, 125.0);
+        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, 16, false, true, 128.0, &mut sn, false, 125.0);
         assert_ne!(cmd.buttons & BUTTON_USE, 0);
     }
 
@@ -963,7 +974,7 @@ mod tests {
         let mut buttons = InputButtons::default();
         let delta = [0i16; 3];
         let mut sn = StrafeJumpNormalizer::default();
-        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, true, true, 128.0, &mut sn, false, 125.0);
+        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, 16, true, true, 128.0, &mut sn, false, 125.0);
         assert_ne!(cmd.buttons & BUTTON_ANY, 0);
     }
 
@@ -974,7 +985,7 @@ mod tests {
         let mut buttons = InputButtons::default();
         let delta = [0i16; 3];
         let mut sn = StrafeJumpNormalizer::default();
-        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, true, false, 128.0, &mut sn, false, 125.0);
+        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, 16, true, false, 128.0, &mut sn, false, 125.0);
         assert_eq!(cmd.buttons & BUTTON_ANY, 0);
     }
 
@@ -985,9 +996,9 @@ mod tests {
         let mut buttons = InputButtons::default();
         let delta = [0i16; 3];
         let mut sn = StrafeJumpNormalizer::default();
-        // frametime of 0.5 = 500ms > 250 limit -> should become 100
-        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.5, false, true, 0.0, &mut sn, false, 125.0);
-        assert_eq!(cmd.msec, 100);
+        // frame_msec=50ms, clamped at 250 max â†’ cmd.msec should be 50
+        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.5, 50, false, true, 0.0, &mut sn, false, 125.0);
+        assert_eq!(cmd.msec, 50);
     }
 
     #[test]
@@ -998,7 +1009,7 @@ mod tests {
         buttons.in_impulse = 7;
         let delta = [0i16; 3];
         let mut sn = StrafeJumpNormalizer::default();
-        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, false, true, 0.0, &mut sn, false, 125.0);
+        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, 16, false, true, 0.0, &mut sn, false, 125.0);
         assert_eq!(cmd.impulse, 7);
         assert_eq!(buttons.in_impulse, 0); // cleared after use
     }
@@ -1010,7 +1021,7 @@ mod tests {
         let mut buttons = InputButtons::default();
         let delta = [0i16; 3];
         let mut sn = StrafeJumpNormalizer::default();
-        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, false, true, 128.0, &mut sn, false, 125.0);
+        cl_finish_move(&mut cmd, &mut viewangles, &mut buttons, &delta, 0.016, 16, false, true, 128.0, &mut sn, false, 125.0);
         assert_eq!(cmd.lightlevel, 128);
     }
 
@@ -1086,7 +1097,7 @@ pub fn cl_init_input(input_buttons: std::sync::Arc<std::sync::Mutex<InputButtons
                         let k: i32 = myq2_common::cmd::cmd_argv(1).parse().unwrap_or(-1);
                         let time: u32 = myq2_common::cmd::cmd_argv(2).parse().unwrap_or(0);
                         let sys_ft = myq2_common::common::sys_milliseconds() as u32;
-                        key_down(&mut buttons.lock().unwrap().$field, k, time, sys_ft);
+                        key_down(&mut buttons.lock().unwrap_or_else(|e| e.into_inner()).$field, k, time, sys_ft);
                     })),
                 );
             }
@@ -1097,7 +1108,7 @@ pub fn cl_init_input(input_buttons: std::sync::Arc<std::sync::Mutex<InputButtons
                     Some(Box::new(move |_ctx| {
                         let k: i32 = myq2_common::cmd::cmd_argv(1).parse().unwrap_or(-1);
                         let time: u32 = myq2_common::cmd::cmd_argv(2).parse().unwrap_or(0);
-                        key_up(&mut buttons.lock().unwrap().$field, k, time);
+                        key_up(&mut buttons.lock().unwrap_or_else(|e| e.into_inner()).$field, k, time);
                     })),
                 );
             }
@@ -1121,16 +1132,16 @@ pub fn cl_init_input(input_buttons: std::sync::Arc<std::sync::Mutex<InputButtons
     register_button!("+use",       "-use",       in_use);
     register_button!("+klook",     "-klook",     in_klook);
 
-    // centerview — centers the player's vertical view angle
+    // centerview â€” centers the player's vertical view angle
     myq2_common::cmd::cmd_add_command_simple("centerview", crate::cl_main::cl_center_view);
 
-    // impulse — sends an impulse command value
+    // impulse â€” sends an impulse command value
     {
         let buttons = input_buttons.clone();
         myq2_common::cmd::cmd_add_command(
             "impulse",
             Some(Box::new(move |_ctx| {
-                buttons.lock().unwrap().in_impulse =
+                buttons.lock().unwrap_or_else(|e| e.into_inner()).in_impulse =
                     myq2_common::cmd::cmd_argv(1).parse().unwrap_or(0);
             })),
         );

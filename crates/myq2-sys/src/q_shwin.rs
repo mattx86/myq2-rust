@@ -1,4 +1,4 @@
-// q_shwin.rs — Shared Windows platform code: memory, timing, filesystem
+// q_shwin.rs â€” Shared Windows platform code: memory, timing, filesystem
 // Converted from: myq2-original/win32/q_shwin.c
 
 use std::alloc::{self, Layout};
@@ -33,10 +33,10 @@ static HUNK_COUNT: Mutex<i32> = Mutex::new(0);
 
 /// Reserve a large block of memory.
 ///
-/// Original: `void *Hunk_Begin(int maxsize)` — used VirtualAlloc with MEM_RESERVE.
+/// Original: `void *Hunk_Begin(int maxsize)` â€” used VirtualAlloc with MEM_RESERVE.
 /// Rust equivalent: allocate the full block up front (no virtual memory reserve/commit distinction).
 pub fn hunk_begin(max_size: usize) -> *mut u8 {
-    let mut hunk = HUNK.lock().unwrap();
+    let mut hunk = HUNK.lock().unwrap_or_else(|e| e.into_inner());
     hunk.cur_size = 0;
     hunk.max_size = max_size;
 
@@ -57,12 +57,12 @@ pub fn hunk_begin(max_size: usize) -> *mut u8 {
 
 /// Allocate from the current hunk, rounding up to 32-byte cache line.
 ///
-/// Original: `void *Hunk_Alloc(int size)` — used VirtualAlloc MEM_COMMIT.
+/// Original: `void *Hunk_Alloc(int size)` â€” used VirtualAlloc MEM_COMMIT.
 pub fn hunk_alloc(size: usize) -> *mut u8 {
     // Round to cache line (32 bytes)
     let size = (size + 31) & !31;
 
-    let mut hunk = HUNK.lock().unwrap();
+    let mut hunk = HUNK.lock().unwrap_or_else(|e| e.into_inner());
     hunk.cur_size += size;
 
     if hunk.cur_size > hunk.max_size {
@@ -77,20 +77,20 @@ pub fn hunk_alloc(size: usize) -> *mut u8 {
 ///
 /// Original: `int Hunk_End(void)`
 pub fn hunk_end() -> usize {
-    let hunk = HUNK.lock().unwrap();
-    let mut count = HUNK_COUNT.lock().unwrap();
+    let hunk = HUNK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut count = HUNK_COUNT.lock().unwrap_or_else(|e| e.into_inner());
     *count += 1;
     hunk.cur_size
 }
 
 /// Free a previously allocated hunk.
 ///
-/// Original: `void Hunk_Free(void *base)` — used VirtualFree MEM_RELEASE.
+/// Original: `void Hunk_Free(void *base)` â€” used VirtualFree MEM_RELEASE.
 /// # Safety
 /// `base` must have been allocated by `hunk_alloc` and not yet freed.
 pub unsafe fn hunk_free(base: *mut u8) {
     if !base.is_null() {
-        let hunk = HUNK.lock().unwrap();
+        let hunk = HUNK.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(layout) = hunk.layout {
             // SAFETY: base was allocated with alloc::alloc_zeroed using this layout.
             unsafe {
@@ -98,7 +98,7 @@ pub unsafe fn hunk_free(base: *mut u8) {
             }
         }
     }
-    let mut count = HUNK_COUNT.lock().unwrap();
+    let mut count = HUNK_COUNT.lock().unwrap_or_else(|e| e.into_inner());
     *count -= 1;
 }
 
@@ -111,11 +111,11 @@ pub static CURTIME: Mutex<i32> = Mutex::new(0);
 
 /// Get milliseconds since engine start.
 ///
-/// Original: `int Sys_Milliseconds(void)` — used timeGetTime().
+/// Original: `int Sys_Milliseconds(void)` â€” used timeGetTime().
 /// Delegates to the canonical implementation in myq2_common and updates CURTIME.
 pub fn sys_milliseconds() -> i32 {
     let elapsed = myq2_common::common::sys_milliseconds();
-    let mut curtime = CURTIME.lock().unwrap();
+    let mut curtime = CURTIME.lock().unwrap_or_else(|e| e.into_inner());
     *curtime = elapsed;
     elapsed
 }
@@ -126,7 +126,7 @@ pub fn sys_milliseconds() -> i32 {
 
 /// Create a directory.
 ///
-/// Original: `void Sys_Mkdir(char *path)` — used _mkdir().
+/// Original: `void Sys_Mkdir(char *path)` â€” used _mkdir().
 pub fn sys_mkdir(path: &str) {
     let _ = std::fs::create_dir_all(path);
 }
@@ -202,7 +202,7 @@ fn file_path(path: &str) -> String {
 ///
 /// Uses _findfirst/_findnext in C. Rust uses std::fs::read_dir with pattern matching.
 pub fn sys_find_first(path: &str, musthave: SysFileFlags, canthave: SysFileFlags) -> Option<String> {
-    let mut state = FIND_STATE.lock().unwrap();
+    let mut state = FIND_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     if state.active {
         crate::sys_win::sys_error("Sys_BeginFind without close");
@@ -248,7 +248,7 @@ pub fn sys_find_first(path: &str, musthave: SysFileFlags, canthave: SysFileFlags
 ///
 /// Original: `char *Sys_FindNext(unsigned musthave, unsigned canthave)`
 pub fn sys_find_next(_musthave: SysFileFlags, _canthave: SysFileFlags) -> Option<String> {
-    let mut state = FIND_STATE.lock().unwrap();
+    let mut state = FIND_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     if !state.active {
         return None;
@@ -268,7 +268,7 @@ pub fn sys_find_next(_musthave: SysFileFlags, _canthave: SysFileFlags) -> Option
 ///
 /// Original: `void Sys_FindClose(void)`
 pub fn sys_find_close() {
-    let mut state = FIND_STATE.lock().unwrap();
+    let mut state = FIND_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.entries.clear();
     state.index = 0;
     state.active = false;
@@ -527,7 +527,7 @@ mod tests {
     fn test_sys_find_close_clears_state() {
         // Directly verify that close resets the state
         sys_find_close();
-        let state = FIND_STATE.lock().unwrap();
+        let state = FIND_STATE.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(state.entries.len(), 0);
         assert_eq!(state.index, 0);
         assert!(!state.active);

@@ -577,7 +577,8 @@ unsafe fn r_add_dynamic_lights(ls: &mut LightState, surf: &MSurface) {
 /// Accesses global blocklights buffer and surface stain data.
 unsafe fn r_add_stains(ls: &mut LightState, surf: &MSurface) {
     let cv = crate::vk_rmain::rcvars();
-    let modulate = cv.vk_modulate.value / cv.r_overbrightbits.value.max(1.0);
+    let overbright_scale = (1u32 << (cv.r_overbrightbits.value.max(0.0) as u32).min(3)) as f32;
+    let modulate = cv.vk_modulate.value / overbright_scale;
     let scale = [modulate; 3];
 
     let smax = (surf.extents[0] as i32 >> 4) + 1;
@@ -663,11 +664,12 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
 
         let mut lightmap = surf.samples;
 
-        // Divide vk_modulate by r_overbrightbits so lightmap values fit in [0,255]
-        // without clamping. The shader multiplies by r_overbrightbits to recover
-        // the full dynamic range, producing smooth circular light gradients.
+        // Divide vk_modulate by the overbright scale (2^bits) so lightmap values fit in
+        // [0,255] without clamping. The shader multiplies by the same scale to recover
+        // the full dynamic range, producing smooth light gradients up to overbright levels.
         let cv = crate::vk_rmain::rcvars();
-        let modulate = cv.vk_modulate.value / cv.r_overbrightbits.value.max(1.0);
+        let overbright_scale = (1u32 << (cv.r_overbrightbits.value.max(0.0) as u32).min(3)) as f32;
+        let modulate = cv.vk_modulate.value / overbright_scale;
 
         if nummaps == 1 {
             for maps in 0..MAXLIGHTMAPS {

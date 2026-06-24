@@ -1100,8 +1100,8 @@ mod tests {
 
         monster_triggered_spawn_use(&mut ctx, 1, 0, 2);
         assert_eq!(ctx.edicts[1].think_fn, Some(crate::dispatch::THINK_MONSTER_TRIGGERED_SPAWN));
-        // enemy should not be set (stays at default 0)
-        assert_eq!(ctx.edicts[1].enemy, 0);
+        // enemy should not be set (stays at default -1 = no entity)
+        assert_eq!(ctx.edicts[1].enemy, -1);
     }
 
     // ============================================================
@@ -1468,8 +1468,8 @@ mod tests {
         ctx.edicts[1].velocity = [0.0, 0.0, 200.0];
 
         m_check_ground(&mut ctx, 1);
-        // Should return early without modifying groundentity
-        assert_eq!(ctx.edicts[1].groundentity, 0);
+        // Should return early without modifying groundentity (default is -1 = no entity)
+        assert_eq!(ctx.edicts[1].groundentity, -1);
     }
 
     #[test]
@@ -1478,7 +1478,7 @@ mod tests {
         ctx.edicts[1].flags = FL_SWIM;
 
         m_check_ground(&mut ctx, 1);
-        assert_eq!(ctx.edicts[1].groundentity, 0);
+        assert_eq!(ctx.edicts[1].groundentity, -1);
     }
 
     #[test]

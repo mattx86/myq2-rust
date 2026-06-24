@@ -48,16 +48,17 @@ impl ParticleManager {
 
     /// Create with specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
-        // FIXME: setup_quad()/setup_vao() hang during initialization - skip for now
-        // TODO: Investigate VAO/VBO binding deadlock
-        Self {
+        let mut manager = Self {
             quad_vbo: VertexBuffer::new(),
             instance_vbo: VertexBuffer::new(),
             vao: VertexArray::new(),
             count: 0,
             capacity,
             staging: Vec::with_capacity(capacity),
-        }
+        };
+        manager.setup_quad();
+        // Note: setup_vao() not needed for Vulkan — vertex layout is defined at pipeline creation time
+        manager
     }
 
     /// Create the unit quad VBO.

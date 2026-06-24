@@ -370,14 +370,18 @@ pub fn no_ammo_weapon_change(ctx: &mut GameContext, ent_idx: usize) {
 /// Called by ClientBeginServerFrame and ClientThink.
 pub fn think_weapon(ctx: &mut GameContext, ent_idx: usize) {
     eprintln!("think_weapon called for entity {}", ent_idx);
+    let client_idx = ctx.edicts[ent_idx].client.expect("Think_Weapon: no client");
+
     // if just died, put the weapon away
     if ctx.edicts[ent_idx].health < 1 {
-        let client_idx = ctx.edicts[ent_idx].client.expect("Think_Weapon: no client");
         ctx.clients[client_idx].newweapon = None;
         change_weapon(ctx, ent_idx);
     }
 
-    let client_idx = ctx.edicts[ent_idx].client.expect("Think_Weapon: no client");
+    // check for weapon change
+    if ctx.clients[client_idx].newweapon.is_some() {
+        change_weapon(ctx, ent_idx);
+    }
 
     // call active weapon think routine
     if let Some(weap_idx) = ctx.clients[client_idx].pers.weapon {

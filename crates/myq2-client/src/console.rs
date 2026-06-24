@@ -1,4 +1,4 @@
-// console.rs — Console display and management
+// console.rs â€” Console display and management
 // Converted from: myq2-original/client/console.c
 //
 // Copyright (C) 1997-2001 Id Software, Inc.
@@ -20,9 +20,9 @@ pub use myq2_common::common::{DISTNAME, DISTVER, com_printf};
 pub const NOTIFY_INDENT: i32 = 2;
 pub const NOTIFY_VERTPOS_FACTOR: f32 = 0.675;
 
-// mattx86: console_demos — USE_CONSOLE_IN_DEMOS is defined
+// mattx86: console_demos â€” USE_CONSOLE_IN_DEMOS is defined
 pub const USE_CONSOLE_IN_DEMOS: bool = true;
-// mattx86: startup_demo — DISABLE_STARTUP_DEMO is defined
+// mattx86: startup_demo â€” DISABLE_STARTUP_DEMO is defined
 pub const DISABLE_STARTUP_DEMO: bool = true;
 
 pub const MAXCMDLINE: usize = 256;
@@ -32,7 +32,7 @@ pub const MAXCMDLINE: usize = 256;
 // ============================================================
 
 // ============================================================
-// ConsoleState — wraps formerly-static-mut console globals
+// ConsoleState â€” wraps formerly-static-mut console globals
 // ============================================================
 
 pub struct ConsoleState {
@@ -131,44 +131,44 @@ pub fn draw_alt_string(x: i32, y: i32, s: &str) {
 // Stubs for renderer/engine functions (to be implemented)
 // ============================================================
 
-/// Draw a single character — dispatches through renderer function pointer table.
+/// Draw a single character â€” dispatches through renderer function pointer table.
 pub fn draw_char(x: i32, y: i32, num: i32) {
     (renderer_fns().draw_char)(x, y, num)
 }
 
-/// Draw a stretched picture — dispatches through renderer function pointer table.
+/// Draw a stretched picture â€” dispatches through renderer function pointer table.
 pub fn draw_stretch_pic(x: i32, y: i32, w: i32, h: i32, name: &str) {
     (renderer_fns().draw_stretch_pic)(x, y, w, h, name)
 }
 
-/// Draw a picture — dispatches through renderer function pointer table.
+/// Draw a picture â€” dispatches through renderer function pointer table.
 pub fn draw_pic(x: i32, y: i32, name: &str) {
     (renderer_fns().draw_pic)(x, y, name)
 }
 
-/// Find a pic, returns image handle (0 = not found) — dispatches through renderer function pointer table.
+/// Find a pic, returns image handle (0 = not found) â€” dispatches through renderer function pointer table.
 pub fn draw_find_pic(name: &str) -> i32 {
     (renderer_fns().draw_find_pic)(name)
 }
 
-/// Get pic size — dispatches through renderer function pointer table.
+/// Get pic size â€” dispatches through renderer function pointer table.
 pub fn draw_get_pic_size(name: &str) -> (i32, i32) {
     (renderer_fns().draw_get_pic_size)(name)
 }
 
 // SCR state is now inside ConsoleState (accessed via cs().scr)
 
-/// SCR_BeginLoadingPlaque — delegates to cl_main version to avoid deadlock.
+/// SCR_BeginLoadingPlaque â€” delegates to cl_main version to avoid deadlock.
 ///
 /// The naive implementation (lock CONSOLE_STATE, call cl_scrn::scr_begin_loading_plaque)
 /// would deadlock because scr_begin_loading_plaque calls com_printf, which calls
-/// con_print, which also needs CONSOLE_STATE — and std::sync::Mutex is not reentrant.
+/// con_print, which also needs CONSOLE_STATE â€” and std::sync::Mutex is not reentrant.
 /// The cl_main version avoids this by using raw pointers for CL/CLS state.
 pub fn scr_begin_loading_plaque() {
     super::cl_main::scr_begin_loading_plaque();
 }
 
-/// SCR_EndLoadingPlaque — wired to cl_scrn using global CLS state.
+/// SCR_EndLoadingPlaque â€” wired to cl_scrn using global CLS state.
 pub fn scr_end_loading_plaque(clear: bool) {
     // SAFETY: CL/CLS initialized at startup, accessed from main thread
     unsafe {
@@ -176,7 +176,7 @@ pub fn scr_end_loading_plaque(clear: bool) {
     }
 }
 
-/// SCR_UpdateScreen — wired to cl_scrn using global CLS_PTR/CL_PTR state.
+/// SCR_UpdateScreen â€” wired to cl_scrn using global CLS_PTR/CL_PTR state.
 ///
 /// CLS_PTR and CL_PTR are the "live" state used by console/UI code (key_dest, etc.).
 /// Connection code writes to the CLS/CL Mutexes in cl_main.rs (a separate allocation).
@@ -248,7 +248,7 @@ pub fn scr_update_screen() {
         }
     }
 
-    let mut scr = crate::cl_main::SCR_STATE.lock().unwrap();
+    let mut scr = crate::cl_main::SCR_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     // SAFETY: CL/CLS_PTR initialized at startup, accessed from main thread.
     unsafe {
@@ -256,171 +256,171 @@ pub fn scr_update_screen() {
     }
 }
 
-/// SCR_AddDirtyPoint — wired to cl_scrn using global SCR state.
+/// SCR_AddDirtyPoint â€” wired to cl_scrn using global SCR state.
 pub fn scr_add_dirty_point(x: i32, y: i32) {
     let mut state = cs();
     super::cl_scrn::scr_add_dirty_point(&mut state.scr, x, y);
 }
 
-/// SCR_DirtyScreen — wired to cl_scrn using global state.
+/// SCR_DirtyScreen â€” wired to cl_scrn using global state.
 pub fn scr_dirty_screen() {
     let mut state = cs();
     let viddef = state.viddef;
     super::cl_scrn::scr_dirty_screen(&mut state.scr, &viddef);
 }
 
-/// Cbuf_AddText — wired to myq2_common
+/// Cbuf_AddText â€” wired to myq2_common
 pub fn cbuf_add_text(text: &str) {
     myq2_common::cmd::cbuf_add_text(text);
 }
 
-/// Cvar_Set — wired to myq2_common
+/// Cvar_Set â€” wired to myq2_common
 pub fn cvar_set(name: &str, value: &str) {
     myq2_common::cvar::cvar_set(name, value);
 }
 
-/// Cvar_VariableValue — wired to myq2_common
+/// Cvar_VariableValue â€” wired to myq2_common
 pub fn cvar_variable_value(name: &str) -> f32 {
     myq2_common::cvar::cvar_variable_value(name)
 }
 
-/// Cvar_Get — wired to myq2_common; returns handle as i32
+/// Cvar_Get â€” wired to myq2_common; returns handle as i32
 pub fn cvar_get(name: &str, default: &str, flags: i32) -> i32 {
     myq2_common::cvar::cvar_get(name, default, flags).unwrap_or(0) as i32
 }
 
-/// Cmd_AddCommand — wired to myq2_common
+/// Cmd_AddCommand â€” wired to myq2_common
 pub fn cmd_add_command(name: &str, func: fn()) {
     myq2_common::cmd::cmd_add_command_simple(name, func);
 }
 
-/// Cmd_Argc — wired to myq2_common
+/// Cmd_Argc â€” wired to myq2_common
 pub fn cmd_argc() -> i32 {
     myq2_common::cmd::cmd_argc() as i32
 }
 
-/// Cmd_Argv — wired to myq2_common
+/// Cmd_Argv â€” wired to myq2_common
 pub fn cmd_argv(n: i32) -> String {
     myq2_common::cmd::cmd_argv(n as usize)
 }
 
-/// FS_Gamedir — wired to myq2_common
+/// FS_Gamedir â€” wired to myq2_common
 pub fn fs_gamedir() -> String {
     myq2_common::files::fs_gamedir()
 }
 
-/// FS_CreatePath — wired to myq2_common
+/// FS_CreatePath â€” wired to myq2_common
 pub fn fs_create_path(path: &str) {
     myq2_common::files::fs_create_path(path);
 }
 
-/// M_ForceMenuOff — wired to menu module
+/// M_ForceMenuOff â€” wired to menu module
 pub fn m_force_menu_off() {
     super::menu::m_force_menu_off();
 }
 
-/// wildcardfit — wired to myq2_common
+/// wildcardfit â€” wired to myq2_common
 pub fn wildcardfit(pattern: &str, text: &str) -> bool {
     myq2_common::wildcards::wildcardfit(pattern, text)
 }
 
-/// Draw a filled rectangle — dispatches through renderer function pointer table.
+/// Draw a filled rectangle â€” dispatches through renderer function pointer table.
 pub fn draw_fill(x: i32, y: i32, w: i32, h: i32, c: i32, a: f32) {
     (renderer_fns().draw_fill)(x, y, w, h, c, a)
 }
 
-/// Draw a tiled background clear — dispatches through renderer function pointer table.
+/// Draw a tiled background clear â€” dispatches through renderer function pointer table.
 pub fn draw_tile_clear(x: i32, y: i32, w: i32, h: i32, name: &str) {
     (renderer_fns().draw_tile_clear)(x, y, w, h, name)
 }
 
-/// Cvar_SetValue — wired to myq2_common
+/// Cvar_SetValue â€” wired to myq2_common
 pub fn cvar_set_value(name: &str, value: f32) {
     myq2_common::cvar::cvar_set_value(name, value);
 }
 
-/// Cvar_VariableValue by handle (CvarHandle = i32 index) — wired to myq2_common
+/// Cvar_VariableValue by handle (CvarHandle = i32 index) â€” wired to myq2_common
 pub fn cvar_value(handle: i32) -> f32 {
     if handle < 0 { return 0.0; }
     myq2_common::cvar::cvar_value_by_handle(handle as usize)
 }
 
-/// Placeholder — Cvar_VariableValue by name
+/// Placeholder â€” Cvar_VariableValue by name
 pub fn cvar_value_str(name: &str) -> f32 {
     myq2_common::cvar::cvar_variable_value(name)
 }
 
-/// Cvar_Modified check by handle — wired to myq2_common
+/// Cvar_Modified check by handle â€” wired to myq2_common
 pub fn cvar_modified(handle: i32) -> bool {
     if handle < 0 { return false; }
     myq2_common::cvar::cvar_modified_by_handle(handle as usize)
 }
 
-/// Cvar_ClearModified by handle — wired to myq2_common
+/// Cvar_ClearModified by handle â€” wired to myq2_common
 pub fn cvar_clear_modified(handle: i32) {
     if handle < 0 { return; }
     myq2_common::cvar::cvar_clear_modified_by_handle(handle as usize);
 }
 
-/// Sys_Milliseconds — re-export from canonical myq2_common implementation.
+/// Sys_Milliseconds â€” re-export from canonical myq2_common implementation.
 pub use myq2_common::common::sys_milliseconds;
 
-/// Sys_SendKeyEvents — dispatches through system function pointer table.
+/// Sys_SendKeyEvents â€” dispatches through system function pointer table.
 pub fn sys_send_key_events() {
     (system_fns().sys_send_key_events)()
 }
 
-/// developer cvar value — wired to myq2_common
+/// developer cvar value â€” wired to myq2_common
 pub fn developer_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("developer")
 }
 
-/// crosshair cvar value — wired to myq2_common
+/// crosshair cvar value â€” wired to myq2_common
 pub fn crosshair_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("crosshair")
 }
 
-/// cl_paused cvar value — wired to myq2_common
+/// cl_paused cvar value â€” wired to myq2_common
 pub fn cl_paused_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("paused")
 }
 
-/// cl_timedemo cvar value — wired to myq2_common
+/// cl_timedemo cvar value â€” wired to myq2_common
 pub fn cl_timedemo_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("timedemo")
 }
 
-/// cl_stereo cvar value — wired to myq2_common
+/// cl_stereo cvar value â€” wired to myq2_common
 pub fn cl_stereo_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("cl_stereo")
 }
 
-/// cl_stereo_separation cvar value — wired to myq2_common
+/// cl_stereo_separation cvar value â€” wired to myq2_common
 pub fn cl_stereo_separation_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("cl_stereo_separation")
 }
 
-/// cl_add_entities cvar value — wired to myq2_common
+/// cl_add_entities cvar value â€” wired to myq2_common
 pub fn cl_add_entities_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("cl_entities")
 }
 
-/// cl_add_lights cvar value — wired to myq2_common
+/// cl_add_lights cvar value â€” wired to myq2_common
 pub fn cl_add_lights_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("cl_lights")
 }
 
-/// cl_add_particles cvar value — wired to myq2_common
+/// cl_add_particles cvar value â€” wired to myq2_common
 pub fn cl_add_particles_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("cl_particles")
 }
 
-/// cl_add_blend cvar value — wired to myq2_common
+/// cl_add_blend cvar value â€” wired to myq2_common
 pub fn cl_add_blend_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("cl_blend")
 }
 
-/// log_stats cvar value — wired to myq2_common
+/// log_stats cvar value â€” wired to myq2_common
 pub fn log_stats_value() -> f32 {
     myq2_common::cvar::cvar_variable_value("log_stats")
 }
@@ -442,7 +442,7 @@ pub fn log_stats_write(msg: &str) {
 
 // Log stats file state is now inside ConsoleState (accessed via cs())
 
-/// con_initialized — reads the global CON state
+/// con_initialized â€” reads the global CON state
 pub fn con_initialized() -> bool {
     cs().con.initialized
 }
@@ -606,57 +606,57 @@ static DEFAULT_VID_MENU_FNS: VidMenuFunctions = VidMenuFunctions {
     vid_menu_key: noop_vid_menu_key,
 };
 
-/// R_BeginFrame — dispatches through renderer function pointer table.
+/// R_BeginFrame â€” dispatches through renderer function pointer table.
 pub fn r_begin_frame(separation: f32) {
     (renderer_fns().r_begin_frame)(separation)
 }
 
-/// R_RenderFrame — dispatches through renderer function pointer table.
+/// R_RenderFrame â€” dispatches through renderer function pointer table.
 pub fn r_render_frame(refdef: &super::client::RefDef) {
     (renderer_fns().r_render_frame)(refdef)
 }
 
-/// R_BeginRegistration — dispatches through renderer function pointer table.
+/// R_BeginRegistration â€” dispatches through renderer function pointer table.
 pub fn r_begin_registration(map: &str) {
     (renderer_fns().r_begin_registration)(map)
 }
 
-/// R_EndRegistration — dispatches through renderer function pointer table.
+/// R_EndRegistration â€” dispatches through renderer function pointer table.
 pub fn r_end_registration() {
     (renderer_fns().r_end_registration)()
 }
 
-/// R_RegisterModel — dispatches through renderer function pointer table.
+/// R_RegisterModel â€” dispatches through renderer function pointer table.
 pub fn r_register_model(name: &str) -> isize {
     (renderer_fns().r_register_model)(name)
 }
 
-/// R_RegisterSkin — dispatches through renderer function pointer table.
+/// R_RegisterSkin â€” dispatches through renderer function pointer table.
 pub fn r_register_skin(name: &str) -> isize {
     (renderer_fns().r_register_skin)(name)
 }
 
-/// R_SetSky — dispatches through renderer function pointer table.
+/// R_SetSky â€” dispatches through renderer function pointer table.
 pub fn r_set_sky(name: &str, rotate: f32, axis: &[f32; 3]) {
     (renderer_fns().r_set_sky)(name, rotate, axis)
 }
 
-/// R_SetPalette(NULL) — dispatches through renderer function pointer table.
+/// R_SetPalette(NULL) â€” dispatches through renderer function pointer table.
 pub fn r_set_palette_null() {
     (renderer_fns().r_set_palette_null)()
 }
 
-/// GLimp_EndFrame — dispatches through renderer function pointer table.
+/// GLimp_EndFrame â€” dispatches through renderer function pointer table.
 pub fn vk_imp_end_frame() {
     (renderer_fns().vk_imp_end_frame)();
 }
 
-/// S_StopAllSounds — dispatches through system function pointer table.
+/// S_StopAllSounds â€” dispatches through system function pointer table.
 pub fn s_stop_all_sounds() {
     (system_fns().s_stop_all_sounds)()
 }
 
-/// CM_InlineModel — partially wired. The real function in myq2_common::cmodel returns
+/// CM_InlineModel â€” partially wired. The real function in myq2_common::cmodel returns
 /// a CModel struct, but client code stores the result as i32 (headnode). This needs
 /// a type adapter when model_clip storage is refactored to use CModel.
 pub fn cm_inline_model(_name: &str) -> i32 {
@@ -668,7 +668,7 @@ pub fn get_viddef() -> VidDef {
     cs().viddef
 }
 
-/// SCR_DrawCinematic — delegates to cl_cin::scr_draw_cinematic which handles
+/// SCR_DrawCinematic â€” delegates to cl_cin::scr_draw_cinematic which handles
 /// palette setting and raw frame rendering. Returns true if a cinematic is active.
 pub fn scr_draw_cinematic() -> bool {
     // SAFETY: CL/CLS initialized at startup, accessed from main thread
@@ -677,12 +677,12 @@ pub fn scr_draw_cinematic() -> bool {
     }
 }
 
-/// M_Draw — wired to menu module.
+/// M_Draw â€” wired to menu module.
 pub fn m_draw() {
     super::menu::m_draw();
 }
 
-/// V_RenderView — wired to cl_view module.
+/// V_RenderView â€” wired to cl_view module.
 pub fn v_render_view(
     scr: &mut super::cl_scrn::ScrState,
     cls: &super::client::ClientStatic,
@@ -693,7 +693,7 @@ pub fn v_render_view(
     super::cl_view::v_render_view(scr, cls, cl, viddef, stereo_separation);
 }
 
-/// CL_DrawInventory — wired to cl_inv module.
+/// CL_DrawInventory â€” wired to cl_inv module.
 pub fn cl_draw_inventory(
     scr: &mut super::cl_scrn::ScrState,
     cls: &super::client::ClientStatic,
@@ -703,53 +703,49 @@ pub fn cl_draw_inventory(
     super::cl_inv::cl_draw_inventory(scr, cls, cl, viddef);
 }
 
-/// CL_ParseClientinfo — wired to cl_parse module.
+/// CL_ParseClientinfo â€” wired to cl_parse module.
 pub fn cl_parse_clientinfo(cl: &mut super::client::ClientState, player: usize) {
     super::cl_parse::cl_parse_clientinfo(cl, player);
 }
 
-/// CL_LoadClientinfo — wired to cl_parse module.
+/// CL_LoadClientinfo â€” wired to cl_parse module.
 pub fn cl_load_clientinfo(ci: &mut super::client::ClientInfo, s: &str) {
     super::cl_parse::cl_load_clientinfo(ci, s);
 }
 
-/// CL_RegisterTentModels — wired to cl_tent module using global tent state.
+/// CL_RegisterTentModels â€” wired to cl_tent module using global tent state.
 /// The real function takes `&mut TEntState`; we use the LazyLock<Mutex> in cl_main.
 pub fn cl_register_tent_models() {
-    let mut ts = super::cl_main::TENT_STATE.lock().unwrap();
+    let mut ts = super::cl_main::TENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     super::cl_tent::cl_register_tent_models(&mut ts);
 }
 
-/// CL_AddEntities — dispatches to the real cl_add_entities in cl_ents.rs.
+/// CL_AddEntities â€” dispatches to the real cl_add_entities in cl_ents.rs.
 /// Locks the additional global state (ENT_STATE, PROJ_STATE, CLS) needed
 /// beyond the already-borrowed ClientState.
 pub fn cl_add_entities(cl: &mut super::client::ClientState) {
     use super::cl_main::{CLS, ENT_STATE, PROJ_STATE, FX_STATE, TENT_STATE, SOUND_STATE};
     use super::cl_parse::FrameCallbacks;
 
-    let cls = CLS.lock().unwrap();
-    let mut ent_state = ENT_STATE.lock().unwrap();
-    let mut proj_state = PROJ_STATE.lock().unwrap();
-    let mut fx_state = FX_STATE.lock().unwrap();
-    let mut tent_state = TENT_STATE.lock().unwrap();
-    let mut sound_state = SOUND_STATE.lock().unwrap();
+    let cls = CLS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ent_state = ENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut proj_state = PROJ_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut fx_state = FX_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut tent_state = TENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut sound_state = SOUND_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     // Read cvar values for the dispatch
     let cl_showclamp = myq2_common::cvar::cvar_variable_value("showclamp") != 0.0;
     let cl_timedemo = cl_timedemo_value() != 0.0;
     let cl_predict = myq2_common::cvar::cvar_variable_value("cl_predict") != 0.0;
     let cl_gun = myq2_common::cvar::cvar_variable_value("cl_gun") != 0.0;
-    // Debug: print cl_gun value
-    eprintln!("cl_add_entities: cl_gun={}", cl_gun);
 
-    let view_state = super::cl_main::VIEW_STATE.lock().unwrap();
+    let view_state = super::cl_main::VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let gun_model = view_state.gun_model;
     let gun_frame = view_state.gun_frame;
     drop(view_state);
 
     let hand = myq2_common::cvar::cvar_variable_value("hand") as i32;
-    // Debug: print hand value
-    eprintln!("cl_add_entities: hand={}", hand);
 
     let mut frame_cb = FrameCallbacks {
         fx: &mut fx_state,
@@ -775,13 +771,13 @@ pub fn cl_add_entities(cl: &mut super::client::ClientState) {
     );
 }
 
-/// keybindings access — wired to keys module.
+/// keybindings access â€” wired to keys module.
 pub fn keybindings(key: i32) -> Option<String> {
     if !(0..256).contains(&key) { return None; }
     super::keys::ks().keybindings[key as usize].clone()
 }
 
-/// get_view_state - returns cl_add_* cvar values — wired to myq2_common.
+/// get_view_state - returns cl_add_* cvar values â€” wired to myq2_common.
 pub fn get_view_state() -> (f32, f32, f32, f32) {
     (
         cl_add_entities_value(),
@@ -791,37 +787,37 @@ pub fn get_view_state() -> (f32, f32, f32, f32) {
     )
 }
 
-/// scr_size_up command fn — wired to cl_scrn.
+/// scr_size_up command fn â€” wired to cl_scrn.
 pub fn scr_size_up_f_cmd() {
     let state = cs();
     super::cl_scrn::scr_size_up_f(&state.scr);
 }
 
-/// scr_size_down command fn — wired to cl_scrn.
+/// scr_size_down command fn â€” wired to cl_scrn.
 pub fn scr_size_down_f_cmd() {
     let state = cs();
     super::cl_scrn::scr_size_down_f(&state.scr);
 }
 
-/// V_Gun_Model_f command fn — wired to cl_view.
+/// V_Gun_Model_f command fn â€” wired to cl_view.
 pub fn v_gun_model_f_cmd() {
-    let mut vs = super::cl_main::VIEW_STATE.lock().unwrap();
+    let mut vs = super::cl_main::VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
     super::cl_view::v_gun_model_f(&mut vs);
 }
 
-/// V_Gun_Next_f command fn — wired to cl_view.
+/// V_Gun_Next_f command fn â€” wired to cl_view.
 pub fn v_gun_next_f_cmd() {
-    let mut vs = super::cl_main::VIEW_STATE.lock().unwrap();
+    let mut vs = super::cl_main::VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
     super::cl_view::v_gun_next_f(&mut vs);
 }
 
-/// V_Gun_Prev_f command fn — wired to cl_view.
+/// V_Gun_Prev_f command fn â€” wired to cl_view.
 pub fn v_gun_prev_f_cmd() {
-    let mut vs = super::cl_main::VIEW_STATE.lock().unwrap();
+    let mut vs = super::cl_main::VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
     super::cl_view::v_gun_prev_f(&mut vs);
 }
 
-/// V_Viewpos_f command fn — wired to cl_view.
+/// V_Viewpos_f command fn â€” wired to cl_view.
 pub fn v_viewpos_f_cmd() {
     // SAFETY: CL/CLS initialized at startup, accessed from main thread
     unsafe {
@@ -829,11 +825,11 @@ pub fn v_viewpos_f_cmd() {
     }
 }
 
-/// MSG_ReadShort — reads from the global net_message buffer.
+/// MSG_ReadShort â€” reads from the global net_message buffer.
 /// The real function in myq2_common::common::msg_read_short takes &mut SizeBuf.
 /// This wrapper accesses the LazyLock<Mutex> net_message buffer in cl_main.
 pub fn msg_read_short() -> i32 {
-    let mut msg = super::cl_main::NET_MESSAGE.lock().unwrap();
+    let mut msg = super::cl_main::NET_MESSAGE.lock().unwrap_or_else(|e| e.into_inner());
     myq2_common::common::msg_read_short(&mut msg)
 }
 
@@ -895,9 +891,9 @@ impl std::ops::DerefMut for ClsAccess {
     }
 }
 
-/// Global accessor for ClientState — use like `CL.field`
+/// Global accessor for ClientState â€” use like `CL.field`
 pub static mut CL: ClAccess = ClAccess;
-/// Global accessor for ClientStatic — use like `CLS.field`
+/// Global accessor for ClientStatic â€” use like `CLS.field`
 pub static mut CLS: ClsAccess = ClsAccess;
 
 
@@ -927,7 +923,7 @@ pub fn key_clear_typing() {
 pub fn con_toggle_console_f() {
     scr_end_loading_plaque(false); // get rid of loading plaque
 
-    // mattx86: console_demos — USE_CONSOLE_IN_DEMOS is defined, so skip this block
+    // mattx86: console_demos â€” USE_CONSOLE_IN_DEMOS is defined, so skip this block
     if !USE_CONSOLE_IN_DEMOS {
         // SAFETY: CL/CLS initialized at startup, accessed from main thread
         unsafe {
@@ -938,7 +934,7 @@ pub fn con_toggle_console_f() {
         }
     }
 
-    // mattx86: startup_demo — DISABLE_STARTUP_DEMO is defined, so skip this block
+    // mattx86: startup_demo â€” DISABLE_STARTUP_DEMO is defined, so skip this block
     if !DISABLE_STARTUP_DEMO {
         // SAFETY: CL/CLS initialized at startup, accessed from main thread
         unsafe {
@@ -1235,7 +1231,7 @@ pub fn con_print(txt: &str) {
         return;
     }
 
-    // SAFETY: CLS not yet wrapped (deferred — raw pointer access pattern with 200+ call sites)
+    // SAFETY: CLS not yet wrapped (deferred â€” raw pointer access pattern with 200+ call sites)
     unsafe {
         let bytes = txt.as_bytes();
         let mut idx = 0;

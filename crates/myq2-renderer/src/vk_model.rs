@@ -11,7 +11,7 @@ use crate::vk_rmain::vid_printf;
 use myq2_common::q_shared::{
     CPlane, Vec3, dot_product, vector_length, little_float,
     CONTENTS_WATER, CONTENTS_SLIME, CONTENTS_LAVA,
-    SURF_SKY, SURF_TRANS33, SURF_TRANS66, SURF_WARP,
+    SURF_SKY, SURF_TRANS33, SURF_TRANS66, SURF_FLOWING, SURF_WARP,
     MAX_QPATH, PRINT_ALL, ERR_DROP,
 };
 use myq2_common::common::com_error;
@@ -1336,7 +1336,15 @@ unsafe fn build_modern_bsp_geometry() {
         };
 
         let lightmap_id = surface.lightmaptexturenum as u32;
-        let flags = surface.flags as u32;
+        // Combine msurface_t.flags (SURF_DRAWTURB=0x10, etc.) with texinfo flags
+        // remapped to avoid collisions: TRANS33→0x20, TRANS66→0x40, FLOWING→0x80
+        let mut flags = surface.flags as u32;
+        if !surface.texinfo.is_null() {
+            let ti_flags = (*surface.texinfo).flags;
+            if ti_flags & SURF_TRANS33 != 0 { flags |= 0x20; } // bsp.rs SURF_TRANS33
+            if ti_flags & SURF_TRANS66 != 0 { flags |= 0x40; } // bsp.rs SURF_TRANS66
+            if ti_flags & SURF_FLOWING != 0 { flags |= 0x80; } // bsp.rs SURF_FLOWING
+        }
 
         // Walk the GlPoly chain for this surface
         while !poly.is_null() {
@@ -1356,6 +1364,57 @@ unsafe fn build_modern_bsp_geometry() {
             } else {
                 -1.0 // No lightmap (sky/water) — shader uses full bright
             };
+
+            // Compute surface normal from the BSP plane (negate for SURF_PLANEBACK).
+            let raw_normal: [f32; 3] = if !surface.plane.is_null() {
+                let n = (*surface.plane).normal;
+                [n[0], n[1], n[2]]
+            } else {
+                [0.0, 0.0, 1.0]
+            };
+            let surface_normal: [f32; 3] = if surface.flags & SURF_PLANEBACK as i32 != 0 {
+                [-raw_normal[0], -raw_normal[1], -raw_normal[2]]
+            } else {
+                raw_normal
+            };
+
+            // Compute tangent from texture S axis projected perpendicular to the normal.
+            // BSP texinfo.vecs[0][0..3] is the S texture axis,
+            //         .vecs[1][0..3] is the T texture axis.
+            let surface_tangent: [f32; 4] = if !surface.texinfo.is_null() {
+                let ti = &*surface.texinfo;
+                let s_axis = [ti.vecs[0][0], ti.vecs[0][1], ti.vecs[0][2]];
+                let t_axis = [ti.vecs[1][0], ti.vecs[1][1], ti.vecs[1][2]];
+                let n = surface_normal;
+
+                // Project s_axis perpendicular to normal: T = normalize(S - dot(S,N)*N)
+                let dot_sn = s_axis[0]*n[0] + s_axis[1]*n[1] + s_axis[2]*n[2];
+                let t_xyz = [
+                    s_axis[0] - dot_sn * n[0],
+                    s_axis[1] - dot_sn * n[1],
+                    s_axis[2] - dot_sn * n[2],
+                ];
+                let t_len = (t_xyz[0]*t_xyz[0] + t_xyz[1]*t_xyz[1] + t_xyz[2]*t_xyz[2]).sqrt();
+                let tangent_xyz = if t_len > 0.001 {
+                    [t_xyz[0]/t_len, t_xyz[1]/t_len, t_xyz[2]/t_len]
+                } else {
+                    [1.0_f32, 0.0, 0.0]
+                };
+
+                // Handedness: sign(dot(cross(N, T_projected), T_axis))
+                let cross_nt = [
+                    n[1]*tangent_xyz[2] - n[2]*tangent_xyz[1],
+                    n[2]*tangent_xyz[0] - n[0]*tangent_xyz[2],
+                    n[0]*tangent_xyz[1] - n[1]*tangent_xyz[0],
+                ];
+                let dot_ct = cross_nt[0]*t_axis[0] + cross_nt[1]*t_axis[1] + cross_nt[2]*t_axis[2];
+                let handedness = if dot_ct >= 0.0 { 1.0_f32 } else { -1.0 };
+
+                [tangent_xyz[0], tangent_xyz[1], tangent_xyz[2], handedness]
+            } else {
+                [1.0_f32, 0.0, 0.0, 1.0]
+            };
+
             for v in 0..numverts {
                 let vert_ptr = glpoly_vert_ptr(poly, v);
                 let lm_s = *vert_ptr.add(5);
@@ -1365,11 +1424,13 @@ unsafe fn build_modern_bsp_geometry() {
                 // Non-turb surfaces use pre-computed normalized tex coords directly.
                 let tex_s = *vert_ptr.add(3);
                 let tex_t = *vert_ptr.add(4);
-                let bsp_vert = BspVertex::with_lightmap(
+                let bsp_vert = BspVertex::with_tangent_frame(
                     [*vert_ptr, *vert_ptr.add(1), *vert_ptr.add(2)],
                     [tex_s, tex_t],
                     [lm_s, lm_t],
                     lm_layer,
+                    surface_normal,
+                    surface_tangent,
                 );
                 vertices.push(bsp_vert);
             }
@@ -1383,12 +1444,33 @@ unsafe fn build_modern_bsp_geometry() {
 
             let index_count = indices.len() as u32 - first_index;
 
+            // Determine which BSP cluster this surface belongs to by finding the
+            // leaf that contains the polygon centroid. This is used by the D3 lit
+            // pass to restrict illumination to a single cluster (room), preventing
+            // through-wall PVS bleed-through artifacts.
+            let surface_cluster: i32 = {
+                let start = base_vertex as usize;
+                let end = vertices.len();
+                if end > start {
+                    let count = (end - start) as f32;
+                    let cx = vertices[start..end].iter().map(|v| v.position[0]).sum::<f32>() / count;
+                    let cy = vertices[start..end].iter().map(|v| v.position[1]).sum::<f32>() / count;
+                    let cz = vertices[start..end].iter().map(|v| v.position[2]).sum::<f32>() / count;
+                    let centroid: Vec3 = [cx, cy, cz];
+                    let leaf = mod_point_in_leaf(&centroid, rfs().r_worldmodel);
+                    if !leaf.is_null() { (*leaf).cluster } else { -1 }
+                } else {
+                    -1
+                }
+            };
+
             surface_infos.push(SurfaceDrawInfo {
                 first_index,
                 index_count,
                 texture_id,
                 lightmap_id,
                 flags,
+                cluster: surface_cluster,
             });
 
             poly = (*poly).next;
@@ -1396,6 +1478,35 @@ unsafe fn build_modern_bsp_geometry() {
     }
 
     if !vertices.is_empty() {
+        // Smooth normals for D3 lighting: average face normals at shared vertex positions.
+        // BSP faces have flat per-face normals; without smoothing adjacent faces with
+        // different normals produce abrupt NdotL jumps at shared edges, making
+        // polygon boundaries visible as hard-edged bright patches.
+        //
+        // BSP vertices are not shared between faces, but adjacent faces share the exact
+        // same world-space positions (integer Q2 coordinates), so bit-identical floats
+        // are a reliable key.
+        {
+            use std::collections::HashMap;
+            let mut acc: HashMap<[u32; 3], [f32; 3]> = HashMap::with_capacity(vertices.len());
+            for v in vertices.iter() {
+                let key = [v.position[0].to_bits(), v.position[1].to_bits(), v.position[2].to_bits()];
+                let e = acc.entry(key).or_insert([0.0_f32; 3]);
+                e[0] += v.normal[0];
+                e[1] += v.normal[1];
+                e[2] += v.normal[2];
+            }
+            for v in vertices.iter_mut() {
+                let key = [v.position[0].to_bits(), v.position[1].to_bits(), v.position[2].to_bits()];
+                if let Some(n) = acc.get(&key) {
+                    let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+                    if len > 0.001 {
+                        v.normal = [n[0]/len, n[1]/len, n[2]/len];
+                    }
+                }
+            }
+        }
+
         modern.bsp_geometry_mut().build(&vertices, &indices, surface_infos);
         crate::vk_rmain::vid_printf(
             myq2_common::q_shared::PRINT_ALL,

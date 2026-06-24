@@ -396,6 +396,20 @@ pub fn g_run_frame(ctx: &mut GameContext) {
 
     // build the playerstate_t structures for all players
     client_end_server_frames(ctx);
+
+    // Set stats for all clients (health, ammo, armor, etc.)
+    for i in 1..=ctx.maxclients as usize {
+        if ctx.edicts[i].inuse && ctx.edicts[i].client.is_some() {
+            let ci = ctx.edicts[i].client.unwrap();
+            if ctx.clients[ci].resp.spectator {
+                crate::p_hud::g_set_spectator_stats(ctx, i);
+            } else {
+                crate::p_hud::g_set_stats(ctx, i);
+            }
+            // Update chase stats for spectators watching this client
+            crate::p_hud::g_check_chase_stats(ctx, i);
+        }
+    }
 }
 
 // ============================================================

@@ -301,7 +301,7 @@ pub unsafe fn qvk_tex_image2d(
 
     if level == 0 && !data.is_null() && target == VK_TEXTURE_2D {
         // Get currently bound texture
-        let texnum = unsafe {
+        let texnum = {
             let s = rfs();
             s.vk_state.currenttextures[s.vk_state.currenttmu as usize]
         };

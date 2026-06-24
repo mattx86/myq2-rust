@@ -1,4 +1,4 @@
-// Entry point — converted from myq2-original/win32/sys_win.c WinMain()
+// Entry point â€” converted from myq2-original/win32/sys_win.c WinMain()
 //
 // The C original WinMain does:
 //   1. Parse command line arguments
@@ -28,7 +28,7 @@ static MODIFIERS: Mutex<ModifiersState> = Mutex::new(ModifiersState::empty());
 
 /// Re-entrancy guard: prevents run_frame() from being called recursively
 /// when sys_send_key_events pumps Win32 messages during cl_prep_refresh.
-/// Without this, dispatched messages (WM_PAINT → RedrawRequested) would
+/// Without this, dispatched messages (WM_PAINT â†’ RedrawRequested) would
 /// trigger run_frame() which tries to acquire locks already held by the
 /// loading code, causing a deadlock.
 static IN_FRAME: AtomicBool = AtomicBool::new(false);
@@ -54,7 +54,7 @@ impl Q2App {
     /// Run one game frame if enough time has elapsed.
     fn run_frame(&mut self) {
         // Re-entrancy guard: if we're already inside run_frame (e.g., message pump
-        // during cl_prep_refresh dispatched a WM_PAINT → RedrawRequested), skip.
+        // during cl_prep_refresh dispatched a WM_PAINT â†’ RedrawRequested), skip.
         if IN_FRAME.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -85,7 +85,7 @@ impl Q2App {
                 // Process one chunk of map loading
                 let complete = myq2_server::sv_init::sv_spawn_server_tick(ctx);
                 if complete {
-                    // No explicit connect needed — CL_CheckForResend (in CL_Frame)
+                    // No explicit connect needed â€” CL_CheckForResend (in CL_Frame)
                     // auto-detects the local server is running and connects via loopback.
                 }
             }
@@ -162,7 +162,7 @@ impl ApplicationHandler for Q2App {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
-                let modifiers = *MODIFIERS.lock().unwrap();
+                let modifiers = *MODIFIERS.lock().unwrap_or_else(|e| e.into_inner());
                 sys_win::handle_keyboard_input(
                     event.physical_key,
                     event.state,
@@ -172,7 +172,7 @@ impl ApplicationHandler for Q2App {
             }
 
             WindowEvent::ModifiersChanged(new_modifiers) => {
-                *MODIFIERS.lock().unwrap() = new_modifiers.state();
+                *MODIFIERS.lock().unwrap_or_else(|e| e.into_inner()) = new_modifiers.state();
             }
 
             WindowEvent::MouseInput { button, state, .. } => {
@@ -247,13 +247,13 @@ impl ApplicationHandler for Q2App {
         // Called after all events have been processed
         if self.initialized {
             // Check if minimized or dedicated - sleep to avoid busy-waiting
-            let minimized = *sys_win::MINIMIZED.lock().unwrap();
+            let minimized = *sys_win::MINIMIZED.lock().unwrap_or_else(|e| e.into_inner());
             let dedicated = myq2_common::cvar::cvar_variable_value("dedicated") != 0.0;
             if minimized || dedicated {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             } else {
                 // Ensure the render loop stays alive by always requesting a redraw.
-                // Without this, the RedrawRequested → run_frame → request_redraw chain
+                // Without this, the RedrawRequested â†’ run_frame â†’ request_redraw chain
                 // breaks after minimize/restore (no one re-kicks the loop).
                 platform_register::with_platform(|s| {
                     s.vk_imp.request_redraw();
@@ -352,7 +352,7 @@ fn main() {
             // Use cl_main version (CL/CLS/SCR_STATE locks) instead of
             // console version (CONSOLE_STATE lock) to avoid deadlock:
             // console version holds CONSOLE_STATE, then com_printf calls
-            // con_print which also needs CONSOLE_STATE → deadlock.
+            // con_print which also needs CONSOLE_STATE â†’ deadlock.
             myq2_client::cl_main::scr_begin_loading_plaque();
         },
     });

@@ -1,4 +1,4 @@
-// common.rs — misc functions used in client and server
+// common.rs â€” misc functions used in client and server
 // Converted from: myq2-original/qcommon/common.c
 
 use std::sync::{Mutex, OnceLock};
@@ -33,13 +33,13 @@ static RD_BUFFER: Mutex<Option<String>> = Mutex::new(None);
 
 /// Begin redirecting printf output into a buffer.
 pub fn com_begin_redirect() {
-    let mut buf = RD_BUFFER.lock().unwrap();
+    let mut buf = RD_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
     *buf = Some(String::new());
 }
 
 /// End redirect and return the captured output.
 pub fn com_end_redirect() -> Option<String> {
-    let mut buf = RD_BUFFER.lock().unwrap();
+    let mut buf = RD_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
     buf.take()
 }
 
@@ -61,7 +61,7 @@ pub fn register_con_print(callback: impl Fn(&str) + Send + Sync + 'static) {
 pub fn com_printf(msg: &str) {
     // If redirecting, append to buffer
     {
-        let mut buf = RD_BUFFER.lock().unwrap();
+        let mut buf = RD_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref mut s) = *buf {
             s.push_str(msg);
             return;
@@ -102,7 +102,7 @@ pub fn com_error(code: i32, msg: &str) {
 }
 
 // ============================================================
-// CopyString — trivial in Rust
+// CopyString â€” trivial in Rust
 // ============================================================
 
 /// Equivalent of CopyString in C (Z_Malloc + strcpy). In Rust, just clone.
@@ -111,17 +111,17 @@ pub fn copy_string(s: &str) -> String {
 }
 
 // ============================================================
-// Z_Free — no-op in Rust
+// Z_Free â€” no-op in Rust
 // ============================================================
 
 /// No-op in Rust. Memory is managed automatically by the borrow checker / Drop.
 /// Kept for API compatibility with the C codebase.
 pub fn z_free<T>(_ptr: T) {
-    // Intentionally empty — Rust drops `_ptr` at end of scope.
+    // Intentionally empty â€” Rust drops `_ptr` at end of scope.
 }
 
 // ============================================================
-// Bytedirs table — 162 pre-computed vertex normals for MD2 models
+// Bytedirs table â€” 162 pre-computed vertex normals for MD2 models
 // ============================================================
 
 pub use crate::anorms::BYTEDIRS;
@@ -595,7 +595,7 @@ pub fn msg_read_data(msg: &mut SizeBuf, len: usize) -> Vec<u8> {
 }
 
 // ============================================================
-// COM_BlockSequenceCRCByte — for proxy protecting
+// COM_BlockSequenceCRCByte â€” for proxy protecting
 // ============================================================
 
 #[rustfmt::skip]
@@ -811,7 +811,7 @@ pub fn crand() -> f32 {
     (rand::random::<u32>() & 32767) as f32 * (2.0 / 32767.0) - 1.0
 }
 
-/// Random integer in [0, 32767] — equivalent to C's rand() & 0x7fff.
+/// Random integer in [0, 32767] â€” equivalent to C's rand() & 0x7fff.
 /// Used for game logic like selecting random animations, damage values, etc.
 pub fn rand_i32() -> i32 {
     (rand::random::<u32>() & 0x7fff) as i32
@@ -860,7 +860,7 @@ impl Default for CommonState {
 }
 
 // ============================================================
-// Qcommon_Init / Qcommon_Frame — engine init and main loop tick
+// Qcommon_Init / Qcommon_Frame â€” engine init and main loop tick
 // ============================================================
 
 /// Global engine state, lazily initialized by qcommon_init.
@@ -869,9 +869,9 @@ static COMMON_STATE: Mutex<Option<CommonState>> = Mutex::new(None);
 /// Frame callbacks for subsystems that myq2-common cannot depend on directly.
 /// Registered at startup by the binary crate (myq2-sys) which has access to all crates.
 pub struct FrameCallbacks {
-    /// SV_Frame(msec) — server frame tick
+    /// SV_Frame(msec) â€” server frame tick
     pub sv_frame: fn(i32),
-    /// CL_Frame(msec) — client frame tick (rendering, input, audio)
+    /// CL_Frame(msec) â€” client frame tick (rendering, input, audio)
     pub cl_frame: fn(i32),
 }
 
@@ -880,14 +880,14 @@ static FRAME_CALLBACKS: Mutex<Option<FrameCallbacks>> = Mutex::new(None);
 /// Register the server and client frame callbacks.
 /// Must be called before the main loop starts.
 pub fn register_frame_callbacks(cb: FrameCallbacks) {
-    *FRAME_CALLBACKS.lock().unwrap() = Some(cb);
+    *FRAME_CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()) = Some(cb);
 }
 
 /// Set the server state in the global common state.
 ///
 /// Original: `void Com_SetServerState(int state)`
 pub fn com_set_server_state(state: i32) {
-    let mut global = COMMON_STATE.lock().unwrap();
+    let mut global = COMMON_STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut s) = *global {
         s.set_server_state(state);
     }
@@ -897,7 +897,7 @@ pub fn com_set_server_state(state: i32) {
 ///
 /// Original: `int Com_ServerState(void)`
 pub fn com_server_state() -> i32 {
-    let global = COMMON_STATE.lock().unwrap();
+    let global = COMMON_STATE.lock().unwrap_or_else(|e| e.into_inner());
     global.as_ref().map_or(0, |s| s.server_state())
 }
 
@@ -916,7 +916,7 @@ pub fn qcommon_init(args: &[String]) {
     // Initialize subsystems in order (mirrors C Qcommon_Init)
     crate::cmd::cmd_init();
     crate::cvar::cvar_init();
-    // Key_Init — wired at runtime by client
+    // Key_Init â€” wired at runtime by client
     crate::files::fs_init();
     crate::cmodel::cmodel_init();
 
@@ -972,10 +972,10 @@ pub fn qcommon_init(args: &[String]) {
     });
     crate::cmd::cbuf_execute();
     crate::cvar::cvar_get_latched_vars();
-    // NET_Init — wired at runtime by sys
-    // Netchan_Init — stateless in Rust
-    // SV_Init — wired at runtime by server
-    // CL_Init — wired at runtime by client
+    // NET_Init â€” wired at runtime by sys
+    // Netchan_Init â€” stateless in Rust
+    // SV_Init â€” wired at runtime by server
+    // CL_Init â€” wired at runtime by client
     // Create the version cvar (read-only, broadcast to clients)
     // Format: "MyQ2-Rust v1.0 x86_64 Win32 RELEASE"
     let version_string = format!(
@@ -984,14 +984,14 @@ pub fn qcommon_init(args: &[String]) {
     );
     crate::cvar::cvar_get("version", &version_string, CVAR_SERVERINFO | CVAR_NOSET);
 
-    // Register "dedicated" cvar — read by 5+ subsystems via cvar_variable_value().
+    // Register "dedicated" cvar â€” read by 5+ subsystems via cvar_variable_value().
     // Set to "1" by the launcher when running as a dedicated server.
     crate::cvar::cvar_get("dedicated", "0", CVAR_NOSET);
 
-    // Register "developer" cvar — controls com_dprintf output and developer_value() in console.
+    // Register "developer" cvar â€” controls com_dprintf output and developer_value() in console.
     crate::cvar::cvar_get("developer", "0", CVAR_ZERO);
 
-    // Register "qport" cvar — random port for the connect string, prevents NAT confusion.
+    // Register "qport" cvar â€” random port for the connect string, prevents NAT confusion.
     let port = sys_milliseconds() & 0xffff;
     crate::cvar::cvar_get("qport", &port.to_string(), CVAR_NOSET);
 
@@ -1005,14 +1005,14 @@ pub fn qcommon_init(args: &[String]) {
 
     com_printf("====== Qcommon Initialized ======\n");
 
-    let mut global = COMMON_STATE.lock().unwrap();
+    let mut global = COMMON_STATE.lock().unwrap_or_else(|e| e.into_inner());
     *global = Some(state);
 }
 
 /// Execute late commands (commands with + prefix from command-line arguments).
 /// This should be called after all subsystems (server, client) are initialized.
 pub fn qcommon_exec_late_commands() {
-    let state_opt = COMMON_STATE.lock().unwrap();
+    let state_opt = COMMON_STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref state) = *state_opt {
         // Clone args to avoid holding the lock during command execution
         let args = state.args.clone();
@@ -1033,7 +1033,7 @@ pub fn qcommon_exec_late_commands() {
 /// This stub updates realtime; subsystem ticks will be wired in as modules are converted.
 pub fn qcommon_frame(msec: i32) {
     {
-        let mut global = COMMON_STATE.lock().unwrap();
+        let mut global = COMMON_STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref mut state) = *global {
             state.realtime += msec;
         }
@@ -1044,7 +1044,7 @@ pub fn qcommon_frame(msec: i32) {
     // Call subsystem frame functions (SV_Frame, CL_Frame) via registered callbacks.
     // Lock is taken and released quickly to copy the function pointers, avoiding
     // holding the lock across potentially long frame functions.
-    let callbacks = FRAME_CALLBACKS.lock().unwrap().as_ref().map(|cb| (cb.sv_frame, cb.cl_frame));
+    let callbacks = FRAME_CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|cb| (cb.sv_frame, cb.cl_frame));
     if let Some((sv_frame, cl_frame)) = callbacks {
         sv_frame(msec);
         cl_frame(msec);
@@ -1055,15 +1055,15 @@ pub fn qcommon_frame(msec: i32) {
 ///
 /// Original: `void Qcommon_Shutdown(void)`
 pub fn qcommon_shutdown() {
-    let mut global = COMMON_STATE.lock().unwrap();
+    let mut global = COMMON_STATE.lock().unwrap_or_else(|e| e.into_inner());
     *global = None;
 }
 
 // ============================================================
-// Sys_Milliseconds — canonical process-wide timer
+// Sys_Milliseconds â€” canonical process-wide timer
 // ============================================================
 
-/// Sys_Milliseconds — Get the current time in milliseconds.
+/// Sys_Milliseconds â€” Get the current time in milliseconds.
 /// Returns a monotonically increasing time value relative to a process-wide epoch.
 pub fn sys_milliseconds() -> i32 {
     use std::sync::OnceLock;

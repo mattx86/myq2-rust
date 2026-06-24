@@ -165,6 +165,32 @@ pub struct RendererCvars {
     pub vid_fullscreen: CvarRef,
     pub vid_gamma: CvarRef,
     pub vid_ref: CvarRef,
+    /// Saturation multiplier for postprocess (1.0 = neutral, >1.0 = more vivid).
+    pub r_saturation: CvarRef,
+    /// Contrast multiplier for postprocess (1.0 = neutral).
+    pub r_contrast: CvarRef,
+    /// Brightness (exposure) multiplier for postprocess (1.0 = neutral).
+    pub r_brightness: CvarRef,
+    /// Shadow lift — raises pitch-black floors (0.0 = none, 0.05 = subtle).
+    pub r_shadowlift: CvarRef,
+    /// Color grade preset: 0=off, 1=enhanced, 2=cool, 3=warm, 4=high_contrast.
+    pub r_color_grade: CvarRef,
+    /// Color grade LUT blend intensity (0.0-1.0).
+    pub r_color_grade_intensity: CvarRef,
+    /// Lightmap gamma — power curve applied to lightmap before overbright multiply.
+    /// Values > 1.0 deepen shadows in dark rooms (1.0 = neutral, 1.5 = moderate darkening).
+    pub r_lightmap_gamma: CvarRef,
+    /// Lightmap contrast — linear contrast around pivot 0.35 applied after gamma.
+    /// Steepens gradient in shadow zone; 1.0 = neutral, 1.3 = moderate, 1.8 = aggressive.
+    pub r_lightmap_contrast: CvarRef,
+    /// Ambient floor for Doom 3 lighting (0.0=pitch-black, 0.05=subtle fill).
+    pub r_d3_ambient: CvarRef,
+    /// Maximum point lights evaluated per frame (default 8).
+    pub r_d3_maxlights: CvarRef,
+    /// Shadow volume extrude distance multiplier (default 1.0).
+    pub r_d3_extrude: CvarRef,
+    /// Blinn-Phong specular exponent (default 32.0).
+    pub r_d3_spec_power: CvarRef,
 }
 
 static RENDERER_CVARS: OnceLock<RendererCvars> = OnceLock::new();
@@ -206,6 +232,7 @@ pub struct RefdefLocal {
     pub entities: Vec<EntityLocal>,
     pub num_particles: usize,
     pub particles: Vec<ParticleLocal>,
+    pub dlights: Vec<DLight>,
 }
 
 #[derive(Debug, Clone)]
@@ -657,8 +684,8 @@ pub fn r_set_frustum() {
         None => return,
     };
 
-    // SAFETY: vk_local statics (vup, vpn, vright, r_origin) accessed from main thread only
-    unsafe {
+    // Main-thread-only access to vk_local statics (vup, vpn, vright, r_origin).
+    {
         // rotate VPN right by FOV_X/2 degrees
         rotate_point_around_vector(
             &mut rg.frustum[0].normal, &crate::vk_local::rfs().vup, &crate::vk_local::rfs().vpn,
@@ -912,8 +939,8 @@ pub fn r_render_view(fd: &RefdefLocal) {
     }
 
     // Check worldmodel via rfs() (the actual loaded BSP pointer from r_begin_registration)
-    // SAFETY: rfs() is main-thread only
-    unsafe {
+    // Main-thread-only access via rfs().
+    {
         if crate::vk_local::rfs().r_worldmodel.is_null()
             && (fd.rdflags & RDF_NOWORLDMODEL == 0)
         {
@@ -962,6 +989,19 @@ pub fn r_render_view(fd: &RefdefLocal) {
         let modern = &mut *modern;
         modern.begin_frame(&params);
 
+        // Transfer dlight list so render_dlights() (called from end_frame) can access it.
+        // RefdefLocal.dlights was populated in renderer_bridge from the client's RefDef.
+        modern.set_frame_dlights(fd.dlights.clone());
+
+        // Populate sorted D3 point-light list for this frame.
+        {
+            let max_lights = rcvars().r_d3_maxlights.fresh_value().max(0.0) as usize;
+            let ambient    = rcvars().r_d3_ambient.fresh_value().max(0.0);
+            let extrude    = rcvars().r_d3_extrude.fresh_value().max(0.1);
+            let spec_power = rcvars().r_d3_spec_power.fresh_value().max(1.0);
+            modern.update_d3_lights(max_lights, ambient, extrude, spec_power);
+        }
+
         // World geometry
         if rcvars().r_drawworld.value != 0.0 {
             // BSP traversal: detect sky surfaces and chain alpha/texture surfaces.
@@ -1003,9 +1043,6 @@ pub fn r_render_view(fd: &RefdefLocal) {
                 }
             }
         }
-
-        // Effects
-        modern.render_dlights();
 
         // Particles
         let particle_data: Vec<ParticleData> = fd.particles.iter().map(|p| {
@@ -1136,7 +1173,7 @@ pub fn r_register() {
             r_speeds: cvar_get("r_speeds", "0", CVAR_ZERO),
             r_lightlevel: cvar_get("r_lightlevel", "0", CVAR_ZERO),
             r_overbrightbits: cvar_get("r_overbrightbits", "2", CVAR_ARCHIVE),
-            vk_modulate: cvar_get("vk_modulate", "1.5", CVAR_ARCHIVE),
+            vk_modulate: cvar_get("vk_modulate", "2.0", CVAR_ARCHIVE),
             vk_log: cvar_get("vk_log", "0", CVAR_ZERO),
             vk_mode: cvar_get("vk_mode", "4", CVAR_ARCHIVE),
             vk_lightmap: cvar_get("vk_lightmap", "0", CVAR_ZERO),
@@ -1150,7 +1187,7 @@ pub fn r_register() {
             vk_clear: cvar_get("vk_clear", "0", CVAR_ZERO),
             vk_cull: cvar_get("vk_cull", "1", CVAR_ARCHIVE),
             vk_polyblend: cvar_get("vk_polyblend", "1", CVAR_ARCHIVE),
-            vk_flashblend: cvar_get("vk_flashblend", "0", CVAR_ARCHIVE),
+            vk_flashblend: cvar_get("vk_flashblend", "1", CVAR_ARCHIVE),
             vk_monolightmap: cvar_get("vk_monolightmap","0", CVAR_ZERO),
             vk_driver: cvar_get("vk_driver","opengl32", CVAR_ARCHIVE),
             vk_texturemode: cvar_get("vk_texturemode","VK_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE),
@@ -1175,7 +1212,7 @@ pub fn r_register() {
             r_fxaa: cvar_get("r_fxaa","1", CVAR_ARCHIVE),
             r_ssao: cvar_get("r_ssao","1", CVAR_ARCHIVE),
             r_ssao_radius: cvar_get("r_ssao_radius","0.5", CVAR_ARCHIVE),
-            r_ssao_intensity: cvar_get("r_ssao_intensity","1.0", CVAR_ARCHIVE),
+            r_ssao_intensity: cvar_get("r_ssao_intensity","0.80", CVAR_ARCHIVE),
             r_bloom: cvar_get("r_bloom","1", CVAR_ARCHIVE),
             r_bloom_threshold: cvar_get("r_bloom_threshold","0.8", CVAR_ARCHIVE),
             r_bloom_intensity: cvar_get("r_bloom_intensity","0.3", CVAR_ARCHIVE),
@@ -1187,8 +1224,20 @@ pub fn r_register() {
             vk_screenshot_format: cvar_get("vk_screenshot_format","tga", CVAR_ARCHIVE),
             vk_screenshot_quality: cvar_get("vk_screenshot_quality","85", CVAR_ARCHIVE),
             vid_fullscreen: cvar_get("vid_fullscreen","0", CVAR_ARCHIVE),
-            vid_gamma: cvar_get("vid_gamma","0.6", CVAR_ARCHIVE),
+            vid_gamma: cvar_get("vid_gamma","0.90", CVAR_ARCHIVE),
             vid_ref: cvar_get("vid_ref","gl", CVAR_ARCHIVE),
+            r_saturation: cvar_get("r_saturation","1.0", CVAR_ARCHIVE),
+            r_contrast: cvar_get("r_contrast","1.0", CVAR_ARCHIVE),
+            r_brightness: cvar_get("r_brightness","1.0", CVAR_ARCHIVE),
+            r_shadowlift: cvar_get("r_shadowlift","0.0", CVAR_ARCHIVE),
+            r_color_grade: cvar_get("r_color_grade","1", CVAR_ARCHIVE),
+            r_color_grade_intensity: cvar_get("r_color_grade_intensity","0.3", CVAR_ARCHIVE),
+            r_lightmap_gamma: cvar_get("r_lightmap_gamma","1.0", CVAR_ARCHIVE),
+            r_lightmap_contrast: cvar_get("r_lightmap_contrast","1.0", CVAR_ARCHIVE),
+            r_d3_ambient: cvar_get("r_d3_ambient","0.15", CVAR_ARCHIVE),
+            r_d3_maxlights: cvar_get("r_d3_maxlights","16", CVAR_ARCHIVE),
+            r_d3_extrude: cvar_get("r_d3_extrude","1.0", CVAR_ARCHIVE),
+            r_d3_spec_power: cvar_get("r_d3_spec_power","32.0", CVAR_ARCHIVE),
         };
 
         myq2_common::common::com_printf("r_register: Cvars registered, calling with_device\n");
@@ -1593,8 +1642,8 @@ pub fn r_set_palette(palette: Option<&[u8]>) {
     }
     crate::vk_image::set_rawpalette(rp);
 
-    // SAFETY: renderer state accessed from main thread only
-    unsafe {
+    // Main-thread-only renderer state access.
+    {
         qvk_clear_color(0.0, 0.0, 0.0, 0.0);
         qvk_clear(VK_COLOR_BUFFER_BIT);
         qvk_clear_color(1.0, 0.0, 0.5, 0.5);

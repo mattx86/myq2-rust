@@ -78,9 +78,7 @@ pub struct Draw2DManager {
 impl Draw2DManager {
     /// Create a new 2D draw manager.
     pub fn new() -> Self {
-        // FIXME: setup_vao() hangs during initialization - skip for now
-        // TODO: Investigate what's causing the hang in vao.bind() / vbo.bind()
-        Self {
+        let mut manager = Self {
             vbo: VertexBuffer::new(),
             vao: VertexArray::new(),
             vertices: Vec::with_capacity(4096),
@@ -88,7 +86,10 @@ impl Draw2DManager {
             current_texture: 0,
             current_blend: BlendMode::Alpha,
             char_texture: 0,
-        }
+        };
+        // Setup VAO for 2D rendering
+        manager.setup_vao();
+        manager
     }
 
     /// Configure the VAO.

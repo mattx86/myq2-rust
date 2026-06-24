@@ -526,50 +526,50 @@ pub static HUD_STATE: LazyLock<Mutex<HudState>> = LazyLock::new(|| Mutex::new(Hu
 
 /// Update HUD configuration from cvars.
 pub fn hud_update_config() {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.config.update_from_cvars();
 }
 
 /// Update FPS counter (call each frame).
 pub fn hud_update_fps() {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.fps_counter.update();
 }
 
 /// Update speed meter with player velocity.
 pub fn hud_update_speed(velocity: &[f32; 3]) {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.speed_meter.update(velocity);
 }
 
 /// Update match timer with server time.
 pub fn hud_update_timer(server_time: i32) {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.timer.update(server_time);
 }
 
 /// Start the match timer.
 pub fn hud_start_timer(server_time: i32) {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.timer.start(server_time);
 }
 
 /// Stop the match timer.
 pub fn hud_stop_timer() {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.timer.stop();
 }
 
 /// Reset speed meter max speed.
 pub fn hud_reset_speed_max() {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.speed_meter.reset_max();
 }
 
 /// Update network stats from client smoothing state.
 /// Called periodically (not every frame) to avoid lock contention.
 pub fn hud_update_netstats(ping: i32, jitter: i32, loss: f32, interp: i32, quality: &str, current_time: i32) {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     // Only update every 250ms to reduce overhead
     if current_time - state.net_stats.last_update < 250 {
         return;
@@ -585,7 +585,7 @@ pub fn hud_update_netstats(ping: i32, jitter: i32, loss: f32, interp: i32, quali
 /// Update smoothed stat values for HUD display.
 /// Call this each frame with current playerstate values.
 pub fn hud_update_stats(health: i32, armor: i32, ammo: i32, frags: i32, current_time: i32) {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.stat_smoothing.update(health, armor, ammo, frags, current_time);
 }
 
@@ -593,49 +593,49 @@ pub fn hud_update_stats(health: i32, armor: i32, ammo: i32, frags: i32, current_
 /// This prevents HUD flickering by holding last known values
 /// while continuing smooth animation towards targets.
 pub fn hud_continue_stats_during_packet_loss(current_time: i32) {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.stat_smoothing.continue_during_packet_loss(current_time);
 }
 
 /// Get smoothed health value for HUD display.
 pub fn hud_get_smoothed_health() -> i32 {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.stat_smoothing.health.get()
 }
 
 /// Get smoothed armor value for HUD display.
 pub fn hud_get_smoothed_armor() -> i32 {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.stat_smoothing.armor.get()
 }
 
 /// Get smoothed ammo value for HUD display.
 pub fn hud_get_smoothed_ammo() -> i32 {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.stat_smoothing.ammo.get()
 }
 
 /// Get smoothed frag count for HUD display.
 pub fn hud_get_smoothed_frags() -> i32 {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.stat_smoothing.frags.get()
 }
 
 /// Reset smoothed stats (on respawn, level change).
 pub fn hud_reset_stats(health: i32, armor: i32, ammo: i32, frags: i32) {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.stat_smoothing.reset(health, armor, ammo, frags);
 }
 
 /// Enable or disable stat smoothing.
 pub fn hud_set_stat_smoothing(enabled: bool) {
-    let mut state = HUD_STATE.lock().unwrap();
+    let mut state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.stat_smoothing.enabled = enabled;
 }
 
 /// Check if any stat is currently animating (for bar effects).
 pub fn hud_stats_animating() -> bool {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.stat_smoothing.health.is_animating() ||
     state.stat_smoothing.armor.is_animating() ||
     state.stat_smoothing.ammo.is_animating()
@@ -643,7 +643,7 @@ pub fn hud_stats_animating() -> bool {
 
 /// Draw HUD overlay elements (FPS, speed, timer).
 pub fn hud_draw_overlays(screen_width: i32, screen_height: i32) {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let config = &state.config;
 
     if config.alpha <= 0.0 {
@@ -697,7 +697,7 @@ pub fn hud_draw_overlays(screen_width: i32, screen_height: i32) {
         };
 
         // Line 1: Ping and jitter
-        let line1 = format!("Ping: {}ms (±{})", ns.ping, ns.jitter);
+        let line1 = format!("Ping: {}ms (Â±{})", ns.ping, ns.jitter);
         let text_width1 = line1.len() as i32 * 8;
         let (x1, y1) = config.calc_position(&config.netstats_position, screen_width, screen_height, text_width1, 32);
         draw_hud_string(x1, y1, &line1, ping_color, config.alpha);
@@ -734,43 +734,43 @@ fn draw_hud_string(x: i32, y: i32, text: &str, _color: i32, alpha: f32) {
 
 /// Get the current HUD scale factor.
 pub fn hud_get_scale() -> f32 {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.config.scale
 }
 
 /// Get the current HUD alpha.
 pub fn hud_get_alpha() -> f32 {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.config.alpha
 }
 
 /// Check if minimal HUD mode is enabled.
 pub fn hud_is_minimal() -> bool {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.config.minimal_mode
 }
 
 /// Check if health should be shown.
 pub fn hud_show_health() -> bool {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.config.show_health && !state.config.minimal_mode
 }
 
 /// Check if armor should be shown.
 pub fn hud_show_armor() -> bool {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.config.show_armor && !state.config.minimal_mode
 }
 
 /// Check if ammo should be shown.
 pub fn hud_show_ammo() -> bool {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.config.show_ammo && !state.config.minimal_mode
 }
 
 /// Print HUD configuration info.
 pub fn cmd_hud_info() {
-    let state = HUD_STATE.lock().unwrap();
+    let state = HUD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let config = &state.config;
     com_printf(&format!(
         "HUD Info:\n\

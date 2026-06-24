@@ -1,4 +1,4 @@
-// cl_cin.rs — Client cinematics
+// cl_cin.rs â€” Client cinematics
 // Converted from: myq2-original/client/cl_cin.c
 
 use std::fs::File;
@@ -68,14 +68,14 @@ static CIN: LazyLock<Mutex<Cinematics>> = LazyLock::new(|| Mutex::new(Cinematics
 
 /// Get a mutable lock guard to the global cinematics state.
 pub fn cin() -> MutexGuard<'static, Cinematics> {
-    CIN.lock().unwrap()
+    CIN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 // ============================================================
 // PCX Loading
 // ============================================================
 
-/// SCR_LoadPCX — Load a PCX image file.
+/// SCR_LoadPCX â€” Load a PCX image file.
 ///
 /// Returns (pic, palette, width, height). pic or palette may be None on failure.
 pub fn scr_load_pcx(filename: &str) -> (Option<Vec<u8>>, Option<Vec<u8>>, i32, i32) {
@@ -137,7 +137,7 @@ pub fn scr_stop_cinematic(cl: &mut ClientState, _cls: &mut ClientStatic) {
     }
 }
 
-/// SCR_FinishCinematic — Called when either the cinematic completes, or it is aborted
+/// SCR_FinishCinematic â€” Called when either the cinematic completes, or it is aborted
 pub fn scr_finish_cinematic(cls: &mut ClientStatic, cl: &ClientState) {
     // tell the server to advance to the next map / cinematic
     msg_write_byte(&mut cls.netchan.message, CLC_STRINGCMD as i32);
@@ -176,7 +176,7 @@ fn smallest_node1(cin: &mut Cinematics, numhnodes: i32) -> i32 {
     bestnode
 }
 
-/// Huff1TableInit — Reads the 64k counts table and initializes the node trees
+/// Huff1TableInit â€” Reads the 64k counts table and initializes the node trees
 pub fn huff1_table_init(cin: &mut Cinematics, cl: &mut ClientState) {
 
     cin.hnodes1 = Some(vec![0i32; 256 * 256 * 2]);
@@ -428,7 +428,7 @@ pub fn scr_run_cinematic(cl: &mut ClientState, cls: &mut ClientStatic) {
     }
 }
 
-/// SCR_DrawCinematic — Returns true if a cinematic is active, meaning the view
+/// SCR_DrawCinematic â€” Returns true if a cinematic is active, meaning the view
 /// rendering should be skipped.
 pub fn scr_draw_cinematic(cl: &mut ClientState, cls: &ClientStatic) -> bool {
     if cl.cinematictime <= 0 {
@@ -542,12 +542,12 @@ pub fn scr_play_cinematic(arg: &str, cl: &mut ClientState, cls: &mut ClientStati
 }
 
 // ============================================================
-// Placeholder functions — to be provided by other modules
+// Placeholder functions â€” to be provided by other modules
 // ============================================================
 
 use myq2_common::qcommon::{SizeBuf, CLC_STRINGCMD};
 
-// Direct imports — formerly wrappers
+// Direct imports â€” formerly wrappers
 use myq2_common::files::fs_load_file;
 
 fn fs_fopen_file(filename: &str) -> Option<File> {

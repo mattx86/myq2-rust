@@ -12,6 +12,7 @@ use super::framebuffer::{WaterFbo, PostProcessor};
 use crate::vk_rmain::EntityLocal;
 use crate::modern::gpu_device;
 use crate::vulkan::dynamic_state3::DynamicState3Commands;
+use std::f32::consts::PI;
 
 /// Queued brush model draw data (doors, platforms, etc.).
 struct BrushModelDraw {
@@ -56,6 +57,81 @@ struct DlightPushConstants {
     light_color: [f32; 3],    // 12 bytes
     _pad: f32,                // 4 bytes
 }
+
+/// A D3-style (Doom 3) point light for per-pixel additive lighting.
+#[repr(C)]
+#[derive(Clone, Debug, Default)]
+pub struct GpuLightD3 {
+    pub pos: [f32; 3],
+    pub radius: f32,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub specular: [f32; 3],
+    pub spec_pow: f32,
+}
+
+/// Push constants for the D3 lit pass (world_lit.vert/frag).
+/// Total: 124 bytes (within Vulkan's 128-byte minimum guarantee).
+#[repr(C)]
+#[repr(C)]
+struct D3LitPushConstants {
+    mvp: [f32; 16],           // 64 bytes
+    light_pos: [f32; 3],      // 12 bytes
+    light_radius: f32,        // 4 bytes
+    light_color: [f32; 3],    // 12 bytes
+    light_intensity: f32,     // 4 bytes
+    spec_power: f32,          // 4 bytes
+    shadow_bias: f32,         // 4 bytes  (was _pad0 in spec)
+    _pad1: f32,               // 4 bytes
+    _pad2: f32,               // 4 bytes
+    view_origin: [f32; 3],    // 12 bytes
+}
+
+/// Push constants for the shadow cubemap depth pass (shadow_cube.vert/frag).
+/// Total: 80 bytes.
+#[repr(C)]
+struct ShadowCubePushConstants {
+    mvp: [f32; 16],           // 64 bytes
+    light_pos: [f32; 3],      // 12 bytes
+    light_radius: f32,        // 4 bytes
+}
+
+/// A pre-computed shadow cubemap for a single D3 point light.
+///
+/// The cubemap is rendered once at level load and sampled each frame
+/// to determine per-fragment occlusion from the light.
+///
+/// Format: R32_SFLOAT (colour attachment). Stores `dist/radius` for the
+/// nearest opaque surface in each direction. Sampling with a regular
+/// `samplerCube` is unambiguous — avoids depth-format sampling issues.
+pub struct ShadowCubemap {
+    /// R32_SFLOAT colour cubemap image (6 layers) — stores dist/radius.
+    pub image: vk::Image,
+    /// Device memory backing the colour cubemap.
+    pub memory: vk::DeviceMemory,
+    /// Cube image view (TYPE_CUBE, for shader sampling at set=2).
+    pub cube_view: vk::ImageView,
+    /// Per-face colour image views (TYPE_2D, for framebuffer colour attachment).
+    pub face_views: [vk::ImageView; 6],
+    /// Temporary D32_SFLOAT depth image used only during shadow-map construction.
+    /// Kept alive so the framebuffers remain valid until explicitly destroyed.
+    pub depth_image: vk::Image,
+    /// Device memory backing the depth image.
+    pub depth_memory: vk::DeviceMemory,
+    /// Depth image view (TYPE_2D, for framebuffer depth attachment).
+    pub depth_view: vk::ImageView,
+    /// Per-face framebuffers: attachment[0] = face colour view, attachment[1] = depth view.
+    pub framebuffers: [vk::Framebuffer; 6],
+    /// Descriptor set at set=2 binding cube_view as a samplerCube.
+    pub descriptor_set: vk::DescriptorSet,
+    /// Shadow map resolution (pixels per face).
+    pub resolution: u32,
+}
+
+// SAFETY: ShadowCubemap contains only Vulkan handles (opaque integers).
+// All access is serialized by the surrounding Mutex on ModernRenderPath.
+unsafe impl Send for ShadowCubemap {}
+unsafe impl Sync for ShadowCubemap {}
 
 /// Modern VBO/shader-based render path.
 pub struct ModernRenderPath {
@@ -145,6 +221,16 @@ pub struct ModernRenderPath {
     lightmap_descriptor_set: Option<vk::DescriptorSet>,
     /// Descriptor pool for the lightmap descriptor set.
     lightmap_descriptor_pool: Option<vk::DescriptorPool>,
+    /// D3 point lights for per-pixel additive lighting.
+    d3_lights: Vec<GpuLightD3>,
+    /// Pre-computed shadow cubemaps, one per D3 light (built at level load).
+    shadow_cubemaps: Vec<ShadowCubemap>,
+    /// Depth-only render pass for shadow cubemap rendering (created once).
+    shadow_render_pass: Option<vk::RenderPass>,
+    /// Descriptor pool for shadow cubemap descriptor sets.
+    shadow_descriptor_pool: Option<vk::DescriptorPool>,
+    /// Sampler for shadow cubemap sampling.
+    shadow_sampler: Option<vk::Sampler>,
 }
 
 impl ModernRenderPath {
@@ -208,6 +294,11 @@ impl ModernRenderPath {
             dlight_ibo: IndexBuffer::new(),
             lightmap_descriptor_set: None,
             lightmap_descriptor_pool: None,
+            d3_lights: Vec::new(),
+            shadow_cubemaps: Vec::new(),
+            shadow_render_pass: None,
+            shadow_descriptor_pool: None,
+            shadow_sampler: None,
         }
     }
 
@@ -270,7 +361,7 @@ impl ModernRenderPath {
     /// and create the descriptor set for per-pixel lightmap sampling.
     pub fn init_lightmap_gpu(&mut self, layers: &[Vec<u8>]) {
         // Create GPU resources for the lightmap texture array
-        self.lightmap_array.create_gpu_resources();
+        self.lightmap_array.create_gpu_resources(layers.len().max(1) as u32);
 
         if layers.is_empty() {
             return;
@@ -473,6 +564,994 @@ impl ModernRenderPath {
             [m[8], m[9], m[10], m[11]],
             [m[12], m[13], m[14], m[15]],
         ]
+    }
+
+    // =========================================================================
+    // D3 Lighting and Shadow Cubemap
+    // =========================================================================
+
+    /// Update the set of D3 point lights and pre-compute their shadow cubemaps.
+    ///
+    /// Called every frame from vk_rmain.  Rebuilds d3_lights from STATIC_LIGHTS
+    /// using the cvar-driven limits, then (re-)builds shadow cubemaps whenever the
+    /// light list changes or the BSP geometry is freshly uploaded.
+    pub fn update_d3_lights(
+        &mut self,
+        max_lights: usize,
+        _ambient: f32,
+        _extrude: f32,
+        spec_power: f32,
+    ) {
+        use crate::vk_rsurf::STATIC_LIGHTS;
+
+        let static_lights = STATIC_LIGHTS.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Classic mode (max_lights == 0): no D3 additive pass.  Lightmaps encode full
+        // baked lighting already.  Any warm-coloured additive pass on top shifts the
+        // red/green/blue balance further warm and produces a visible red tint regardless
+        // of framebuffer precision, because Q2 lights are overwhelmingly warm-coloured
+        // so red_additive >> blue_additive even at very low intensities.
+        // D3 mode: cap at max_lights.  Intensity 0.07 with the float16 HDR FBO and
+        // ACES tonemapping keeps warm overlap from saturating the red channel.
+        if max_lights == 0 {
+            self.d3_lights = Vec::new();
+            return;
+        }
+        let (limit, per_light_intensity): (usize, f32) = (max_lights, 0.07);
+
+        let new_lights: Vec<GpuLightD3> = static_lights.iter().take(limit).map(|sl| {
+            // Q2 light intensity is typically 100–600.  Use a generous radius so the
+            // smooth quadratic falloff spans multiple BSP faces — this continuous
+            // analytical gradient hides lightmap seams at face boundaries.
+            // 3× the old radius gives one typical room width (300–500 units) of coverage.
+            let radius = (sl.intensity * 1.5).clamp(128.0, 800.0);
+            GpuLightD3 {
+                pos: sl.origin,
+                radius,
+                color: sl.color,
+                intensity: per_light_intensity,
+                specular: sl.color,
+                spec_pow: spec_power,
+            }
+        }).collect();
+
+        // Rebuild shadow maps when light count changes (level load / cvar change) OR when
+        // cubemaps are missing — the first build attempt may silently skip if BSP geometry
+        // is not yet uploaded, so we retry each frame until counts match.
+        let needs_rebuild = new_lights.len() != self.d3_lights.len()
+            || self.shadow_cubemaps.len() != new_lights.len();
+        self.d3_lights = new_lights;
+        if needs_rebuild {
+            let bsp_vbo = self.bsp_geometry.vertex_buffer().vk_buffer().unwrap_or(vk::Buffer::null());
+            let bsp_ibo = self.bsp_geometry.index_buffer().vk_buffer().unwrap_or(vk::Buffer::null());
+            let bsp_index_count = self.bsp_geometry.index_count();
+            self.build_shadow_maps(bsp_vbo, bsp_ibo, bsp_index_count);
+        }
+    }
+
+    /// Accept dynamic lights for the current frame (used by dlight rendering).
+    pub fn set_frame_dlights(&mut self, _dlights: Vec<myq2_common::q_shared::DLight>) {
+        // Dynamic lights are handled by the dlight disc renderer; no action needed here.
+    }
+
+    /// Get the D3 lights slice (read-only).
+    pub fn d3_lights(&self) -> &[GpuLightD3] {
+        &self.d3_lights
+    }
+
+    /// Get the shadow cubemaps slice (read-only).
+    pub fn shadow_cubemaps(&self) -> &[ShadowCubemap] {
+        &self.shadow_cubemaps
+    }
+
+    /// Build a right-hand look-at matrix (column-major, for Vulkan).
+    ///
+    /// Produces a view matrix where the camera is at `eye`, looking at `center`, with `up`.
+    fn look_at_rh(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [f32; 16] {
+        let f = {
+            let dx = center[0] - eye[0];
+            let dy = center[1] - eye[1];
+            let dz = center[2] - eye[2];
+            let len = (dx*dx + dy*dy + dz*dz).sqrt().max(1e-10);
+            [dx/len, dy/len, dz/len]
+        };
+        let s = {
+            // s = normalize(cross(f, up))
+            let cx = f[1]*up[2] - f[2]*up[1];
+            let cy = f[2]*up[0] - f[0]*up[2];
+            let cz = f[0]*up[1] - f[1]*up[0];
+            let len = (cx*cx + cy*cy + cz*cz).sqrt().max(1e-10);
+            [cx/len, cy/len, cz/len]
+        };
+        let u = [
+            s[1]*f[2] - s[2]*f[1],
+            s[2]*f[0] - s[0]*f[2],
+            s[0]*f[1] - s[1]*f[0],
+        ];
+        let tx = -(s[0]*eye[0] + s[1]*eye[1] + s[2]*eye[2]);
+        let ty = -(u[0]*eye[0] + u[1]*eye[1] + u[2]*eye[2]);
+        let tz =  f[0]*eye[0] + f[1]*eye[1] + f[2]*eye[2];
+
+        // Column-major matrix:
+        // | s.x  u.x  -f.x  0 |
+        // | s.y  u.y  -f.y  0 |
+        // | s.z  u.z  -f.z  0 |
+        // | tx   ty    tz   1 |
+        [
+            s[0], u[0], -f[0], 0.0,
+            s[1], u[1], -f[1], 0.0,
+            s[2], u[2], -f[2], 0.0,
+            tx,   ty,    tz,   1.0,
+        ]
+    }
+
+    /// Build a perspective projection matrix for Vulkan (depth range [0, 1], RH).
+    fn perspective_rh(fov_y_rad: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
+        let tan_half = (fov_y_rad * 0.5).tan();
+        let sy = 1.0 / tan_half;
+        let sx = sy / aspect;
+        let nf = far / (near - far);
+        // Column-major
+        [
+            sx,  0.0,  0.0,  0.0,
+            0.0, sy,   0.0,  0.0,
+            0.0, 0.0,  nf,  -1.0,
+            0.0, 0.0,  near * nf, 0.0,
+        ]
+    }
+
+    /// Compute the 6 MVP matrices for rendering a cubemap from `light_pos` with radius `light_radius`.
+    ///
+    /// Returns column-major MVP matrices for faces [+X, -X, +Y, -Y, +Z, -Z].
+    fn cubemap_face_mvps(light_pos: [f32; 3], light_radius: f32) -> [[f32; 16]; 6] {
+        // Vulkan cubemap face look-directions and up vectors (right-hand Y-down convention).
+        // The view directions match Vulkan's cubemap face ordering.
+        let lp = light_pos;
+        let r = light_radius.max(1.0);
+
+        let faces: [([f32; 3], [f32; 3]); 6] = [
+            ([1.0,  0.0,  0.0], [0.0, -1.0,  0.0]),  // +X
+            ([-1.0, 0.0,  0.0], [0.0, -1.0,  0.0]),  // -X
+            ([0.0,  1.0,  0.0], [0.0,  0.0,  1.0]),  // +Y
+            ([0.0, -1.0,  0.0], [0.0,  0.0, -1.0]),  // -Y
+            ([0.0,  0.0,  1.0], [0.0, -1.0,  0.0]),  // +Z
+            ([0.0,  0.0, -1.0], [0.0, -1.0,  0.0]),  // -Z
+        ];
+
+        let proj = Self::perspective_rh(PI / 2.0, 1.0, 1.0, r);
+
+        let mut mvps = [[0.0f32; 16]; 6];
+        for (i, (dir, up)) in faces.iter().enumerate() {
+            let center = [lp[0] + dir[0], lp[1] + dir[1], lp[2] + dir[2]];
+            let view = Self::look_at_rh(lp, center, *up);
+            mvps[i] = Self::mat4_multiply(&proj, &view);
+        }
+        mvps
+    }
+
+    /// Find a suitable memory type index for device-local image memory.
+    fn find_memory_type(
+        ctx: &crate::vulkan::VulkanContext,
+        type_filter: u32,
+        properties: vk::MemoryPropertyFlags,
+    ) -> Option<u32> {
+        // SAFETY: query only, no mutation
+        let mem_props = unsafe {
+            ctx.instance.get_physical_device_memory_properties(ctx.physical_device)
+        };
+        (0..mem_props.memory_type_count).find(|&i| {
+            (type_filter & (1 << i)) != 0
+                && mem_props.memory_types[i as usize].property_flags.contains(properties)
+        })
+    }
+
+    /// Destroy all existing shadow cubemaps and release their Vulkan resources.
+    fn destroy_shadow_cubemaps(&mut self) {
+        if self.shadow_cubemaps.is_empty() {
+            return;
+        }
+        gpu_device::with_device(|ctx| {
+            // SAFETY: All handles were created by this renderer and are no longer in use.
+            unsafe {
+                // Wait for device idle before releasing resources
+                let _ = ctx.device.device_wait_idle();
+
+                let pool_opt = self.shadow_descriptor_pool;
+                for sc in self.shadow_cubemaps.drain(..) {
+                    // Free descriptor set (if pool allows individual free)
+                    if let Some(pool) = pool_opt {
+                        let _ = ctx.device.free_descriptor_sets(pool, &[sc.descriptor_set]);
+                    }
+                    for fb in &sc.framebuffers {
+                        ctx.device.destroy_framebuffer(*fb, None);
+                    }
+                    // Per-face R32_SFLOAT colour views
+                    for fv in &sc.face_views {
+                        ctx.device.destroy_image_view(*fv, None);
+                    }
+                    // D32_SFLOAT depth resources (kept alive for framebuffer validity)
+                    ctx.device.destroy_image_view(sc.depth_view, None);
+                    ctx.device.free_memory(sc.depth_memory, None);
+                    ctx.device.destroy_image(sc.depth_image, None);
+                    // R32_SFLOAT colour cubemap
+                    ctx.device.destroy_image_view(sc.cube_view, None);
+                    ctx.device.free_memory(sc.memory, None);
+                    ctx.device.destroy_image(sc.image, None);
+                }
+            }
+        });
+    }
+
+    /// Create the render pass used for shadow cubemap face rendering.
+    ///
+    /// Attachment 0: R32_SFLOAT colour (stores dist/radius — sampled in world_lit pass).
+    ///   initial = COLOR_ATTACHMENT_OPTIMAL  (caller transitions before first face)
+    ///   final   = COLOR_ATTACHMENT_OPTIMAL  (caller transitions to SHADER_READ_ONLY_OPTIMAL
+    ///                                        after all 6 faces)
+    ///
+    /// Attachment 1: D32_SFLOAT depth (z-testing only, discarded after each face).
+    ///   initial = DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    ///   final   = DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    ///
+    /// Using a colour-format cubemap avoids the depth-image sampling issues
+    /// that prevent D32_SFLOAT from being reliably read with a plain samplerCube.
+    fn create_shadow_render_pass(&mut self) {
+        if self.shadow_render_pass.is_some() {
+            return; // Already created
+        }
+        gpu_device::with_device(|ctx| {
+            // SAFETY: Vulkan context valid, single-threaded.
+            unsafe {
+                // Attachment 0: R32_SFLOAT colour — stores dist/radius
+                let color_attachment = vk::AttachmentDescription::default()
+                    .format(vk::Format::R32_SFLOAT)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+
+                // Attachment 1: D32_SFLOAT depth — z-testing only (DONT_CARE store)
+                let depth_attachment = vk::AttachmentDescription::default()
+                    .format(vk::Format::D32_SFLOAT)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+                let color_ref = vk::AttachmentReference::default()
+                    .attachment(0)
+                    .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+
+                let depth_ref = vk::AttachmentReference::default()
+                    .attachment(1)
+                    .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+                let color_refs = [color_ref];
+                let subpass = vk::SubpassDescription::default()
+                    .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                    .color_attachments(&color_refs)
+                    .depth_stencil_attachment(&depth_ref);
+
+                // Ensure prior shader reads finish before this pass writes colour/depth,
+                // and that colour writes finish before the next shader read.
+                let dependencies = [
+                    vk::SubpassDependency::default()
+                        .src_subpass(vk::SUBPASS_EXTERNAL)
+                        .dst_subpass(0)
+                        .src_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
+                        .dst_stage_mask(
+                            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                        )
+                        .src_access_mask(vk::AccessFlags::SHADER_READ)
+                        .dst_access_mask(
+                            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        )
+                        .dependency_flags(vk::DependencyFlags::BY_REGION),
+                    vk::SubpassDependency::default()
+                        .src_subpass(0)
+                        .dst_subpass(vk::SUBPASS_EXTERNAL)
+                        .src_stage_mask(
+                            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                        )
+                        .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
+                        .src_access_mask(
+                            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        )
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                        .dependency_flags(vk::DependencyFlags::BY_REGION),
+                ];
+
+                let attachments = [color_attachment, depth_attachment];
+                let render_pass_info = vk::RenderPassCreateInfo::default()
+                    .attachments(&attachments)
+                    .subpasses(std::slice::from_ref(&subpass))
+                    .dependencies(&dependencies);
+
+                match ctx.device.create_render_pass(&render_pass_info, None) {
+                    Ok(rp) => {
+                        self.shadow_render_pass = Some(rp);
+                        eprintln!("[SHADOW] Created shadow render pass (R32_SFLOAT colour + D32_SFLOAT depth)");
+                    }
+                    Err(e) => {
+                        eprintln!("[SHADOW] Failed to create shadow render pass: {:?}", e);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Create or recreate the shadow descriptor pool sized for `light_count` lights.
+    fn create_shadow_descriptor_pool(&mut self, light_count: usize) {
+        // Destroy existing pool
+        if let Some(pool) = self.shadow_descriptor_pool.take() {
+            gpu_device::with_device(|ctx| {
+                // SAFETY: pool is valid and no descriptor sets are in use
+                unsafe { ctx.device.destroy_descriptor_pool(pool, None); }
+            });
+        }
+
+        if light_count == 0 {
+            return;
+        }
+
+        gpu_device::with_device(|ctx| {
+            // SAFETY: Vulkan context valid.
+            unsafe {
+                let pool_sizes = [vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                    descriptor_count: light_count as u32,
+                }];
+                let pool_info = vk::DescriptorPoolCreateInfo::default()
+                    .pool_sizes(&pool_sizes)
+                    .max_sets(light_count as u32)
+                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
+
+                match ctx.device.create_descriptor_pool(&pool_info, None) {
+                    Ok(pool) => {
+                        self.shadow_descriptor_pool = Some(pool);
+                    }
+                    Err(e) => {
+                        eprintln!("[SHADOW] Failed to create descriptor pool: {:?}", e);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Create or retrieve the shadow sampler (linear, clamp-to-edge).
+    fn ensure_shadow_sampler(&mut self) {
+        if self.shadow_sampler.is_some() {
+            return;
+        }
+        gpu_device::with_device(|ctx| {
+            // SAFETY: Vulkan context valid.
+            unsafe {
+                let sampler_info = vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::LINEAR)
+                    .min_filter(vk::Filter::LINEAR)
+                    .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .min_lod(0.0)
+                    .max_lod(0.0)
+                    .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE);
+
+                match ctx.device.create_sampler(&sampler_info, None) {
+                    Ok(s) => { self.shadow_sampler = Some(s); }
+                    Err(e) => { eprintln!("[SHADOW] Failed to create sampler: {:?}", e); }
+                }
+            }
+        });
+    }
+
+    /// Build per-light shadow cubemaps.
+    ///
+    /// Renders the entire BSP geometry into a 256×256 D32_SFLOAT cubemap for
+    /// each D3 light. Called once at level load via `update_d3_lights`.
+    pub fn build_shadow_maps(
+        &mut self,
+        bsp_vbo: vk::Buffer,
+        bsp_ibo: vk::Buffer,
+        bsp_index_count: u32,
+    ) {
+        const SHADOW_RES: u32 = 256;
+
+        // Bail early if no lights or if BSP not yet built (index_count==0 means
+        // geometry hasn't been uploaded yet; building now would produce all-1.0
+        // shadow maps that are never re-built, causing permanent full-brights).
+        if self.d3_lights.is_empty() || bsp_vbo == vk::Buffer::null() || bsp_index_count == 0 {
+            eprintln!("[SHADOW] Deferring shadow map build: lights={} vbo_null={} index_count={}",
+                self.d3_lights.len(), bsp_vbo == vk::Buffer::null(), bsp_index_count);
+            return;
+        }
+
+        // Ensure shared resources exist
+        self.create_shadow_render_pass();
+        self.ensure_shadow_sampler();
+
+        // Create shadow pipeline (needs render pass to already exist)
+        let render_pass = match self.shadow_render_pass {
+            Some(rp) => rp,
+            None => {
+                eprintln!("[SHADOW] No shadow render pass — skipping shadow map build");
+                return;
+            }
+        };
+
+        // Create the shadow cubemap pipeline if not yet done
+        if let Some(pm) = self.pipelines.as_mut() {
+            if let Err(e) = pm.create_shadow_pipeline(render_pass) {
+                eprintln!("[SHADOW] Failed to create shadow pipeline: {}", e);
+                return;
+            }
+            // Also ensure the lit additive pipeline exists
+            if let Err(e) = pm.create_pipeline(ShaderType::WorldLitAdditive, PipelineVariant::LitAdditive) {
+                eprintln!("[SHADOW] Failed to create lit additive pipeline: {}", e);
+            }
+        }
+
+        let shadow_sampler = match self.shadow_sampler {
+            Some(s) => s,
+            None => {
+                eprintln!("[SHADOW] No shadow sampler — skipping shadow map build");
+                return;
+            }
+        };
+
+        // Get the set=2 descriptor layout (COMBINED_IMAGE_SAMPLER) from the pipeline manager.
+        let ds_layout = match self.pipelines.as_ref().and_then(|pm| pm.lightmap_set_layout()) {
+            Some(l) => l,
+            None => {
+                eprintln!("[SHADOW] No descriptor set layout for set=2 — skipping shadow maps");
+                return;
+            }
+        };
+
+        // Destroy previous shadow cubemaps
+        self.destroy_shadow_cubemaps();
+
+        // Create descriptor pool for all lights
+        let light_count = self.d3_lights.len();
+        self.create_shadow_descriptor_pool(light_count);
+
+        let desc_pool = match self.shadow_descriptor_pool {
+            Some(p) => p,
+            None => {
+                eprintln!("[SHADOW] No shadow descriptor pool — skipping shadow maps");
+                return;
+            }
+        };
+
+        // Snapshot lights to avoid borrow conflicts
+        let lights: Vec<GpuLightD3> = self.d3_lights.clone();
+
+        // Get shadow pipeline
+        let shadow_pipeline = self.pipelines.as_ref()
+            .and_then(|pm| pm.get(ShaderType::ShadowCube, PipelineVariant::ShadowDepth))
+            .map(|gp| (gp.pipeline, gp.layout));
+
+        let (shadow_pip, shadow_pip_layout) = match shadow_pipeline {
+            Some(pair) => pair,
+            None => {
+                eprintln!("[SHADOW] Shadow cube pipeline not found — skipping shadow maps");
+                return;
+            }
+        };
+
+        eprintln!("[SHADOW] Building {} shadow cubemaps at {}x{} with {} BSP indices...",
+            light_count, SHADOW_RES, SHADOW_RES, bsp_index_count);
+
+        for light in &lights {
+            let light_pos = light.pos;
+            let light_radius = light.radius;
+            let mvps = Self::cubemap_face_mvps(light_pos, light_radius);
+
+            // Allocate a ShadowCubemap inside gpu_device closures
+            // We do all Vulkan calls in a single closure to avoid lock re-entrancy issues.
+            // with_device_and_commands_mut returns Option<Option<ShadowCubemap>>;
+            // .flatten() collapses to Option<ShadowCubemap>.
+            let result: Option<ShadowCubemap> = gpu_device::with_device_and_commands_mut(|ctx, cmds| {
+                // SAFETY: Vulkan context valid; single-threaded renderer.
+                unsafe {
+                    // -------------------------------------------------------
+                    // Helper: allocate and bind device-local memory for an image.
+                    // Returns (memory) or None on failure (image already destroyed by caller).
+                    // -------------------------------------------------------
+                    let alloc_image_mem = |img: vk::Image| -> Option<vk::DeviceMemory> {
+                        let mem_reqs = ctx.device.get_image_memory_requirements(img);
+                        let mem_type = Self::find_memory_type(
+                            ctx, mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                        )?;
+                        let alloc_info = vk::MemoryAllocateInfo::default()
+                            .allocation_size(mem_reqs.size)
+                            .memory_type_index(mem_type);
+                        ctx.device.allocate_memory(&alloc_info, None).ok()
+                    };
+
+                    // -------------------------------------------------------
+                    // 1. R32_SFLOAT colour cubemap (6 layers) — stores dist/radius
+                    // -------------------------------------------------------
+                    let color_image_info = vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(vk::Format::R32_SFLOAT)
+                        .extent(vk::Extent3D { width: SHADOW_RES, height: SHADOW_RES, depth: 1 })
+                        .mip_levels(1)
+                        .array_layers(6)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::OPTIMAL)
+                        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                        .initial_layout(vk::ImageLayout::UNDEFINED)
+                        .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE);
+
+                    let image = match ctx.device.create_image(&color_image_info, None) {
+                        Ok(img) => img,
+                        Err(e) => { eprintln!("[SHADOW] create colour image failed: {:?}", e); return None; }
+                    };
+                    let memory = match alloc_image_mem(image) {
+                        Some(m) => m,
+                        None => { eprintln!("[SHADOW] alloc colour memory failed"); ctx.device.destroy_image(image, None); return None; }
+                    };
+                    if let Err(e) = ctx.device.bind_image_memory(image, memory, 0) {
+                        eprintln!("[SHADOW] bind colour image memory failed: {:?}", e);
+                        ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                    }
+
+                    // -------------------------------------------------------
+                    // 2. D32_SFLOAT depth image (2D, single layer) — z-testing only
+                    // -------------------------------------------------------
+                    let depth_image_info = vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(vk::Format::D32_SFLOAT)
+                        .extent(vk::Extent3D { width: SHADOW_RES, height: SHADOW_RES, depth: 1 })
+                        .mip_levels(1)
+                        .array_layers(1)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::OPTIMAL)
+                        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                        .initial_layout(vk::ImageLayout::UNDEFINED);
+
+                    let depth_image = match ctx.device.create_image(&depth_image_info, None) {
+                        Ok(img) => img,
+                        Err(e) => {
+                            eprintln!("[SHADOW] create depth image failed: {:?}", e);
+                            ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                        }
+                    };
+                    let depth_memory = match alloc_image_mem(depth_image) {
+                        Some(m) => m,
+                        None => {
+                            eprintln!("[SHADOW] alloc depth memory failed");
+                            ctx.device.destroy_image(depth_image, None);
+                            ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                        }
+                    };
+                    if let Err(e) = ctx.device.bind_image_memory(depth_image, depth_memory, 0) {
+                        eprintln!("[SHADOW] bind depth memory failed: {:?}", e);
+                        ctx.device.free_memory(depth_memory, None); ctx.device.destroy_image(depth_image, None);
+                        ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                    }
+
+                    // -------------------------------------------------------
+                    // 3. Create image views
+                    // -------------------------------------------------------
+                    // R32_SFLOAT cube view (for samplerCube sampling at set=2)
+                    let cube_view_info = vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::CUBE)
+                        .format(vk::Format::R32_SFLOAT)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0, level_count: 1,
+                            base_array_layer: 0, layer_count: 6,
+                        });
+                    let cube_view = match ctx.device.create_image_view(&cube_view_info, None) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("[SHADOW] create cube view failed: {:?}", e);
+                            ctx.device.free_memory(depth_memory, None); ctx.device.destroy_image(depth_image, None);
+                            ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                        }
+                    };
+
+                    // D32_SFLOAT depth view (single layer, for framebuffer depth attachment)
+                    let depth_view_info = vk::ImageViewCreateInfo::default()
+                        .image(depth_image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(vk::Format::D32_SFLOAT)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::DEPTH,
+                            base_mip_level: 0, level_count: 1,
+                            base_array_layer: 0, layer_count: 1,
+                        });
+                    let depth_view = match ctx.device.create_image_view(&depth_view_info, None) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("[SHADOW] create depth view failed: {:?}", e);
+                            ctx.device.destroy_image_view(cube_view, None);
+                            ctx.device.free_memory(depth_memory, None); ctx.device.destroy_image(depth_image, None);
+                            ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                        }
+                    };
+
+                    // R32_SFLOAT per-face 2D colour views (for framebuffer colour attachments)
+                    let mut face_views = [vk::ImageView::null(); 6];
+                    for face in 0..6u32 {
+                        let view_info = vk::ImageViewCreateInfo::default()
+                            .image(image)
+                            .view_type(vk::ImageViewType::TYPE_2D)
+                            .format(vk::Format::R32_SFLOAT)
+                            .subresource_range(vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                base_mip_level: 0, level_count: 1,
+                                base_array_layer: face, layer_count: 1,
+                            });
+                        face_views[face as usize] = match ctx.device.create_image_view(&view_info, None) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                eprintln!("[SHADOW] create face view {} failed: {:?}", face, e);
+                                for j in 0..face as usize { ctx.device.destroy_image_view(face_views[j], None); }
+                                ctx.device.destroy_image_view(depth_view, None);
+                                ctx.device.destroy_image_view(cube_view, None);
+                                ctx.device.free_memory(depth_memory, None); ctx.device.destroy_image(depth_image, None);
+                                ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                            }
+                        };
+                    }
+
+                    // -------------------------------------------------------
+                    // 4. Create 6 framebuffers (colour face view + depth view)
+                    // -------------------------------------------------------
+                    let mut framebuffers = [vk::Framebuffer::null(); 6];
+                    for face in 0..6usize {
+                        let attachments = [face_views[face], depth_view];
+                        let fb_info = vk::FramebufferCreateInfo::default()
+                            .render_pass(render_pass)
+                            .attachments(&attachments)
+                            .width(SHADOW_RES)
+                            .height(SHADOW_RES)
+                            .layers(1);
+                        framebuffers[face] = match ctx.device.create_framebuffer(&fb_info, None) {
+                            Ok(fb) => fb,
+                            Err(e) => {
+                                eprintln!("[SHADOW] create_framebuffer face {} failed: {:?}", face, e);
+                                for j in 0..face { ctx.device.destroy_framebuffer(framebuffers[j], None); }
+                                for fv in &face_views { ctx.device.destroy_image_view(*fv, None); }
+                                ctx.device.destroy_image_view(depth_view, None);
+                                ctx.device.destroy_image_view(cube_view, None);
+                                ctx.device.free_memory(depth_memory, None); ctx.device.destroy_image(depth_image, None);
+                                ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                            }
+                        };
+                    }
+
+                    // -------------------------------------------------------
+                    // 5. Allocate descriptor set (set=2, samplerCube)
+                    // -------------------------------------------------------
+                    let layouts = [ds_layout];
+                    let ds_alloc_info = vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(desc_pool)
+                        .set_layouts(&layouts);
+                    let descriptor_set = match ctx.device.allocate_descriptor_sets(&ds_alloc_info) {
+                        Ok(sets) => sets[0],
+                        Err(e) => {
+                            eprintln!("[SHADOW] allocate_descriptor_sets failed: {:?}", e);
+                            for fb in &framebuffers { ctx.device.destroy_framebuffer(*fb, None); }
+                            for fv in &face_views { ctx.device.destroy_image_view(*fv, None); }
+                            ctx.device.destroy_image_view(depth_view, None);
+                            ctx.device.destroy_image_view(cube_view, None);
+                            ctx.device.free_memory(depth_memory, None); ctx.device.destroy_image(depth_image, None);
+                            ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                        }
+                    };
+
+                    // Bind the R32_SFLOAT cube view to set=2.
+                    // R32_SFLOAT is a colour format → use SHADER_READ_ONLY_OPTIMAL (not depth layout).
+                    let desc_image_info = vk::DescriptorImageInfo::default()
+                        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .image_view(cube_view)
+                        .sampler(shadow_sampler);
+                    let write = vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(0)
+                        .dst_array_element(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(std::slice::from_ref(&desc_image_info));
+                    ctx.device.update_descriptor_sets(&[write], &[]);
+
+                    // -------------------------------------------------------
+                    // 6. Record & submit shadow render pass for all 6 faces
+                    // -------------------------------------------------------
+                    let cmd = match cmds.begin_single_time() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("[SHADOW] begin_single_time failed: {}", e);
+                            let _ = ctx.device.free_descriptor_sets(desc_pool, &[descriptor_set]);
+                            for fb in &framebuffers { ctx.device.destroy_framebuffer(*fb, None); }
+                            for fv in &face_views { ctx.device.destroy_image_view(*fv, None); }
+                            ctx.device.destroy_image_view(depth_view, None);
+                            ctx.device.destroy_image_view(cube_view, None);
+                            ctx.device.free_memory(depth_memory, None); ctx.device.destroy_image(depth_image, None);
+                            ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                        }
+                    };
+
+                    // Transition colour cubemap (all 6 layers): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL
+                    let color_to_attachment = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(image)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0, level_count: 1,
+                            base_array_layer: 0, layer_count: 6,
+                        })
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+
+                    // Transition depth image: UNDEFINED → DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                    let depth_to_attachment = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(depth_image)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::DEPTH,
+                            base_mip_level: 0, level_count: 1,
+                            base_array_layer: 0, layer_count: 1,
+                        })
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE);
+
+                    let pre_barriers = [color_to_attachment, depth_to_attachment];
+                    ctx.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                            | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                        vk::DependencyFlags::empty(),
+                        &[], &[], &pre_barriers,
+                    );
+
+                    // Render each cubemap face
+                    for face in 0..6usize {
+                        // Clear colour to 1.0 = "no occluder in this direction" (fully lit).
+                        // Geometry writes dist/radius < 1.0 so fragments closer to the light
+                        // pass the shadow test; directions with no geometry remain lit.
+                        let clear_values = [
+                            vk::ClearValue { color: vk::ClearColorValue { float32: [1.0, 0.0, 0.0, 0.0] } },
+                            vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } },
+                        ];
+
+                        let render_pass_begin = vk::RenderPassBeginInfo::default()
+                            .render_pass(render_pass)
+                            .framebuffer(framebuffers[face])
+                            .render_area(vk::Rect2D {
+                                offset: vk::Offset2D { x: 0, y: 0 },
+                                extent: vk::Extent2D { width: SHADOW_RES, height: SHADOW_RES },
+                            })
+                            .clear_values(&clear_values);
+
+                        ctx.device.cmd_begin_render_pass(cmd, &render_pass_begin, vk::SubpassContents::INLINE);
+                        ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, shadow_pip);
+
+                        let viewport = vk::Viewport {
+                            x: 0.0, y: 0.0,
+                            width: SHADOW_RES as f32, height: SHADOW_RES as f32,
+                            min_depth: 0.0, max_depth: 1.0,
+                        };
+                        let scissor = vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: vk::Extent2D { width: SHADOW_RES, height: SHADOW_RES },
+                        };
+                        ctx.device.cmd_set_viewport(cmd, 0, std::slice::from_ref(&viewport));
+                        ctx.device.cmd_set_scissor(cmd, 0, std::slice::from_ref(&scissor));
+
+                        let push = ShadowCubePushConstants { mvp: mvps[face], light_pos, light_radius };
+                        let push_bytes = std::slice::from_raw_parts(
+                            &push as *const ShadowCubePushConstants as *const u8,
+                            std::mem::size_of::<ShadowCubePushConstants>(),
+                        );
+                        ctx.device.cmd_push_constants(
+                            cmd, shadow_pip_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0, push_bytes,
+                        );
+
+                        ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo], &[0]);
+                        ctx.device.cmd_bind_index_buffer(cmd, bsp_ibo, 0, vk::IndexType::UINT32);
+                        if face == 0 {
+                            eprintln!("[SHADOW] face0 draw: indices={} vbo={:?} ibo={:?}",
+                                bsp_index_count, bsp_vbo, bsp_ibo);
+                        }
+                        ctx.device.cmd_draw_indexed(cmd, bsp_index_count, 1, 0, 0, 0);
+
+                        ctx.device.cmd_end_render_pass(cmd);
+                    }
+
+                    // Transition colour cubemap: COLOR_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+                    let color_to_shader = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(image)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0, level_count: 1,
+                            base_array_layer: 0, layer_count: 6,
+                        })
+                        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ);
+
+                    ctx.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[], &[], std::slice::from_ref(&color_to_shader),
+                    );
+
+                    if let Err(e) = cmds.end_single_time(ctx, cmd) {
+                        eprintln!("[SHADOW] end_single_time failed: {}", e);
+                        let _ = ctx.device.free_descriptor_sets(desc_pool, &[descriptor_set]);
+                        for fb in &framebuffers { ctx.device.destroy_framebuffer(*fb, None); }
+                        for fv in &face_views { ctx.device.destroy_image_view(*fv, None); }
+                        ctx.device.destroy_image_view(depth_view, None);
+                        ctx.device.destroy_image_view(cube_view, None);
+                        ctx.device.free_memory(depth_memory, None); ctx.device.destroy_image(depth_image, None);
+                        ctx.device.free_memory(memory, None); ctx.device.destroy_image(image, None); return None;
+                    }
+
+                    Some(ShadowCubemap {
+                        image, memory, cube_view, face_views,
+                        depth_image, depth_memory, depth_view,
+                        framebuffers, descriptor_set,
+                        resolution: SHADOW_RES,
+                    })
+                }
+            }).flatten();
+
+            if let Some(sc) = result {
+                self.shadow_cubemaps.push(sc);
+            }
+        }
+
+        eprintln!("[SHADOW] Built {} shadow cubemaps", self.shadow_cubemaps.len());
+    }
+
+    /// Draw all D3 lights with their shadow cubemaps onto the given command buffer.
+    ///
+    /// For each light, binds the shadow cubemap descriptor set at set=2 and issues
+    /// additive lit draw calls for all visible BSP batches.
+    ///
+    /// `visible_batches`: (first_index, index_count, diffuse_descriptor_set)
+    /// Draw all D3 per-pixel lights (additive pass).
+    ///
+    /// Must be called from within a `gpu_device::with_device` closure — takes `ctx`
+    /// directly to avoid re-entrant mutex acquisition.
+    ///
+    /// # Safety
+    /// `cmd` must be a valid, recording command buffer.
+    unsafe fn flush_doom3_lights_with_ctx(
+        &self,
+        ctx: &crate::vulkan::VulkanContext,
+        cmd: vk::CommandBuffer,
+        bsp_vbo: vk::Buffer,
+        bsp_ibo: vk::Buffer,
+        visible_batches: &[(u32, u32, Option<vk::DescriptorSet>)],
+        mvp: [f32; 16],
+        view_origin: [f32; 3],
+    ) {
+        if self.d3_lights.is_empty() || visible_batches.is_empty() {
+            return;
+        }
+
+        let lit_pipeline = self.pipelines.as_ref()
+            .and_then(|pm| pm.get(ShaderType::WorldLitAdditive, PipelineVariant::LitAdditive))
+            .map(|gp| (gp.pipeline, gp.layout));
+
+        let (lit_pip, lit_pip_layout) = match lit_pipeline {
+            Some(pair) => pair,
+            None => return,
+        };
+
+        for (light_idx, light) in self.d3_lights.iter().enumerate() {
+            // Shadow cubemap is required: the shader always samples set=2.
+            // Skip lights that don't have a cubemap yet (build still pending).
+            let shadow_ds = match self.shadow_cubemaps.get(light_idx)
+                .map(|sc| sc.descriptor_set)
+            {
+                Some(ds) => ds,
+                None => continue,
+            };
+
+            ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, lit_pip);
+
+            ctx.device.cmd_bind_descriptor_sets(
+                cmd, vk::PipelineBindPoint::GRAPHICS,
+                lit_pip_layout, 2, &[shadow_ds], &[],
+            );
+
+            ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo], &[0]);
+            ctx.device.cmd_bind_index_buffer(cmd, bsp_ibo, 0, vk::IndexType::UINT32);
+
+            for &(first_index, index_count, diffuse_ds) in visible_batches {
+                if let Some(ds) = diffuse_ds {
+                    ctx.device.cmd_bind_descriptor_sets(
+                        cmd, vk::PipelineBindPoint::GRAPHICS,
+                        lit_pip_layout, 1, &[ds], &[],
+                    );
+                }
+
+                let push = D3LitPushConstants {
+                    mvp,
+                    light_pos: light.pos,
+                    light_radius: light.radius,
+                    light_color: light.color,
+                    light_intensity: light.intensity,
+                    spec_power: light.spec_pow,
+                    shadow_bias: 0.005,
+                    _pad1: 0.0,
+                    _pad2: 0.0,
+                    view_origin,
+                };
+
+                let push_bytes = std::slice::from_raw_parts(
+                    &push as *const D3LitPushConstants as *const u8,
+                    std::mem::size_of::<D3LitPushConstants>(),
+                );
+
+                ctx.device.cmd_push_constants(
+                    cmd, lit_pip_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0, push_bytes,
+                );
+
+                ctx.device.cmd_draw_indexed(cmd, index_count, 1, first_index, 0, 0);
+            }
+        }
+    }
+
+    /// Cleanup shadow cubemap resources (call before level unload or shutdown).
+    pub fn shutdown_shadow_maps(&mut self) {
+        self.destroy_shadow_cubemaps();
+
+        if let Some(pool) = self.shadow_descriptor_pool.take() {
+            gpu_device::with_device(|ctx| {
+                // SAFETY: pool is valid and no descriptor sets remain.
+                unsafe { ctx.device.destroy_descriptor_pool(pool, None); }
+            });
+        }
+
+        if let Some(sampler) = self.shadow_sampler.take() {
+            gpu_device::with_device(|ctx| {
+                // SAFETY: sampler is valid and not in use.
+                unsafe { ctx.device.destroy_sampler(sampler, None); }
+            });
+        }
+
+        if let Some(rp) = self.shadow_render_pass.take() {
+            gpu_device::with_device(|ctx| {
+                // SAFETY: render pass is valid and not in use.
+                unsafe { ctx.device.destroy_render_pass(rp, None); }
+            });
+        }
     }
 }
 
@@ -692,10 +1771,12 @@ mod tests {
         // up = [1*0*1 + 0*0, 1*0*0 - 0*1, 1*1] = [0, 0, 1]
         // tx = -(right.vieworg) = -(0*10 + (-1)*20 + 0*30) = 20
         // ty = -(up.vieworg) = -(0*10 + 0*20 + 1*30) = -30
-        // tz = -(fwd.vieworg) = -(1*10 + 0*20 + 0*30) = -10
+        // Row 2 of the rotation is -forward, so its translation is +(fwd.vieworg)
+        // (this is what maps the eye position to the view-space origin).
+        // tz = +(fwd.vieworg) = (1*10 + 0*20 + 0*30) = 10
         assert!(approx_eq(view[12], 20.0, 1e-4), "tx={}", view[12]);
         assert!(approx_eq(view[13], -30.0, 1e-4), "ty={}", view[13]);
-        assert!(approx_eq(view[14], -10.0, 1e-4), "tz={}", view[14]);
+        assert!(approx_eq(view[14], 10.0, 1e-4), "tz={}", view[14]);
     }
 
     #[test]
@@ -783,12 +1864,13 @@ mod tests {
         let far = 4096.0f32;
         let proj = ModernRenderPath::compute_projection_matrix(90.0, 73.74, near, far);
 
-        // c = -(far+near)/(far-near)
-        let expected_c = -(far + near) / (far - near);
+        // Vulkan depth range [0, 1] (NOT OpenGL [-1, 1]):
+        // c = -far/(far-near)
+        let expected_c = -far / (far - near);
         assert!(approx_eq(proj[10], expected_c, 1e-4), "c={}, expected {}", proj[10], expected_c);
 
-        // d = -(2*far*near)/(far-near)
-        let expected_d = -(2.0 * far * near) / (far - near);
+        // d = -(near*far)/(far-near)
+        let expected_d = -(near * far) / (far - near);
         assert!(approx_eq(proj[14], expected_d, 1e-2), "d={}, expected {}", proj[14], expected_d);
     }
 
@@ -944,9 +2026,9 @@ impl RenderPath for ModernRenderPath {
                     super::texture::create_white_texture();
                     myq2_common::common::com_printf("ModernRenderPath::init: White texture created\n");
                 }
-                // Create 3D scene pipelines (render to R8G8B8A8_UNORM scene FBO)
+                // Create 3D scene pipelines (render to R16G16B16A16_SFLOAT HDR scene FBO)
                 myq2_common::common::com_printf("ModernRenderPath::init: Creating 3D scene pipelines\n");
-                pm.set_scene_format(vk::Format::R8G8B8A8_UNORM);
+                pm.set_scene_format(vk::Format::R16G16B16A16_SFLOAT);
                 myq2_common::common::com_printf("ModernRenderPath::init: Creating World/Opaque pipeline\n");
                 if let Err(e) = pm.create_pipeline(ShaderType::World, PipelineVariant::Opaque) {
                     eprintln!("Failed to create World/Opaque pipeline: {}", e);
@@ -989,7 +2071,7 @@ impl RenderPath for ModernRenderPath {
         if let Some(ref pp) = self.post_processor {
             let scene = pp.scene_fbo();
             if let (Some(view), Some(sampler)) = (scene.color_view(), scene.sampler()) {
-                super::texture::create_descriptor_for_view(-1, view, sampler);
+                super::texture::create_descriptor_for_view(-1, view, sampler, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
             }
         }
 
@@ -1524,8 +2606,8 @@ impl RenderPath for ModernRenderPath {
         let vup = self.frame_uniforms.view_up;
         let vp_flat = mat4_to_flat(vp);
 
-        // SAFETY: r_newrefdef is valid for frame duration, main thread only
-        let num_dlights = unsafe { crate::vk_local::rfs().r_newrefdef.num_dlights };
+        // r_newrefdef is valid for frame duration, main thread only
+        let num_dlights = crate::vk_local::rfs().r_newrefdef.num_dlights;
         for i in 0..num_dlights as usize {
             // SAFETY: dlight pointer valid, index in bounds
             let dl = unsafe { crate::vk_local::rfs().r_newrefdef.dlight(i) };
@@ -1578,6 +2660,7 @@ impl RenderPath for ModernRenderPath {
                 _pad: 0.0,
             });
         }
+
     }
 
     fn draw_sky(&mut self) {
@@ -1778,8 +2861,8 @@ impl RenderPath for ModernRenderPath {
 
     fn draw_stretch_raw(&mut self, x: i32, y: i32, w: i32, h: i32, cols: i32, rows: i32, data: &[u8]) {
         // Convert palettized cinematic data to RGBA and upload to a GPU texture
-        // SAFETY: Single-threaded engine
-        unsafe {
+        // Single-threaded engine
+        {
             let rawpal = crate::vk_image::with_rawpalette(|p| *p);
             let mut image32 = vec![0u32; 256 * 256];
 
@@ -2352,6 +3435,11 @@ impl ModernRenderPath {
     /// into the current command buffer, targeting the PostProcessor's scene FBO
     /// (R8G8B8A8_UNORM color + D32_SFLOAT depth).
     fn flush_3d_scene(&mut self) {
+        // Build dynamic-light disc geometry (and static orbs in classic mode).
+        // Must be called here because render_dlights() reads per-frame view vectors
+        // that are set during begin_frame().
+        self.render_dlights();
+
         let cmd = match self.current_command_buffer {
             Some(cmd) => cmd,
             None => return,
@@ -2407,8 +3495,8 @@ impl ModernRenderPath {
 
         // Get particle texture descriptor
         let particle_ds = {
-            // SAFETY: Accessing renderer globals for particle texture, main thread only
-            let texnum = unsafe {
+            // Accessing renderer globals for particle texture, main thread only
+            let texnum = {
                 let globals = crate::vk_rmain::rg();
                 globals.r_particletexture[0].as_ref().map(|img| img.texnum).unwrap_or(0)
             };
@@ -2535,12 +3623,6 @@ impl ModernRenderPath {
                     });
                 }
             }
-            if alias_batch_found > 0 || alias_registered_count > 0 {
-                eprintln!("ALIAS: pipeline=true, batches_with_instances={}, registered_models={}, draw_entries={}",
-                    alias_batch_found, alias_registered_count, alias_draw_entries.len());
-            }
-        } else if alias_registered_count > 0 {
-            eprintln!("ALIAS: pipeline=NONE, registered_models={}", alias_registered_count);
         }
 
         // Pre-gather alpha surface data
@@ -2818,6 +3900,36 @@ impl ModernRenderPath {
                         cmd, world_layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                         68, overbright_bytes,
+                    );
+
+                    // Push remaining world push constants (offsets 72–88):
+                    //   72: u_UvScroll        — UV scroll for turb/water (0.0 for static world)
+                    //   76: u_LightmapGamma   — power curve for lightmap values
+                    //   80: u_LightmapContrast — linear contrast around pivot 0.35
+                    //   84: u_ShadowLift      — minimum brightness floor
+                    //   88: u_LightmapScale   — >=1.0 = classic lightmap, <1.0 = D3 flat ambient
+                    let max_d3 = crate::vk_rmain::rcvars().r_d3_maxlights.fresh_value() as i32;
+                    let lm_scale = if max_d3 > 0 {
+                        // D3 mode: clamp to 0.99 so ambient=1.0 doesn't accidentally
+                        // flip to the classic lightmap branch (which requires >= 1.0).
+                        crate::vk_rmain::rcvars().r_d3_ambient.fresh_value().clamp(0.0, 0.99)
+                    } else {
+                        1.0_f32
+                    };
+                    let world_tail: [f32; 5] = [
+                        0.0,  // u_UvScroll
+                        crate::vk_rmain::rcvars().r_lightmap_gamma.value,
+                        crate::vk_rmain::rcvars().r_lightmap_contrast.value,
+                        crate::vk_rmain::rcvars().r_shadowlift.value,
+                        lm_scale,
+                    ];
+                    let tail_bytes: &[u8] = std::slice::from_raw_parts(
+                        world_tail.as_ptr() as *const u8, 20,
+                    );
+                    ctx.device.cmd_push_constants(
+                        cmd, world_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        72, tail_bytes,
                     );
 
                     ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo_handle], &[0]);
@@ -3140,6 +4252,21 @@ impl ModernRenderPath {
                     }
                 }
 
+                // === D3 Per-Pixel Lit Pass (additive, only when r_d3_maxlights > 0) ===
+                if has_bsp && !self.d3_lights.is_empty() {
+                    let bsp_vbo_handle = bsp_vbo.unwrap();
+                    let bsp_ibo_handle = bsp_ibo.unwrap();
+                    let vo = self.frame_uniforms.view_origin;
+                    // cmd is valid; BSP handles and d3_lights are valid for this frame.
+                    {
+                        self.flush_doom3_lights_with_ctx(
+                            ctx, cmd,
+                            bsp_vbo_handle, bsp_ibo_handle,
+                            &bsp_batches, mvp, vo,
+                        );
+                    }
+                }
+
                 // === Alpha Surfaces ===
                 if let Some((ab_pipeline, ab_layout)) = alpha_blend_pipeline_data {
                     if !alpha_surface_draws.is_empty() && has_bsp {
@@ -3289,12 +4416,24 @@ impl ModernRenderPath {
         let enable_gamma = crate::vk_rmain::rcvars().r_hwgamma.value == 0.0;
         let enable_polyblend = polyblend[3] > 0.0;
 
+        let shadow_lift  = crate::vk_rmain::rcvars().r_shadowlift.value;
+        let saturation   = crate::vk_rmain::rcvars().r_saturation.value;
+        let contrast     = crate::vk_rmain::rcvars().r_contrast.value;
+        let brightness   = crate::vk_rmain::rcvars().r_brightness.value;
+        let lut_intensity = crate::vk_rmain::rcvars().r_color_grade_intensity.value;
+        let lut_enabled  = crate::vk_rmain::rcvars().r_color_grade.value != 0.0;
+
         let uniforms = PostProcessUniforms {
             polyblend_color: polyblend,
             enable_polyblend: if enable_polyblend { 1 } else { 0 },
             gamma,
             enable_gamma: if enable_gamma { 1 } else { 0 },
-            _pad: 0,
+            saturation,
+            contrast,
+            brightness,
+            shadow_lift,
+            lut_enabled: if lut_enabled { 1 } else { 0 },
+            lut_intensity,
         };
 
         gpu_device::with_device(|ctx| {

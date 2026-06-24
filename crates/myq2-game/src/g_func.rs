@@ -76,7 +76,7 @@ impl GameContext {
 
         let remaining = self.edicts[ent].moveinfo.remaining_distance;
         let dir = self.edicts[ent].moveinfo.dir;
-        vec3_scale(&dir, remaining, &mut self.edicts[ent].velocity);
+        vec3_scale(&dir, remaining / FRAMETIME, &mut self.edicts[ent].velocity);
 
         self.edicts[ent].think_fn = Some(crate::dispatch::THINK_FUNC_MOVE_DONE);
         self.edicts[ent].nextthink = self.level.time + FRAMETIME;

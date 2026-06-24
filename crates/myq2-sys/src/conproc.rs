@@ -1,4 +1,4 @@
-// conproc.rs — QHOST console process support
+// conproc.rs â€” QHOST console process support
 // Converted from: myq2-original/win32/conproc.c
 //
 // QHOST was an external tool that could hook into the Quake 2 dedicated
@@ -258,7 +258,7 @@ fn c_check_parm(parm: &str, args: &[String]) -> usize {
 ///
 /// Original: `void InitConProc(int argc, char **argv)`
 pub fn init_con_proc(args: &[String]) {
-    let mut stored = CCOM_ARGS.lock().unwrap();
+    let mut stored = CCOM_ARGS.lock().unwrap_or_else(|e| e.into_inner());
     *stored = args.to_vec();
 
     let t_hfile = c_check_parm("-HFILE", args);
@@ -305,7 +305,7 @@ pub fn init_con_proc(args: &[String]) {
 
         com_printf("Initializing for qhost.\n");
 
-        let mut handles = HANDLES.lock().unwrap();
+        let mut handles = HANDLES.lock().unwrap_or_else(|e| e.into_inner());
         handles.hfile_buffer = h_file;
         handles.hevent_parent_send = hevent_parent;
         handles.hevent_child_send = hevent_child;
@@ -380,7 +380,7 @@ pub fn init_con_proc(args: &[String]) {
 pub fn deinit_con_proc() {
     #[cfg(target_os = "windows")]
     {
-        let handles = HANDLES.lock().unwrap();
+        let handles = HANDLES.lock().unwrap_or_else(|e| e.into_inner());
         if !handles.hevent_done.is_null() {
             // SAFETY: Signaling the heventDone event to tell RequestProc to exit.
             unsafe { win32::SetEvent(handles.hevent_done); }
@@ -389,7 +389,7 @@ pub fn deinit_con_proc() {
 }
 
 // ============================================================
-// RequestProc — QHOST worker thread
+// RequestProc â€” QHOST worker thread
 // ============================================================
 
 /// QHOST request processing thread entry point.
@@ -406,7 +406,7 @@ unsafe extern "system" fn request_proc_thread(_arg: win32::LPVOID) -> u32 {
 #[cfg(target_os = "windows")]
 fn request_proc() {
     let (hevent_parent_send, hevent_done, hfile_buffer, hevent_child_send, h_stdout, h_stdin) = {
-        let handles = HANDLES.lock().unwrap();
+        let handles = HANDLES.lock().unwrap_or_else(|e| e.into_inner());
         (
             handles.hevent_parent_send,
             handles.hevent_done,

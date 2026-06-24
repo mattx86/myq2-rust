@@ -19,11 +19,12 @@ use myq2_common::qcommon::{
     PS_KICKANGLES, PS_BLEND, PS_FOV, PS_WEAPONINDEX, PS_WEAPONFRAME, PS_RDFLAGS,
 };
 use myq2_common::common::{
-    com_printf, com_dprintf,
+    com_printf, com_dprintf, com_error,
     msg_read_byte, msg_read_short, msg_read_long,
     msg_read_char, msg_read_coord, msg_read_angle, msg_read_angle16,
     msg_read_pos, msg_read_data,
 };
+use myq2_common::q_shared::ERR_DROP;
 
 // =========================================================================
 // Global state
@@ -67,7 +68,7 @@ impl ClientEntState {
 }
 
 // =========================================================================
-// Callback trait — functions defined in other modules that this module calls
+// Callback trait â€” functions defined in other modules that this module calls
 // =========================================================================
 
 pub trait ClientCallbacks {
@@ -107,7 +108,7 @@ pub trait ClientCallbacks {
 // FRAME PARSING
 // =========================================================================
 
-/// CL_ParseEntityBits — Returns the entity number and the header bits.
+/// CL_ParseEntityBits â€” Returns the entity number and the header bits.
 pub fn cl_parse_entity_bits(net_message: &mut SizeBuf, bits: &mut i32) -> i32 {
     let mut total = msg_read_byte(net_message);
     if total & U_MOREBITS1 != 0 {
@@ -125,7 +126,7 @@ pub fn cl_parse_entity_bits(net_message: &mut SizeBuf, bits: &mut i32) -> i32 {
 
     // count the bits for net profiling
     {
-        let mut counts = BITCOUNTS.lock().unwrap();
+        let mut counts = BITCOUNTS.lock().unwrap_or_else(|e| e.into_inner());
         for i in 0..32 {
             if total & (1 << i) != 0 {
                 counts[i] += 1;
@@ -144,7 +145,7 @@ pub fn cl_parse_entity_bits(net_message: &mut SizeBuf, bits: &mut i32) -> i32 {
     number
 }
 
-/// CL_ParseDelta — Can go from either a baseline or a previous packet_entity.
+/// CL_ParseDelta â€” Can go from either a baseline or a previous packet_entity.
 pub fn cl_parse_delta(
     from: &EntityState,
     to: &mut EntityState,
@@ -242,7 +243,7 @@ pub fn cl_parse_delta(
     }
 }
 
-/// CL_DeltaEntity — Parses deltas from the given base and adds the resulting
+/// CL_DeltaEntity â€” Parses deltas from the given base and adds the resulting
 /// entity to the current frame.
 pub fn cl_delta_entity(
     frame: &mut Frame,
@@ -393,7 +394,7 @@ pub fn cl_delta_entity(
     }
 }
 
-/// CL_ParsePacketEntities — An svc_packetentities has just been parsed,
+/// CL_ParsePacketEntities â€” An svc_packetentities has just been parsed,
 /// deal with the rest of the data stream.
 pub fn cl_parse_packet_entities(
     oldframe: Option<&Frame>,
@@ -430,11 +431,13 @@ pub fn cl_parse_packet_entities(
         let mut bits: i32 = 0;
         let newnum = cl_parse_entity_bits(net_message, &mut bits);
         if newnum >= MAX_EDICTS as i32 {
-            panic!("CL_ParsePacketEntities: bad number:{}", newnum);
+            com_error(ERR_DROP, &format!("CL_ParsePacketEntities: bad number:{}", newnum));
+            return;
         }
 
         if net_message.readcount > net_message.cursize {
-            panic!("CL_ParsePacketEntities: end of message");
+            com_error(ERR_DROP, "CL_ParsePacketEntities: end of message");
+            return;
         }
 
         if newnum == 0 {
@@ -794,7 +797,8 @@ pub fn cl_parse_frame(
     let cmd = msg_read_byte(net_message);
     callbacks.shownet(svc_strings[cmd as usize]);
     if cmd != SVC_PLAYERINFO {
-        panic!("CL_ParseFrame: not playerinfo");
+        com_error(ERR_DROP, "CL_ParseFrame: not playerinfo");
+        return;
     }
     cl_parse_playerstate(old.as_ref(), &mut cl.frame, net_message, cl.attractloop);
 
@@ -802,7 +806,8 @@ pub fn cl_parse_frame(
     let cmd = msg_read_byte(net_message);
     callbacks.shownet(svc_strings[cmd as usize]);
     if cmd != SVC_PACKETENTITIES {
-        panic!("CL_ParseFrame: not packetentities");
+        com_error(ERR_DROP, "CL_ParseFrame: not packetentities");
+        return;
     }
     // SAFETY: We need both &mut cl.frame and &mut cl simultaneously.
     // This is safe because cl_parse_packet_entities only modifies cl.frame
@@ -910,7 +915,7 @@ pub fn cl_parse_frame(
 // INTERPOLATE BETWEEN FRAMES TO GET RENDERING PARMS
 // =========================================================================
 
-/// S_RegisterSexedModel — determine the correct player model path for
+/// S_RegisterSexedModel â€” determine the correct player model path for
 /// gendered model/skin combinations.
 pub fn s_register_sexed_model(
     ent: &EntityState,
@@ -1435,6 +1440,16 @@ pub fn cl_add_packet_entities(
         // add to refresh list
         callbacks.v_add_entity(&ent);
 
+        // Add subtle floor glow for items with RF_GLOW (pulsing brightness)
+        if renderfx & RF_GLOW != 0 {
+            // Pulse in sync with renderer RF_GLOW: scale = 1.0 + 0.2 * sin(time * 7.0)
+            let glow_scale = 1.0 + 0.2 * (cl.time as f32 / 1000.0 * 7.0).sin();
+            let glow_radius = 72.0 * glow_scale;
+            let glow_intensity = 0.75 * glow_scale;
+            callbacks.v_add_light(&ent.origin, glow_radius,
+                glow_intensity, glow_intensity * 0.9, glow_intensity * 0.7);
+        }
+
         // color shells generate a separate entity for the main model
         if effects & EF_COLOR_SHELL != 0 {
             if renderfx & RF_SHELL_HALF_DAM != 0
@@ -1755,10 +1770,10 @@ pub fn cl_add_view_weapon(
     callbacks: &mut dyn ClientCallbacks,
 ) {
     // allow the gun to be completely removed
-    // (cl_gun cvar check — assumed enabled; caller should gate this)
+    // (cl_gun cvar check â€” assumed enabled; caller should gate this)
 
     // don't draw gun if in wide angle view
-    // mattx86: gun_wideangle — VISIBLE_GUN_WIDEANGLE is enabled, so we skip this check
+    // mattx86: gun_wideangle â€” VISIBLE_GUN_WIDEANGLE is enabled, so we skip this check
 
     let mut gun = Entity::default();
 
@@ -1778,8 +1793,8 @@ pub fn cl_add_view_weapon(
     for i in 0..3 {
         raw_origin[i] = cl.refdef.vieworg[i] + ops.gunoffset[i]
             + cl.lerpfrac * (ps.gunoffset[i] - ops.gunoffset[i]);
-        // Use view angles directly for gun angles (ignore gunangles from player state)
-        raw_angles[i] = cl.refdef.viewangles[i];
+        raw_angles[i] = cl.refdef.viewangles[i]
+            + lerp_angle(ops.gunangles[i], ps.gunangles[i], cl.lerpfrac);
     }
     // RIOT - Centered gun (CENTERED_GUN enabled)
     // The correct centered gun calculation should offset the gun to the center
@@ -1860,28 +1875,29 @@ pub fn cl_add_view_weapon(
         }
     }
 
-    // RIOT - Centered gun (CENTERED_GUN enabled)
-    // Apply centered gun calculation to final position
-    // Commented out for testing - see if gun appears without centered calculation
-    // if hand_value == 2 {
-    //     let mut right_vec = [0.0f32; 3];
-    //     let mut up_vec = [0.0f32; 3];
-    //     angle_vectors(&gun.angles, None, Some(&mut right_vec), Some(&mut up_vec));
-    //
-    //     // Scale the right and up vectors to center the gun
-    //     // angle_vectors calculates the right vector directly (not left)
-    //     let scaled_right = vector_scale(&right_vec, -8.0);
-    //     let scaled_up = vector_scale(&up_vec, -5.0);
-    //     gun.origin = vector_add(&gun.origin, &scaled_right);
-    //     gun.origin = vector_add(&gun.origin, &scaled_up);
-    // }
+    // Apply view-weapon positioning offset.
+    // The gun model is positioned at vieworg; without a forward push the barrel
+    // geometry may sit behind or at the near clip plane.  Apply forward + right + up
+    // offsets so the weapon renders correctly in the Vulkan viewport.
+    {
+        let mut fwd = [0.0f32; 3];
+        let mut right_vec = [0.0f32; 3];
+        let mut up_vec = [0.0f32; 3];
+        angle_vectors(&gun.angles, Some(&mut fwd), Some(&mut right_vec), Some(&mut up_vec));
+        let scaled_fwd   = vector_scale(&fwd,       14.0);
+        let scaled_right = vector_scale(&right_vec, -8.0);
+        let scaled_up    = vector_scale(&up_vec,    -5.0);
+        gun.origin = vector_add(&gun.origin, &scaled_fwd);
+        gun.origin = vector_add(&gun.origin, &scaled_right);
+        gun.origin = vector_add(&gun.origin, &scaled_up);
+    }
 
     gun.flags = RF_MINLIGHT | RF_DEPTHHACK | RF_WEAPONMODEL;
     gun.oldorigin = vector_copy(&gun.origin); // don't lerp at all
     callbacks.v_add_entity(&gun);
 }
 
-/// CL_CalcViewValues — Sets cl.refdef view values
+/// CL_CalcViewValues â€” Sets cl.refdef view values
 pub fn cl_calc_view_values(
     cl: &mut ClientState,
     cls: &ClientStatic,
@@ -2061,7 +2077,7 @@ pub fn cl_calc_view_values(
     }
 }
 
-/// CL_AddEntities — Emits all entities, particles, and lights to the refresh.
+/// CL_AddEntities â€” Emits all entities, particles, and lights to the refresh.
 pub fn cl_add_entities(
     cl: &mut ClientState,
     cls: &ClientStatic,
@@ -2187,14 +2203,16 @@ pub fn cl_add_entities(
     callbacks.cl_add_light_styles();
 }
 
-/// CL_GetEntitySoundOrigin — Called to get the sound spatialization origin.
+/// CL_GetEntitySoundOrigin â€” Called to get the sound spatialization origin.
 ///
 /// For brush models (doors, platforms, etc.), we need special handling since
 /// their origin is often at world origin and the actual entity is offset by
 /// their bounding box. This function handles that case.
 pub fn cl_get_entity_sound_origin(ent: i32, org: &mut Vec3, ent_state: &ClientEntState) {
     if ent < 0 || ent >= MAX_EDICTS as i32 {
-        panic!("CL_GetEntitySoundOrigin: bad ent");
+        // Bad entity index â€” leave caller's origin untouched rather than crash.
+        com_dprintf("CL_GetEntitySoundOrigin: bad ent\n");
+        return;
     }
     let cent = &ent_state.cl_entities[ent as usize];
 
@@ -2223,7 +2241,9 @@ pub fn cl_get_entity_sound_origin_enhanced(
     get_model_bounds: Option<&dyn Fn(i32) -> Option<(Vec3, Vec3)>>,
 ) {
     if ent < 0 || ent >= MAX_EDICTS as i32 {
-        panic!("CL_GetEntitySoundOrigin: bad ent");
+        // Bad entity index â€” leave caller's origin untouched rather than crash.
+        com_dprintf("CL_GetEntitySoundOrigin: bad ent\n");
+        return;
     }
     let cent = &ent_state.cl_entities[ent as usize];
 

@@ -103,6 +103,7 @@ fn bridge_r_render_frame(refdef: &RefDef) {
                 particle_type: p.particle_type as usize,
             }
         }).collect(),
+        dlights: refdef.dlights.clone(),
     };
     vk_rmain::r_render_frame(&local);
 }

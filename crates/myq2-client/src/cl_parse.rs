@@ -33,9 +33,9 @@ use crate::snd_dma::SoundState;
 /// re-entrancy deadlocks because command handlers also lock CL/CLS.
 #[derive(Debug)]
 pub enum DeferredAction {
-    /// Run `cbuf_execute()` — flushes previously stuffed text commands.
+    /// Run `cbuf_execute()` â€” flushes previously stuffed text commands.
     CbufExecute,
-    /// Run `cl_trigger_change_map()` — user-configured changemap command.
+    /// Run `cl_trigger_change_map()` â€” user-configured changemap command.
     TriggerChangeMap,
 }
 
@@ -193,8 +193,8 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
         self.fx.cl_ionripper_trail(start, end, self.cl_time);
     }
     fn cl_add_tents(&mut self) {
-        let cl = crate::cl_main::CL.lock().unwrap();
-        let mut view = crate::cl_main::VIEW_STATE.lock().unwrap();
+        let cl = crate::cl_main::CL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut view = crate::cl_main::VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let hand = myq2_common::cvar::cvar_variable_value("hand");
 
         // === Extend sustain effect lifetimes during packet loss ===
@@ -209,7 +209,7 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
 
         // Entity lookup closure for beam endpoint interpolation
         // This allows beams to track moving entities smoothly
-        let cl_ents = crate::cl_main::CL_ENTITIES.lock().unwrap();
+        let cl_ents = crate::cl_main::CL_ENTITIES.lock().unwrap_or_else(|e| e.into_inner());
         let entity_lookup = |entnum: i32| -> Option<Vec3> {
             if entnum > 0 && (entnum as usize) < cl_ents.len() {
                 let cent = &cl_ents[entnum as usize];
@@ -224,7 +224,7 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
         crate::cl_tent::cl_add_tents(self.tent, self.fx, &cl, &mut view, Some(hand), &entity_lookup);
     }
     fn cl_add_particles(&mut self) {
-        let mut view = crate::cl_main::VIEW_STATE.lock().unwrap();
+        let mut view = crate::cl_main::VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
         // Use smart particle update: parallel when 256+ particles, sequential otherwise
         self.fx.cl_add_particles_smart(self.cl_time, |org, length, color, alpha, ptype| {
             crate::cl_view::v_add_particle(&mut view, org, length, color, alpha, ptype);
@@ -235,7 +235,7 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
 
         // Add continuing effects during packet loss (effect continuation system)
         {
-            let mut cl = crate::cl_main::CL.lock().unwrap();
+            let mut cl = crate::cl_main::CL.lock().unwrap_or_else(|e| e.into_inner());
             let current_time = self.cl_time as i32;
 
             // Register recently created effects for continuation
@@ -278,13 +278,13 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
         }
     }
     fn cl_add_dlights(&mut self) {
-        let mut view = crate::cl_main::VIEW_STATE.lock().unwrap();
+        let mut view = crate::cl_main::VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Read CL fields once — CL Mutex is NOT held by callers.
+        // Read CL fields once â€” CL Mutex is NOT held by callers.
         // CLS IS held by console::cl_add_entities, so we must NOT lock it here.
         // Use self.realtime (passed from caller which already holds CLS).
         let (packet_loss_frames, lerpfrac, current_time, weapon_pred) = {
-            let cl = crate::cl_main::CL.lock().unwrap();
+            let cl = crate::cl_main::CL.lock().unwrap_or_else(|e| e.into_inner());
             (
                 cl.packet_loss_frames,
                 cl.lerpfrac,
@@ -302,7 +302,7 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
 
         // Add standard dlights from fx system with per-entity smoothing
         {
-            let mut cl = crate::cl_main::CL.lock().unwrap();
+            let mut cl = crate::cl_main::CL.lock().unwrap_or_else(|e| e.into_inner());
             self.fx.cl_add_dlights_smoothed(
                 &mut cl.smoothing.dynamic_lights,
                 current_time,
@@ -325,7 +325,7 @@ impl<'a> ClientCallbacks for FrameCallbacks<'a> {
         );
     }
     fn cl_add_light_styles(&mut self) {
-        let mut view = crate::cl_main::VIEW_STATE.lock().unwrap();
+        let mut view = crate::cl_main::VIEW_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let r_timebasedfx = myq2_common::cvar::cvar_variable_value("r_timebasedfx");
         self.fx.cl_add_light_styles(r_timebasedfx, |i, r, g, b| {
             if i < view.r_lightstyles.len() {
@@ -376,7 +376,7 @@ pub static SVC_STRINGS: [&str; 21] = [
 ];
 
 // ============================================================
-// Message reading/writing helpers — re-exported from myq2_common::common
+// Message reading/writing helpers â€” re-exported from myq2_common::common
 // ============================================================
 
 pub use myq2_common::common::{
@@ -384,21 +384,21 @@ pub use myq2_common::common::{
     msg_read_string, msg_read_data, msg_write_byte, msg_write_string,
 };
 
-/// MSG_ReadPos — reads a position and writes into an existing `&mut Vec3`.
+/// MSG_ReadPos â€” reads a position and writes into an existing `&mut Vec3`.
 /// Wraps the common version which returns a `Vec3` by value.
 pub fn msg_read_pos(msg: &mut SizeBuf, pos: &mut Vec3) {
     let v = myq2_common::common::msg_read_pos(msg);
     *pos = v;
 }
 
-/// MSG_ReadDir — reads a direction and writes into an existing `&mut Vec3`.
+/// MSG_ReadDir â€” reads a direction and writes into an existing `&mut Vec3`.
 /// Wraps the common version which returns a `Vec3` by value.
 pub fn msg_read_dir(msg: &mut SizeBuf, dir: &mut Vec3) {
     let v = myq2_common::common::msg_read_dir(msg);
     *dir = v;
 }
 
-/// SZ_Print — append a null-terminated string, merging trailing nulls.
+/// SZ_Print â€” append a null-terminated string, merging trailing nulls.
 
 // ============================================================
 // External function imports (formerly wrappers)
@@ -416,7 +416,7 @@ fn cl_clear_state(cl: &mut ClientState) {
     *cl = ClientState::default();
 }
 
-/// CL_ParseMuzzleFlash — reads entity index + weapon byte from net_message.
+/// CL_ParseMuzzleFlash â€” reads entity index + weapon byte from net_message.
 /// Full dlight/sound effects require sound system wiring; for now we consume
 /// the message bytes to keep the parse stream in sync.
 ///
@@ -448,7 +448,7 @@ fn cl_parse_muzzle_flash(cl: &mut ClientState, net_message: &mut SizeBuf) {
     com_dprintf(&format!("CL_ParseMuzzleFlash: ent={} weapon={}\n", i, _weapon));
 }
 
-/// CL_ParseMuzzleFlash2 — reads entity index + flash_number from net_message.
+/// CL_ParseMuzzleFlash2 â€” reads entity index + flash_number from net_message.
 /// Full dlight/sound effects require sound system wiring; for now we consume
 /// the message bytes to keep the parse stream in sync.
 fn cl_parse_muzzle_flash2(_cl: &ClientState, net_message: &mut SizeBuf) {
@@ -581,7 +581,7 @@ pub fn cl_check_or_download_file(
         com_printf(&format!("HTTP: Queuing async download {}\n", filename));
 
         if let Some(_download_id) = cl_http::cl_http_download(filename, &dest_path) {
-            // Download queued successfully — game continues while downloading.
+            // Download queued successfully â€” game continues while downloading.
             // Progress and completion are polled via cl_http::cl_http_poll()
             // in the main frame loop.
             return true;
@@ -795,7 +795,7 @@ pub fn cl_parse_server_data(
 ) {
     com_dprintf("Serverdata packet received.\n");
 
-    // Defer change map trigger — running cbuf_execute while CL/CLS locks are held
+    // Defer change map trigger â€” running cbuf_execute while CL/CLS locks are held
     // would deadlock because command handlers also lock CL/CLS.
     deferred_actions.push(DeferredAction::TriggerChangeMap);
 
@@ -851,7 +851,7 @@ pub fn cl_parse_server_data(
     let str_val = msg_read_string(net_message);
 
     if cl.playernum == -1 {
-        // Playing a cinematic — cl_cin uses the same crate::client types.
+        // Playing a cinematic â€” cl_cin uses the same crate::client types.
         crate::cl_cin::scr_play_cinematic(&str_val, cl, cls);
     } else {
         com_printf("\n\n\x1d\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1f\n");
@@ -1161,9 +1161,9 @@ fn cl_parse_decompressed_cmd(
                     if let Some(filtered) = crate::cl_chat::chat_process_message(&sender_owned, &s) {
                         com_printf(&filtered);
                     }
-                    // If chat_process_message returns None, sender is ignored — skip printing
+                    // If chat_process_message returns None, sender is ignored â€” skip printing
                 } else {
-                    // No sender extracted (server message, etc.) — print as-is
+                    // No sender extracted (server message, etc.) â€” print as-is
                     com_printf(&s);
                 }
             } else {
@@ -1185,7 +1185,7 @@ fn cl_parse_decompressed_cmd(
         }
 
         x if x == SvcOps::ServerData as i32 => {
-            // Defer cbuf_execute — running it here while holding CL/CLS locks
+            // Defer cbuf_execute â€” running it here while holding CL/CLS locks
             // would deadlock because command handlers also lock CL/CLS.
             ctx.deferred_actions.push(DeferredAction::CbufExecute);
             cl_parse_server_data(cl, cls, net_message, &mut ctx.deferred_actions);
@@ -1354,9 +1354,9 @@ pub fn cl_parse_server_message(
                         if let Some(filtered) = crate::cl_chat::chat_process_message(&sender_owned, &s) {
                             com_printf(&filtered);
                         }
-                        // If chat_process_message returns None, sender is ignored — skip printing
+                        // If chat_process_message returns None, sender is ignored â€” skip printing
                     } else {
-                        // No sender extracted (server message, etc.) — print as-is
+                        // No sender extracted (server message, etc.) â€” print as-is
                         com_printf(&s);
                     }
                 } else {
@@ -1382,7 +1382,7 @@ pub fn cl_parse_server_message(
             }
 
             x if x == SvcOps::ServerData as i32 => {
-                // Defer cbuf_execute — same deadlock avoidance as the main path.
+                // Defer cbuf_execute â€” same deadlock avoidance as the main path.
                 ctx.deferred_actions.push(DeferredAction::CbufExecute);
                 cl_parse_server_data(cl, cls, net_message, &mut ctx.deferred_actions);
             }

@@ -116,7 +116,7 @@ fn string_to_filter(s: &str) -> Option<IpFilter> {
             m[i] = 255;
         }
 
-        // End of string — break
+        // End of string â€” break
         if chars.is_empty() {
             break;
         }
@@ -166,7 +166,7 @@ pub fn sv_filter_packet(from: &str) -> bool {
 
     let filterban_val = gi_cvar("filterban", "1", 0);
 
-    let state = IP_FILTER_STATE.lock().unwrap();
+    let state = IP_FILTER_STATE.lock().unwrap_or_else(|e| e.into_inner());
     for j in 0..state.num_filters {
         if (addr & state.filters[j].mask) == state.filters[j].compare {
             return filterban_val as i32 != 0;
@@ -198,7 +198,7 @@ fn svcmd_addip_f() {
 
     let ip_str = gi_argv(2);
 
-    let mut state = IP_FILTER_STATE.lock().unwrap();
+    let mut state = IP_FILTER_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     // Find a free spot (compare == 0xffffffff marks a deleted entry) or use the next slot
     let mut slot = state.num_filters;
@@ -240,7 +240,7 @@ fn svcmd_removeip_f() {
         None => return,
     };
 
-    let mut state = IP_FILTER_STATE.lock().unwrap();
+    let mut state = IP_FILTER_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
     for i in 0..state.num_filters {
         if state.filters[i].mask == f.mask && state.filters[i].compare == f.compare {
@@ -265,7 +265,7 @@ fn svcmd_removeip_f() {
 fn svcmd_listip_f() {
     gi_cprintf(-1, PRINT_HIGH, "Filter list:\n");
 
-    let state = IP_FILTER_STATE.lock().unwrap();
+    let state = IP_FILTER_STATE.lock().unwrap_or_else(|e| e.into_inner());
     for i in 0..state.num_filters {
         let b = state.filters[i].compare.to_le_bytes();
         gi_cprintf(-1, PRINT_HIGH, &format!("{:3}.{:3}.{:3}.{:3}\n", b[0], b[1], b[2], b[3]));
@@ -299,7 +299,7 @@ fn svcmd_writeip_f() {
     let filterban_val = gi_cvar("filterban", "1", 0);
     let _ = writeln!(f, "set filterban {}", filterban_val as i32);
 
-    let state = IP_FILTER_STATE.lock().unwrap();
+    let state = IP_FILTER_STATE.lock().unwrap_or_else(|e| e.into_inner());
     for i in 0..state.num_filters {
         let b = state.filters[i].compare.to_le_bytes();
         let _ = writeln!(f, "sv addip {}.{}.{}.{}", b[0], b[1], b[2], b[3]);

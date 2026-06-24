@@ -6,7 +6,7 @@
 use ash::vk;
 use crate::modern::gpu_device;
 
-/// A render target with color and optional depth attachments.
+/// A render target with color and optional depth/stencil attachments.
 #[derive(Default)]
 pub struct RenderTarget {
     /// Color image.
@@ -15,11 +15,13 @@ pub struct RenderTarget {
     color_view: Option<vk::ImageView>,
     /// Color image memory.
     color_memory: Option<vk::DeviceMemory>,
-    /// Depth image.
+    /// Depth+stencil image (D32_SFLOAT_S8_UINT).
     depth: Option<vk::Image>,
-    /// Depth image view.
+    /// Combined depth+stencil image view (DEPTH | STENCIL aspects).
     depth_view: Option<vk::ImageView>,
-    /// Depth image memory.
+    /// Stencil-only image view (STENCIL aspect only, for stencil-only clears).
+    stencil_view: Option<vk::ImageView>,
+    /// Depth+stencil image memory.
     depth_memory: Option<vk::DeviceMemory>,
     /// Sampler for the color texture.
     sampler: Option<vk::Sampler>,
@@ -51,6 +53,7 @@ impl RenderTarget {
             color_memory: None,
             depth: None,
             depth_view: None,
+            stencil_view: None,
             depth_memory: None,
             sampler: None,
             width,
@@ -76,7 +79,7 @@ impl RenderTarget {
                 // === Create color image ===
                 let color_info = vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
-                    .format(vk::Format::R8G8B8A8_UNORM)
+                    .format(vk::Format::R16G16B16A16_SFLOAT)
                     .extent(vk::Extent3D {
                         width: self.width,
                         height: self.height,
@@ -137,7 +140,7 @@ impl RenderTarget {
                 let color_view_info = vk::ImageViewCreateInfo::default()
                     .image(color_image)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(vk::Format::R8G8B8A8_UNORM)
+                    .format(vk::Format::R16G16B16A16_SFLOAT)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         base_mip_level: 0,
@@ -188,9 +191,12 @@ impl RenderTarget {
                         vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
                     };
 
+                    // Use D32_SFLOAT_S8_UINT for combined depth+stencil (required for
+                    // Doom 3 style stencil shadow volumes). Guaranteed supported on all
+                    // Vulkan implementations that support depth+stencil attachments.
                     let depth_info = vk::ImageCreateInfo::default()
                         .image_type(vk::ImageType::TYPE_2D)
-                        .format(vk::Format::D32_SFLOAT)
+                        .format(vk::Format::D32_SFLOAT_S8_UINT)
                         .extent(vk::Extent3D {
                             width: self.width,
                             height: self.height,
@@ -246,13 +252,13 @@ impl RenderTarget {
                         return;
                     }
 
-                    // Create depth image view
+                    // Create combined depth+stencil image view (both aspects)
                     let depth_view_info = vk::ImageViewCreateInfo::default()
                         .image(depth_image)
                         .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(vk::Format::D32_SFLOAT)
+                        .format(vk::Format::D32_SFLOAT_S8_UINT)
                         .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::DEPTH,
+                            aspect_mask: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
                             base_mip_level: 0,
                             level_count: 1,
                             base_array_layer: 0,
@@ -268,8 +274,24 @@ impl RenderTarget {
                         }
                     };
 
+                    // Create stencil-only image view (for stencil-only operations in shadow passes)
+                    let stencil_view_info = vk::ImageViewCreateInfo::default()
+                        .image(depth_image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(vk::Format::D32_SFLOAT_S8_UINT)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::STENCIL,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        });
+
+                    let stencil_view = ctx.device.create_image_view(&stencil_view_info, None).ok();
+
                     self.depth = Some(depth_image);
                     self.depth_view = Some(depth_view);
+                    self.stencil_view = stencil_view;
                     self.depth_memory = Some(depth_memory);
                 }
             }
@@ -306,9 +328,19 @@ impl RenderTarget {
         self.color_view
     }
 
-    /// Get depth image view.
+    /// Get depth image (for layout transitions).
+    pub fn depth_image(&self) -> Option<vk::Image> {
+        self.depth
+    }
+
+    /// Get combined depth+stencil image view.
     pub fn depth_view(&self) -> Option<vk::ImageView> {
         self.depth_view
+    }
+
+    /// Get stencil-only image view (for stencil shadow passes).
+    pub fn stencil_view(&self) -> Option<vk::ImageView> {
+        self.stencil_view
     }
 
     /// Get sampler.
@@ -359,6 +391,9 @@ impl RenderTarget {
                 }
 
                 // Destroy depth resources
+                if let Some(view) = self.stencil_view.take() {
+                    ctx.device.destroy_image_view(view, None);
+                }
                 if let Some(view) = self.depth_view.take() {
                     ctx.device.destroy_image_view(view, None);
                 }

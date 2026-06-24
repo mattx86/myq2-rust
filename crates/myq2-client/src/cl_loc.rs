@@ -199,21 +199,21 @@ pub static LOCATION_DB: LazyLock<Mutex<LocationDb>> =
 /// Load locations for the given map.
 /// Call this when a new map is loaded.
 pub fn loc_load_map(mapname: &str, gamedir: &str) {
-    let mut db = LOCATION_DB.lock().unwrap();
+    let mut db = LOCATION_DB.lock().unwrap_or_else(|e| e.into_inner());
     db.load(mapname, gamedir);
 }
 
 /// Get the player's current location name.
 /// Returns None if no location file exists or player isn't near any location.
 pub fn loc_get_current(pos: Vec3) -> Option<String> {
-    let mut db = LOCATION_DB.lock().unwrap();
+    let mut db = LOCATION_DB.lock().unwrap_or_else(|e| e.into_inner());
     db.find_nearest(pos)
 }
 
 /// Clear the location database.
 /// Call this on disconnect.
 pub fn loc_clear() {
-    let mut db = LOCATION_DB.lock().unwrap();
+    let mut db = LOCATION_DB.lock().unwrap_or_else(|e| e.into_inner());
     db.clear();
 }
 
@@ -236,7 +236,7 @@ pub fn loc_expand_macros(msg: &str, player_pos: Vec3) -> String {
 
 /// loc - Show location info
 pub fn cmd_loc(player_pos: Vec3) {
-    let mut db = LOCATION_DB.lock().unwrap();
+    let mut db = LOCATION_DB.lock().unwrap_or_else(|e| e.into_inner());
 
     if db.locations.is_empty() {
         com_printf(&format!("No locations loaded for map '{}'\n", db.mapname));
@@ -256,7 +256,7 @@ pub fn cmd_loc(player_pos: Vec3) {
 
 /// loclist - List all locations on current map
 pub fn cmd_loclist() {
-    let db = LOCATION_DB.lock().unwrap();
+    let db = LOCATION_DB.lock().unwrap_or_else(|e| e.into_inner());
 
     if db.locations.is_empty() {
         com_printf(&format!("No locations loaded for map '{}'\n", db.mapname));
@@ -284,7 +284,7 @@ pub fn cmd_locadd(name: &str, player_pos: Vec3, gamedir: &str) {
         return;
     }
 
-    let mut db = LOCATION_DB.lock().unwrap();
+    let mut db = LOCATION_DB.lock().unwrap_or_else(|e| e.into_inner());
 
     // Add to database
     db.locations.push(Location {
@@ -325,7 +325,7 @@ pub fn cmd_locdel(index_str: &str) {
         }
     };
 
-    let mut db = LOCATION_DB.lock().unwrap();
+    let mut db = LOCATION_DB.lock().unwrap_or_else(|e| e.into_inner());
 
     if index == 0 || index > db.locations.len() {
         com_printf(&format!(
@@ -345,7 +345,7 @@ pub fn cmd_locdel(index_str: &str) {
 
 /// locsave - Save all locations to file
 pub fn cmd_locsave(gamedir: &str) {
-    let db = LOCATION_DB.lock().unwrap();
+    let db = LOCATION_DB.lock().unwrap_or_else(|e| e.into_inner());
 
     if db.mapname.is_empty() {
         com_printf("No map loaded.\n");
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_expand_macros() {
-        let mut db = LOCATION_DB.lock().unwrap();
+        let mut db = LOCATION_DB.lock().unwrap_or_else(|e| e.into_inner());
         db.locations.push(Location {
             origin: [0.0, 0.0, 0.0],
             name: "Spawn".to_string(),

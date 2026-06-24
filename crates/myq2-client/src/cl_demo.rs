@@ -293,7 +293,7 @@ fn parse_time_string(s: &str) -> Option<f32> {
 
 /// seek <time> - Jump to time (e.g., "seek 1:30", "seek 90", "seek +10")
 pub fn cmd_seek(args: &str) {
-    let mut playback = DEMO_PLAYBACK.lock().unwrap();
+    let mut playback = DEMO_PLAYBACK.lock().unwrap_or_else(|e| e.into_inner());
 
     if !playback.playing {
         com_printf("Not playing a demo.\n");
@@ -333,7 +333,7 @@ pub fn cmd_seek(args: &str) {
 
 /// seekpercent <0-100> - Jump to percentage of demo
 pub fn cmd_seekpercent(args: &str) {
-    let mut playback = DEMO_PLAYBACK.lock().unwrap();
+    let mut playback = DEMO_PLAYBACK.lock().unwrap_or_else(|e| e.into_inner());
 
     if !playback.playing {
         com_printf("Not playing a demo.\n");
@@ -354,7 +354,7 @@ pub fn cmd_seekpercent(args: &str) {
 
 /// demo_pause / demo_resume - Toggle pause
 pub fn cmd_demo_pause() {
-    let mut playback = DEMO_PLAYBACK.lock().unwrap();
+    let mut playback = DEMO_PLAYBACK.lock().unwrap_or_else(|e| e.into_inner());
 
     if !playback.playing {
         com_printf("Not playing a demo.\n");
@@ -371,7 +371,7 @@ pub fn cmd_demo_pause() {
 
 /// demo_speed <0.25-4.0> - Set playback speed
 pub fn cmd_demo_speed(args: &str) {
-    let mut playback = DEMO_PLAYBACK.lock().unwrap();
+    let mut playback = DEMO_PLAYBACK.lock().unwrap_or_else(|e| e.into_inner());
 
     if !playback.playing {
         com_printf("Not playing a demo.\n");
@@ -389,7 +389,7 @@ pub fn cmd_demo_speed(args: &str) {
 
 /// demo_info - Show demo information
 pub fn cmd_demo_info() {
-    let playback = DEMO_PLAYBACK.lock().unwrap();
+    let playback = DEMO_PLAYBACK.lock().unwrap_or_else(|e| e.into_inner());
 
     if !playback.playing {
         com_printf("Not playing a demo.\n");

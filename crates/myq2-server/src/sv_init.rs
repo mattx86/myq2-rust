@@ -1,4 +1,4 @@
-// sv_init.rs — Server initialization
+// sv_init.rs â€” Server initialization
 // Converted from: myq2-original/server/sv_init.c
 //
 // Copyright (C) 1997-2001 Id Software, Inc.
@@ -26,7 +26,7 @@ use myq2_common::files::fs_gamedir;
 use std::path::Path;
 use rand::Rng;
 
-// Cross-module client callbacks — registered at startup by main.rs.
+// Cross-module client callbacks â€” registered at startup by main.rs.
 // These cannot be wired directly because they live in the myq2-client crate.
 use std::sync::Mutex;
 
@@ -100,18 +100,18 @@ static SV_CLIENT_CALLBACKS: Mutex<Option<SvClientCallbacks>> = Mutex::new(None);
 
 /// Register client callbacks so the server can call into the client module.
 pub fn sv_register_client_callbacks(cb: SvClientCallbacks) {
-    *SV_CLIENT_CALLBACKS.lock().unwrap() = Some(cb);
+    *SV_CLIENT_CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()) = Some(cb);
 }
 
 // ============================================================
-// Global ServerContext — replaces C global server state
+// Global ServerContext â€” replaces C global server state
 // ============================================================
 
 static GLOBAL_SERVER_CTX: Mutex<Option<ServerContext>> = Mutex::new(None);
 
 /// Initialize the global server context. Called once at startup.
 pub fn sv_init_global_context() {
-    let mut guard = GLOBAL_SERVER_CTX.lock().unwrap();
+    let mut guard = GLOBAL_SERVER_CTX.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(ServerContext::default());
     }
@@ -122,28 +122,28 @@ pub fn with_server_context<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut ServerContext) -> R,
 {
-    GLOBAL_SERVER_CTX.lock().unwrap().as_mut().map(f)
+    GLOBAL_SERVER_CTX.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(f)
 }
 
-/// SV_Frame wrapper for the global context — suitable as a frame callback.
+/// SV_Frame wrapper for the global context â€” suitable as a frame callback.
 pub fn sv_frame_global(msec: i32) {
-    if let Some(ref mut ctx) = *GLOBAL_SERVER_CTX.lock().unwrap() {
+    if let Some(ref mut ctx) = *GLOBAL_SERVER_CTX.lock().unwrap_or_else(|e| e.into_inner()) {
         crate::sv_main::sv_frame(ctx, msec);
     }
 }
 
 fn cl_drop() {
-    if let Some(ref cb) = *SV_CLIENT_CALLBACKS.lock().unwrap() {
+    if let Some(ref cb) = *SV_CLIENT_CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()) {
         (cb.cl_drop)();
     }
 }
 fn scr_begin_loading_plaque() {
-    if let Some(ref cb) = *SV_CLIENT_CALLBACKS.lock().unwrap() {
+    if let Some(ref cb) = *SV_CLIENT_CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()) {
         (cb.scr_begin_loading_plaque)();
     }
 }
 
-// Network functions — wired to myq2_common::net implementations.
+// Network functions â€” wired to myq2_common::net implementations.
 fn net_config(multiplayer: bool) {
     myq2_common::net::net_config(multiplayer);
 }
@@ -153,7 +153,7 @@ fn net_string_to_adr(s: &str, adr: &mut NetAdr) {
     }
 }
 
-/// SV_ClearWorld — clears the area node tree and rebuilds it from the world model bounds.
+/// SV_ClearWorld â€” clears the area node tree and rebuilds it from the world model bounds.
 fn sv_clear_world() {
     // In original C: uses sv.models[1]->mins/maxs (the world BSP model).
     // sv.models[1] is the cmodel_t* returned by CM_LoadMap = map_cmodels[0] (worldmodel).
@@ -372,10 +372,10 @@ pub fn sv_spawn_server(
     ctx.sv.configstrings[CS_NAME] = server.to_string();
     if cvar_variable_value("deathmatch") != 0.0 {
         ctx.sv.configstrings[CS_AIRACCEL] = format!("{}", sv_airaccelerate_value());
-        *PM_AIRACCELERATE.lock().unwrap() = sv_airaccelerate_value();
+        *PM_AIRACCELERATE.lock().unwrap_or_else(|e| e.into_inner()) = sv_airaccelerate_value();
     } else {
         ctx.sv.configstrings[CS_AIRACCEL] = "0".to_string();
-        *PM_AIRACCELERATE.lock().unwrap() = 0.0;
+        *PM_AIRACCELERATE.lock().unwrap_or_else(|e| e.into_inner()) = 0.0;
     }
 
     ctx.sv.multicast = SizeBuf::new(MAX_MSGLEN as i32);
@@ -479,7 +479,7 @@ pub fn sv_spawn_server(
 }
 
 // ============================================================
-// sv_spawn_server_tick — Process one chunk of map loading
+// sv_spawn_server_tick â€” Process one chunk of map loading
 // ============================================================
 
 /// Process one chunk of the map loading state machine.
@@ -522,10 +522,10 @@ pub fn sv_spawn_server_tick(ctx: &mut ServerContext) -> bool {
             ctx.sv.configstrings[CS_NAME] = server.clone();
             if cvar_variable_value("deathmatch") != 0.0 {
                 ctx.sv.configstrings[CS_AIRACCEL] = format!("{}", sv_airaccelerate_value());
-                *PM_AIRACCELERATE.lock().unwrap() = sv_airaccelerate_value();
+                *PM_AIRACCELERATE.lock().unwrap_or_else(|e| e.into_inner()) = sv_airaccelerate_value();
             } else {
                 ctx.sv.configstrings[CS_AIRACCEL] = "0".to_string();
-                *PM_AIRACCELERATE.lock().unwrap() = 0.0;
+                *PM_AIRACCELERATE.lock().unwrap_or_else(|e| e.into_inner()) = 0.0;
             }
 
             ctx.sv.multicast = SizeBuf::new(MAX_MSGLEN as i32);
@@ -875,7 +875,7 @@ pub fn sv_map(ctx: &mut ServerContext, attractloop: bool, levelstring: &str, loa
         crate::sv_send::sv_send_client_messages(ctx);
         sv_spawn_server_chunked(ctx, &level, &spawnpoint, ServerState::Game, attractloop, loadgame);
         // NOTE: cbuf_copy_to_defer() is called by the CALLER (cl_map_f) instead of here,
-        // because we're already inside CMD_CTX lock (via cbuf_execute → cmd_execute_string).
+        // because we're already inside CMD_CTX lock (via cbuf_execute â†’ cmd_execute_string).
         // Calling the global cbuf_copy_to_defer() would deadlock on the non-reentrant mutex.
     }
 

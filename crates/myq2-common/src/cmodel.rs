@@ -1,4 +1,4 @@
-// cmodel.rs — Collision model loading and tracing
+// cmodel.rs â€” Collision model loading and tracing
 // Converted from: myq2-original/qcommon/cmodel.c
 
 use crate::q_shared::{
@@ -259,20 +259,20 @@ impl CModelContext {
     // Lump loaders
     // ============================================================
 
-    fn load_submodels(&mut self, data: &[u8], lump: &Lump) {
+    fn load_submodels(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         // sizeof(DModel) = 9 * 4 = 36 in C, but use Rust struct size
         let stride = 48; // 3*4 + 3*4 + 3*4 + 4 + 4 + 4 = 48
         if !len.is_multiple_of(stride) {
-            panic!("MOD_LoadBmodel: funny lump size (submodels)");
+            return Err("MOD_LoadBmodel: funny lump size (submodels)".to_string());
         }
         let count = len / stride;
         if count < 1 {
-            panic!("Map with no models");
+            return Err("Map with no models".to_string());
         }
         if count > MAX_MAP_MODELS {
-            panic!("Map has too many models");
+            return Err("Map has too many models".to_string());
         }
 
         self.numcmodels = count;
@@ -309,25 +309,26 @@ impl CModelContext {
                 self.map_cmodels.push(cm);
             }
         }
+        Ok(())
     }
 
     /// Parallel threshold for lump parsing - below this count, sequential is faster
     const PARALLEL_LUMP_THRESHOLD: usize = 64;
 
-    fn load_surfaces(&mut self, data: &[u8], lump: &Lump) {
+    fn load_surfaces(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         // sizeof(texinfo_t) = 76: vecs[2][4]*4=32, flags=4, value=4, texture[32]=32, nexttexinfo=4
         let stride = 76;
         if !len.is_multiple_of(stride) {
-            panic!("MOD_LoadBmodel: funny lump size (surfaces)");
+            return Err("MOD_LoadBmodel: funny lump size (surfaces)".to_string());
         }
         let count = len / stride;
         if count < 1 {
-            panic!("Map with no surfaces");
+            return Err("Map with no surfaces".to_string());
         }
         if count > MAX_MAP_TEXINFO {
-            panic!("Map has too many surfaces");
+            return Err("Map has too many surfaces".to_string());
         }
 
         self.numtexinfo = count;
@@ -378,22 +379,23 @@ impl CModelContext {
                 self.map_surfaces.push(surf);
             }
         }
+        Ok(())
     }
 
-    fn load_nodes(&mut self, data: &[u8], lump: &Lump) {
+    fn load_nodes(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         // sizeof(dnode_t) = 4 + 2*4 + 3*2 + 3*2 + 2 + 2 = 28
         let stride = 28;
         if !len.is_multiple_of(stride) {
-            panic!("MOD_LoadBmodel: funny lump size (nodes)");
+            return Err("MOD_LoadBmodel: funny lump size (nodes)".to_string());
         }
         let count = len / stride;
         if count < 1 {
-            panic!("Map has no nodes");
+            return Err("Map has no nodes".to_string());
         }
         if count > MAX_MAP_NODES {
-            panic!("Map has too many nodes");
+            return Err("Map has too many nodes".to_string());
         }
 
         self.numnodes = count;
@@ -426,19 +428,20 @@ impl CModelContext {
                 self.map_nodes.push(node);
             }
         }
+        Ok(())
     }
 
-    fn load_brushes(&mut self, data: &[u8], lump: &Lump) {
+    fn load_brushes(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         // sizeof(dbrush_t) = 12
         let stride = 12;
         if !len.is_multiple_of(stride) {
-            panic!("MOD_LoadBmodel: funny lump size (brushes)");
+            return Err("MOD_LoadBmodel: funny lump size (brushes)".to_string());
         }
         let count = len / stride;
         if count > MAX_MAP_BRUSHES {
-            panic!("Map has too many brushes");
+            return Err("Map has too many brushes".to_string());
         }
 
         self.numbrushes = count;
@@ -470,22 +473,23 @@ impl CModelContext {
                 self.map_brushes.push(brush);
             }
         }
+        Ok(())
     }
 
-    fn load_leafs(&mut self, data: &[u8], lump: &Lump) {
+    fn load_leafs(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         // sizeof(dleaf_t) = 4 + 2 + 2 + 3*2 + 3*2 + 2 + 2 + 2 + 2 = 28
         let stride = 28;
         if !len.is_multiple_of(stride) {
-            panic!("MOD_LoadBmodel: funny lump size (leafs)");
+            return Err("MOD_LoadBmodel: funny lump size (leafs)".to_string());
         }
         let count = len / stride;
         if count < 1 {
-            panic!("Map with no leafs");
+            return Err("Map with no leafs".to_string());
         }
         if count > MAX_MAP_LEAFS {
-            panic!("Map has too many leafs");
+            return Err("Map has too many leafs".to_string());
         }
 
         self.numleafs = count;
@@ -536,7 +540,7 @@ impl CModelContext {
             .unwrap_or(0);
 
         if self.map_leafs[0].contents != CONTENTS_SOLID {
-            panic!("Map leaf 0 is not CONTENTS_SOLID");
+            return Err("Map leaf 0 is not CONTENTS_SOLID".to_string());
         }
         self.solidleaf = 0;
         self.emptyleaf = -1;
@@ -547,24 +551,25 @@ impl CModelContext {
             }
         }
         if self.emptyleaf == -1 {
-            panic!("Map does not have an empty leaf");
+            return Err("Map does not have an empty leaf".to_string());
         }
+        Ok(())
     }
 
-    fn load_planes(&mut self, data: &[u8], lump: &Lump) {
+    fn load_planes(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         // sizeof(dplane_t) = 3*4 + 4 + 4 = 20
         let stride = 20;
         if !len.is_multiple_of(stride) {
-            panic!("MOD_LoadBmodel: funny lump size (planes)");
+            return Err("MOD_LoadBmodel: funny lump size (planes)".to_string());
         }
         let count = len / stride;
         if count < 1 {
-            panic!("Map with no planes");
+            return Err("Map with no planes".to_string());
         }
         if count > MAX_MAP_PLANES {
-            panic!("Map has too many planes");
+            return Err("Map has too many planes".to_string());
         }
 
         self.numplanes = count;
@@ -609,21 +614,22 @@ impl CModelContext {
                 self.map_planes.push(plane);
             }
         }
+        Ok(())
     }
 
-    fn load_leaf_brushes(&mut self, data: &[u8], lump: &Lump) {
+    fn load_leaf_brushes(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         let stride = 2; // u16
         if !len.is_multiple_of(stride) {
-            panic!("MOD_LoadBmodel: funny lump size (leafbrushes)");
+            return Err("MOD_LoadBmodel: funny lump size (leafbrushes)".to_string());
         }
         let count = len / stride;
         if count < 1 {
-            panic!("Map with no leafbrushes");
+            return Err("Map with no leafbrushes".to_string());
         }
         if count > MAX_MAP_LEAFBRUSHES {
-            panic!("Map has too many leafbrushes");
+            return Err("Map has too many leafbrushes".to_string());
         }
 
         self.numleafbrushes = count;
@@ -646,19 +652,20 @@ impl CModelContext {
                 self.map_leafbrushes.push(Self::read_u16_le(data, base));
             }
         }
+        Ok(())
     }
 
-    fn load_brush_sides(&mut self, data: &[u8], lump: &Lump) {
+    fn load_brush_sides(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         // sizeof(dbrushside_t) = 2 + 2 = 4
         let stride = 4;
         if !len.is_multiple_of(stride) {
-            panic!("MOD_LoadBmodel: funny lump size (brushsides)");
+            return Err("MOD_LoadBmodel: funny lump size (brushsides)".to_string());
         }
         let count = len / stride;
         if count > MAX_MAP_BRUSHSIDES {
-            panic!("Map has too many brushsides");
+            return Err("Map has too many brushsides".to_string());
         }
 
         self.numbrushsides = count;
@@ -691,7 +698,7 @@ impl CModelContext {
             // Validate texinfo indices sequentially
             for (i, side) in brushsides.iter().enumerate() {
                 if side.surface_idx != usize::MAX && side.surface_idx >= numtexinfo {
-                    panic!("Bad brushside texinfo at index {}", i);
+                    return Err(format!("Bad brushside texinfo at index {}", i));
                 }
             }
             self.map_brushsides = brushsides;
@@ -703,7 +710,7 @@ impl CModelContext {
                 side.plane_idx = planenum;
                 let texinfo = Self::read_i16_le(data, base + 2);
                 if texinfo >= numtexinfo as i16 {
-                    panic!("Bad brushside texinfo");
+                    return Err("Bad brushside texinfo".to_string());
                 }
                 if texinfo >= 0 {
                     side.surface_idx = texinfo as usize;
@@ -713,19 +720,20 @@ impl CModelContext {
                 self.map_brushsides.push(side);
             }
         }
+        Ok(())
     }
 
-    fn load_areas(&mut self, data: &[u8], lump: &Lump) {
+    fn load_areas(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         // sizeof(darea_t) = 4 + 4 = 8
         let stride = 8;
         if !len.is_multiple_of(stride) {
-            panic!("MOD_LoadBmodel: funny lump size (areas)");
+            return Err("MOD_LoadBmodel: funny lump size (areas)".to_string());
         }
         let count = len / stride;
         if count > MAX_MAP_AREAS {
-            panic!("Map has too many areas");
+            return Err("Map has too many areas".to_string());
         }
 
         self.numareas = count;
@@ -756,19 +764,20 @@ impl CModelContext {
                 self.map_areas.push(area);
             }
         }
+        Ok(())
     }
 
-    fn load_area_portals(&mut self, data: &[u8], lump: &Lump) {
+    fn load_area_portals(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         // sizeof(dareaportal_t) = 4 + 4 = 8
         let stride = 8;
         if !len.is_multiple_of(stride) {
-            panic!("MOD_LoadBmodel: funny lump size (areaportals)");
+            return Err("MOD_LoadBmodel: funny lump size (areaportals)".to_string());
         }
         let count = len / stride;
         if count > MAX_MAP_AREAPORTALS {
-            panic!("Map has too many areaportals");
+            return Err("Map has too many areaportals".to_string());
         }
 
         self.numareaportals = count;
@@ -798,13 +807,14 @@ impl CModelContext {
                 self.map_areaportals.push(portal);
             }
         }
+        Ok(())
     }
 
-    fn load_visibility(&mut self, data: &[u8], lump: &Lump) {
+    fn load_visibility(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         if len > MAX_MAP_VISIBILITY {
-            panic!("Map has too large visibility lump");
+            return Err("Map has too large visibility lump".to_string());
         }
 
         self.numvisibility = len;
@@ -823,18 +833,20 @@ impl CModelContext {
                 }
             }
         }
+        Ok(())
     }
 
-    fn load_entity_string(&mut self, data: &[u8], lump: &Lump) {
+    fn load_entity_string(&mut self, data: &[u8], lump: &Lump) -> Result<(), String> {
         let ofs = lump.fileofs as usize;
         let len = lump.filelen as usize;
         if len > MAX_MAP_ENTSTRING {
-            panic!("Map has too large entity lump");
+            return Err("Map has too large entity lump".to_string());
         }
         self.numentitychars = len;
         let raw = String::from_utf8_lossy(&data[ofs..ofs + len]).to_string();
         // BSP entity lumps include trailing null bytes; strip them
         self.map_entitystring = raw.trim_end_matches('\0').to_string();
+        Ok(())
     }
 
     // ============================================================
@@ -911,16 +923,21 @@ impl CModelContext {
 
         // Parse header
         if data.len() < 8 + HEADER_LUMPS * 8 {
-            panic!("BSP file too short");
+            crate::common::com_error(crate::q_shared::ERR_DROP, "BSP file too short");
+            return (0, 0);
         }
         let _ident = Self::read_i32_le(data, 0);
         let version = Self::read_i32_le(data, 4);
 
         if version != BSPVERSION {
-            panic!(
-                "CMod_LoadBrushModel: {} has wrong version number ({} should be {})",
-                name, version, BSPVERSION
+            crate::common::com_error(
+                crate::q_shared::ERR_DROP,
+                &format!(
+                    "CMod_LoadBrushModel: {} has wrong version number ({} should be {})",
+                    name, version, BSPVERSION
+                ),
             );
+            return (0, 0);
         }
 
         // Read lumps
@@ -931,19 +948,27 @@ impl CModelContext {
             lumps[i].filelen = Self::read_i32_le(data, base + 4);
         }
 
-        // Load in order matching the original
-        self.load_surfaces(data, &lumps[LUMP_TEXINFO]);
-        self.load_leafs(data, &lumps[LUMP_LEAFS]);
-        self.load_leaf_brushes(data, &lumps[LUMP_LEAFBRUSHES]);
-        self.load_planes(data, &lumps[LUMP_PLANES]);
-        self.load_brushes(data, &lumps[LUMP_BRUSHES]);
-        self.load_brush_sides(data, &lumps[LUMP_BRUSHSIDES]);
-        self.load_submodels(data, &lumps[LUMP_MODELS]);
-        self.load_nodes(data, &lumps[LUMP_NODES]);
-        self.load_areas(data, &lumps[LUMP_AREAS]);
-        self.load_area_portals(data, &lumps[LUMP_AREAPORTALS]);
-        self.load_visibility(data, &lumps[LUMP_VISIBILITY]);
-        self.load_entity_string(data, &lumps[LUMP_ENTITIES]);
+        // Load in order matching the original. Any malformed lump aborts the
+        // whole load via ERR_DROP instead of crashing (matches C Com_Error).
+        let load_result: Result<(), String> = (|| {
+            self.load_surfaces(data, &lumps[LUMP_TEXINFO])?;
+            self.load_leafs(data, &lumps[LUMP_LEAFS])?;
+            self.load_leaf_brushes(data, &lumps[LUMP_LEAFBRUSHES])?;
+            self.load_planes(data, &lumps[LUMP_PLANES])?;
+            self.load_brushes(data, &lumps[LUMP_BRUSHES])?;
+            self.load_brush_sides(data, &lumps[LUMP_BRUSHSIDES])?;
+            self.load_submodels(data, &lumps[LUMP_MODELS])?;
+            self.load_nodes(data, &lumps[LUMP_NODES])?;
+            self.load_areas(data, &lumps[LUMP_AREAS])?;
+            self.load_area_portals(data, &lumps[LUMP_AREAPORTALS])?;
+            self.load_visibility(data, &lumps[LUMP_VISIBILITY])?;
+            self.load_entity_string(data, &lumps[LUMP_ENTITIES])?;
+            Ok(())
+        })();
+        if let Err(e) = load_result {
+            crate::common::com_error(crate::q_shared::ERR_DROP, &e);
+            return (0, 0);
+        }
 
         self.init_box_hull();
 
@@ -2032,7 +2057,7 @@ use std::sync::Mutex;
 static CMODEL_CTX: Mutex<Option<CModelContext>> = Mutex::new(None);
 
 pub fn cmodel_init() {
-    let mut g = CMODEL_CTX.lock().unwrap();
+    let mut g = CMODEL_CTX.lock().unwrap_or_else(|e| e.into_inner());
     *g = Some(CModelContext::new());
 }
 
@@ -2041,7 +2066,7 @@ pub fn with_cmodel_ctx<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut CModelContext) -> R,
 {
-    let mut g = CMODEL_CTX.lock().unwrap();
+    let mut g = CMODEL_CTX.lock().unwrap_or_else(|e| e.into_inner());
     g.as_mut().map(f)
 }
 
@@ -2112,14 +2137,14 @@ pub fn cm_box_trace(start: &Vec3, end: &Vec3, mins: &Vec3, maxs: &Vec3, headnode
     with_cmodel_ctx(|c| c.box_trace(start, end, mins, maxs, headnode, brushmask)).unwrap_or_default()
 }
 
-/// CM_HeadnodeForBox — Create a temporary BSP headnode that represents
+/// CM_HeadnodeForBox â€” Create a temporary BSP headnode that represents
 /// the given axis-aligned bounding box. Used by sv_link_edict to determine
 /// which BSP leaves an entity's bounding box overlaps.
 pub fn cm_headnode_for_box(mins: &Vec3, maxs: &Vec3) -> i32 {
     with_cmodel_ctx(|c| c.headnode_for_box(mins, maxs) as i32).unwrap_or(0)
 }
 
-/// CM_BoxLeafnums — Return a list of BSP leaf indices that the given
+/// CM_BoxLeafnums â€” Return a list of BSP leaf indices that the given
 /// axis-aligned bounding box overlaps. Used by sv_link_edict to determine
 /// PVS cluster membership for entities.
 pub fn cm_box_leafnums(mins: &Vec3, maxs: &Vec3, _top_node: i32) -> Vec<i32> {
@@ -2129,7 +2154,7 @@ pub fn cm_box_leafnums(mins: &Vec3, maxs: &Vec3, _top_node: i32) -> Vec<i32> {
     }).unwrap_or_default()
 }
 
-/// CM_TransformedBoxTrace — free function wrapper.
+/// CM_TransformedBoxTrace â€” free function wrapper.
 pub fn cm_transformed_box_trace(
     start: &Vec3, end: &Vec3, mins: &Vec3, maxs: &Vec3,
     headnode: i32, brushmask: i32, origin: &Vec3, angles: &Vec3,
@@ -2138,7 +2163,7 @@ pub fn cm_transformed_box_trace(
         .unwrap_or_default()
 }
 
-/// CM_TransformedPointContents — free function wrapper.
+/// CM_TransformedPointContents â€” free function wrapper.
 pub fn cm_transformed_point_contents(p: &Vec3, headnode: i32, origin: &Vec3, angles: &Vec3) -> i32 {
     with_cmodel_ctx(|c| c.transformed_point_contents(p, headnode, origin, angles)).unwrap_or(0)
 }

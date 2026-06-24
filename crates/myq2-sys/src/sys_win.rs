@@ -1,4 +1,4 @@
-// sys_win.rs — Main system/platform layer
+// sys_win.rs â€” Main system/platform layer
 // Converted from: myq2-original/win32/sys_win.c
 //
 // Uses winit for window/input instead of SDL3.
@@ -35,10 +35,10 @@ pub static START_TIME: Mutex<i32> = Mutex::new(0);
 pub static ACTIVE_APP: Mutex<i32> = Mutex::new(0);
 pub static MINIMIZED: Mutex<bool> = Mutex::new(false);
 
-/// System message time — updated during message pump.
+/// System message time â€” updated during message pump.
 pub static SYS_MSG_TIME: Mutex<u32> = Mutex::new(0);
 
-/// System frame time — updated each frame.
+/// System frame time â€” updated each frame.
 pub static SYS_FRAME_TIME: Mutex<u32> = Mutex::new(0);
 
 /// Parsed command-line arguments.
@@ -66,7 +66,7 @@ pub fn sys_error(error: &str) -> ! {
     cl_main::cl_shutdown();
     common::qcommon_shutdown();
 
-    // Print to stderr (replaces MessageBox for now — this is the lowest-level error handler)
+    // Print to stderr (replaces MessageBox for now â€” this is the lowest-level error handler)
     eprintln!("Error: {}", error);
 
     // Shut down QHOST hooks if necessary
@@ -89,7 +89,7 @@ pub fn sys_quit() -> ! {
 
     // Original: if (dedicated && dedicated->value) FreeConsole();
     // FreeConsole is a Win32 API for detaching from the console. On modern systems
-    // with winit, this is unnecessary — the process simply exits. Kept as a no-op
+    // with winit, this is unnecessary â€” the process simply exits. Kept as a no-op
     // for documentation fidelity.
     if is_dedicated() {
         // No-op: Rust process cleanup handles console detachment.
@@ -121,7 +121,7 @@ pub fn win_error() {
 ///
 /// Original: `char *Sys_ScanForCD(void)`
 pub fn sys_scan_for_cd() -> Option<String> {
-    // Legacy CD-ROM scanning — no-op in modern builds.
+    // Legacy CD-ROM scanning â€” no-op in modern builds.
     // The original scanned drives c: through z: for install\data\quake2.exe
     // on CD-ROM drives. CD audio support has been removed.
     None
@@ -145,7 +145,7 @@ pub fn sys_copy_protect() {
 /// Original: `void Sys_Init(void)`
 pub fn sys_init() {
     // Original called timeBeginPeriod(1) for 1ms timer resolution.
-    // Not needed — Rust's std::time::Instant uses QueryPerformanceCounter on Windows,
+    // Not needed â€” Rust's std::time::Instant uses QueryPerformanceCounter on Windows,
     // which provides sub-microsecond resolution without timeBeginPeriod.
 
     // Original checked Windows version via GetVersionEx:
@@ -154,7 +154,7 @@ pub fn sys_init() {
     //   - Set s_win95 flag for VER_PLATFORM_WIN32_WINDOWS
     // Modern Windows always satisfies these checks. s_win95 is always false.
     {
-        let mut win95 = S_WIN95.lock().unwrap();
+        let mut win95 = S_WIN95.lock().unwrap_or_else(|e| e.into_inner());
         *win95 = false;
     }
 
@@ -165,7 +165,7 @@ pub fn sys_init() {
     // In the Rust port, stdin/stdout are always available (no AllocConsole needed).
     // We still initialize QHOST hooks if running as a dedicated server.
     if is_dedicated() {
-        let args = CMD_ARGS.lock().unwrap().clone();
+        let args = CMD_ARGS.lock().unwrap_or_else(|e| e.into_inner()).clone();
         conproc::init_con_proc(&args);
     }
 }
@@ -231,7 +231,7 @@ pub fn sys_console_input() -> Option<String> {
             w_repeat_count: u16,
             w_virtual_key_code: u16,
             w_virtual_scan_code: u16,
-            u_char: u16, // union — AsciiChar is low byte
+            u_char: u16, // union â€” AsciiChar is low byte
             dw_control_key_state: u32,
         }
 
@@ -242,7 +242,7 @@ pub fn sys_console_input() -> Option<String> {
             event: KeyEventRecord,
         }
 
-        let mut buf = CONSOLE_BUF.lock().unwrap();
+        let mut buf = CONSOLE_BUF.lock().unwrap_or_else(|e| e.into_inner());
 
         // SAFETY: Standard Win32 console APIs, matching the original C code exactly.
         // GetStdHandle returns process-wide handles; ReadConsoleInputA and
@@ -327,7 +327,7 @@ pub fn sys_console_input() -> Option<String> {
             }
         }
 
-        let mut buf = CONSOLE_BUF.lock().unwrap();
+        let mut buf = CONSOLE_BUF.lock().unwrap_or_else(|e| e.into_inner());
         let mut byte = [0u8; 1];
         loop {
             match std::io::stdin().read(&mut byte) {
@@ -383,7 +383,7 @@ pub fn sys_console_output(string: &str) {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
 
-    let buf = CONSOLE_BUF.lock().unwrap();
+    let buf = CONSOLE_BUF.lock().unwrap_or_else(|e| e.into_inner());
     let textlen = buf.len;
 
     // If there's a partially typed input line, clear it first
@@ -472,7 +472,7 @@ pub fn handle_device_mouse_button(button: u32, state: ElementState, time: u32) {
     keys::key_event(q2key, pressed, time);
 }
 
-/// Process a winit DeviceEvent::MouseMotion event (raw input — preferred for FPS games).
+/// Process a winit DeviceEvent::MouseMotion event (raw input â€” preferred for FPS games).
 pub fn handle_mouse_motion(delta_x: f64, delta_y: f64) {
     // Use unwrap_or_else to recover from poisoned mutex (e.g., panic in qcommon_frame
     // was caught by catch_unwind but left INPUT_STATE poisoned). Without this, a
@@ -535,20 +535,20 @@ pub fn handle_mouse_wheel(delta: MouseScrollDelta, time: u32) {
 /// Handle window focus gained.
 ///
 /// Always activates input when focus is gained. The winit `Focused(true)` event
-/// is authoritative — if the window has focus, we should be active regardless of
+/// is authoritative â€” if the window has focus, we should be active regardless of
 /// the `MINIMIZED` flag (which may not have been cleared yet if `Occluded(false)`
 /// arrives after `Focused(true)`).
 pub fn handle_focus_gained() {
     // Clear minimized flag since we're being focused (implies restored)
     {
-        let mut m = MINIMIZED.lock().unwrap();
+        let mut m = MINIMIZED.lock().unwrap_or_else(|e| e.into_inner());
         *m = false;
     }
     {
-        let mut aa = ACTIVE_APP.lock().unwrap();
+        let mut aa = ACTIVE_APP.lock().unwrap_or_else(|e| e.into_inner());
         *aa = 1;
     }
-    // Key_ClearStates — prevents stuck keys across alt-tab
+    // Key_ClearStates â€” prevents stuck keys across alt-tab
     keys::key_clear_states();
     // IN_Activate
     {
@@ -556,14 +556,14 @@ pub fn handle_focus_gained() {
             .unwrap_or_else(|e| e.into_inner());
         crate::in_win::in_activate(&mut input, true);
     }
-    // S_Activate — resume audio
+    // S_Activate â€” resume audio
     myq2_client::cl_main::cl_s_activate(true);
 }
 
 /// Handle window focus lost.
 pub fn handle_focus_lost() {
     {
-        let mut aa = ACTIVE_APP.lock().unwrap();
+        let mut aa = ACTIVE_APP.lock().unwrap_or_else(|e| e.into_inner());
         *aa = 0;
     }
     keys::key_clear_states();
@@ -572,17 +572,17 @@ pub fn handle_focus_lost() {
             .unwrap_or_else(|e| e.into_inner());
         crate::in_win::in_activate(&mut input, false);
     }
-    // S_Activate — pause audio
+    // S_Activate â€” pause audio
     myq2_client::cl_main::cl_s_activate(false);
 }
 
 /// Handle window minimized.
 pub fn handle_minimized() {
-    let mut m = MINIMIZED.lock().unwrap();
+    let mut m = MINIMIZED.lock().unwrap_or_else(|e| e.into_inner());
     *m = true;
     // Deactivate when minimized
     {
-        let mut aa = ACTIVE_APP.lock().unwrap();
+        let mut aa = ACTIVE_APP.lock().unwrap_or_else(|e| e.into_inner());
         *aa = 0;
     }
     keys::key_clear_states();
@@ -591,7 +591,7 @@ pub fn handle_minimized() {
             .unwrap_or_else(|e| e.into_inner());
         crate::in_win::in_activate(&mut input, false);
     }
-    // S_Activate — pause audio
+    // S_Activate â€” pause audio
     myq2_client::cl_main::cl_s_activate(false);
 }
 
@@ -601,11 +601,11 @@ pub fn handle_minimized() {
 /// even if `Focused(true)` fired before `Occluded(false)`.
 pub fn handle_restored() {
     {
-        let mut m = MINIMIZED.lock().unwrap();
+        let mut m = MINIMIZED.lock().unwrap_or_else(|e| e.into_inner());
         *m = false;
     }
     {
-        let mut aa = ACTIVE_APP.lock().unwrap();
+        let mut aa = ACTIVE_APP.lock().unwrap_or_else(|e| e.into_inner());
         *aa = 1;
     }
     {
@@ -632,14 +632,14 @@ pub fn handle_moved(x: i32, y: i32) {
 
 /// Update message time.
 pub fn update_msg_time(time: u32) {
-    let mut mt = SYS_MSG_TIME.lock().unwrap();
+    let mut mt = SYS_MSG_TIME.lock().unwrap_or_else(|e| e.into_inner());
     *mt = time;
 }
 
 /// Update frame time.
 pub fn update_frame_time() {
     let elapsed = sys_milliseconds();
-    let mut ft = SYS_FRAME_TIME.lock().unwrap();
+    let mut ft = SYS_FRAME_TIME.lock().unwrap_or_else(|e| e.into_inner());
     *ft = elapsed as u32;
 }
 
@@ -864,7 +864,7 @@ pub fn sys_unload_game() {
     // In the Rust port, the game module is linked statically (myq2_game crate),
     // so there is no dynamic library to free. This toggles the loaded flag
     // for API compatibility with code that checks load/unload sequencing.
-    let mut loaded = GAME_LIBRARY_LOADED.lock().unwrap();
+    let mut loaded = GAME_LIBRARY_LOADED.lock().unwrap_or_else(|e| e.into_inner());
     if !*loaded {
         // Com_Error(ERR_FATAL, "FreeLibrary failed for game library");
         panic!("FreeLibrary failed for game library");
@@ -881,7 +881,7 @@ pub fn sys_unload_game() {
 /// module is compiled directly, so this returns a reference to the statically
 /// linked game API.
 pub fn sys_get_game_api() -> Option<()> {
-    let mut loaded = GAME_LIBRARY_LOADED.lock().unwrap();
+    let mut loaded = GAME_LIBRARY_LOADED.lock().unwrap_or_else(|e| e.into_inner());
     if *loaded {
         // Com_Error(ERR_FATAL, "Sys_GetGameAPI without Sys_UnloadGame");
         panic!("Sys_GetGameAPI without Sys_UnloadGame");
@@ -910,7 +910,7 @@ pub fn sys_get_game_api() -> Option<()> {
 ///
 /// Original: `void ParseCommandLine(LPSTR lpCmdLine)`
 pub fn parse_command_line(cmd_line: &str) {
-    let mut args = CMD_ARGS.lock().unwrap();
+    let mut args = CMD_ARGS.lock().unwrap_or_else(|e| e.into_inner());
     args.clear();
     args.push("exe".to_string());
 
@@ -977,7 +977,7 @@ mod tests {
     #[test]
     fn test_parse_empty_command_line() {
         parse_command_line("");
-        let args = CMD_ARGS.lock().unwrap();
+        let args = CMD_ARGS.lock().unwrap_or_else(|e| e.into_inner());
         // Should always have at least the "exe" placeholder
         assert_eq!(args.len(), 1);
         assert_eq!(args[0], "exe");
@@ -986,7 +986,7 @@ mod tests {
     #[test]
     fn test_parse_single_arg() {
         parse_command_line("+map q2dm1");
-        let args = CMD_ARGS.lock().unwrap();
+        let args = CMD_ARGS.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(args.len(), 3);
         assert_eq!(args[0], "exe");
         assert_eq!(args[1], "+map");
@@ -996,7 +996,7 @@ mod tests {
     #[test]
     fn test_parse_multiple_args() {
         parse_command_line("+set dedicated 1 +map q2dm1");
-        let args = CMD_ARGS.lock().unwrap();
+        let args = CMD_ARGS.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(args.len(), 6);
         assert_eq!(args[0], "exe");
         assert_eq!(args[1], "+set");
@@ -1009,7 +1009,7 @@ mod tests {
     #[test]
     fn test_parse_leading_trailing_whitespace() {
         parse_command_line("   hello   world   ");
-        let args = CMD_ARGS.lock().unwrap();
+        let args = CMD_ARGS.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(args.len(), 3);
         assert_eq!(args[0], "exe");
         assert_eq!(args[1], "hello");
@@ -1019,7 +1019,7 @@ mod tests {
     #[test]
     fn test_parse_whitespace_only() {
         parse_command_line("     ");
-        let args = CMD_ARGS.lock().unwrap();
+        let args = CMD_ARGS.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(args.len(), 1);
         assert_eq!(args[0], "exe");
     }
@@ -1028,7 +1028,7 @@ mod tests {
     fn test_parse_replaces_previous() {
         parse_command_line("first");
         parse_command_line("second third");
-        let args = CMD_ARGS.lock().unwrap();
+        let args = CMD_ARGS.lock().unwrap_or_else(|e| e.into_inner());
         // The second call should replace the first
         assert_eq!(args.len(), 3);
         assert_eq!(args[0], "exe");
@@ -1205,7 +1205,7 @@ mod tests {
     // Game library loaded flag (initial state)
     //
     // Note: sys_get_game_api and sys_unload_game use a shared global
-    // Mutex (GAME_LIBRARY_LOADED) and call .lock().unwrap(). Panicking
+    // Mutex (GAME_LIBRARY_LOADED) and call .lock().unwrap_or_else(|e| e.into_inner()). Panicking
     // while holding the lock poisons it for other tests running in
     // parallel. We verify the initial state only to avoid poisoning.
     // -------------------------------------------------------
@@ -1213,7 +1213,7 @@ mod tests {
     #[test]
     fn test_game_library_initially_not_loaded() {
         // GAME_LIBRARY_LOADED starts as false
-        let loaded = GAME_LIBRARY_LOADED.lock().unwrap();
+        let loaded = GAME_LIBRARY_LOADED.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!*loaded, "Game library should not be loaded at initialization");
     }
 

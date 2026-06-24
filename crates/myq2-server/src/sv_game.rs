@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 // ============================================================
-// GameModule — supports both static Rust game and dynamic DLL
+// GameModule â€” supports both static Rust game and dynamic DLL
 // ============================================================
 
 /// The game module can be either statically linked (Rust game)
@@ -334,7 +334,7 @@ impl GameModule {
 }
 
 // ============================================================
-// Global game context — holds the game module's state.
+// Global game context â€” holds the game module's state.
 //
 // In C, the game DLL maintained its own globals. Here we hold
 // a g_spawn::GameContext in a global Mutex so that the plain fn
@@ -344,7 +344,7 @@ impl GameModule {
 static GAME_CONTEXT: Mutex<Option<myq2_game::g_local::GameContext>> = Mutex::new(None);
 
 // ============================================================
-// Game context raw pointer — for engine functions during game execution.
+// Game context raw pointer â€” for engine functions during game execution.
 //
 // In original C Q2, the game DLL and engine share a single edict array.
 // Engine functions (PF_setmodel, SV_LinkEdict) directly read/write the
@@ -384,7 +384,7 @@ pub fn with_game_context<F, R>(f: F) -> R
 where
     F: FnOnce(&mut myq2_game::g_local::GameContext) -> R,
 {
-    let mut guard = GAME_CONTEXT.lock().unwrap();
+    let mut guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
     let ctx = guard.as_mut().expect("Game context not initialized");
     // SAFETY: ctx is valid for the duration of this closure. Engine functions
     // called from within f() can access the game context via GAME_CTX_PTR.
@@ -407,7 +407,7 @@ where
 /// modelindex=255 directly in GAME_CONTEXT. Engine sets item modelindex via gi_setmodel
 /// on ge.edicts. Dispatch wrappers may clobber GAME_CONTEXT modelindex to 0.
 pub fn sync_edicts_to_server(ge: &mut GameExport) {
-    let guard = GAME_CONTEXT.lock().unwrap();
+    let guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref game_ctx) = *guard {
         ge.num_edicts = game_ctx.num_edicts;
 
@@ -436,8 +436,8 @@ pub fn sync_edicts_to_server(ge: &mut GameExport) {
             dst.s = src.s.clone();
 
             // Restore modelindex if GAME_CONTEXT value is 0 (clobbered by dispatch clone).
-            // Game code sets player modelindex=255 directly → GAME_CONTEXT has 255 → use it.
-            // Engine sets item modelindex via gi_setmodel → ge has N, GAME_CONTEXT has 0 → preserve ge.
+            // Game code sets player modelindex=255 directly â†’ GAME_CONTEXT has 255 â†’ use it.
+            // Engine sets item modelindex via gi_setmodel â†’ ge has N, GAME_CONTEXT has 0 â†’ preserve ge.
             if dst.s.modelindex == 0 && ge_modelindex != 0 {
                 dst.s.modelindex = ge_modelindex;
             }
@@ -487,7 +487,7 @@ pub fn sync_edicts_to_server(ge: &mut GameExport) {
 fn sync_to_global_game_ctx() {
     // Extract fields under GAME_CONTEXT lock, then release before writing to GLOBAL_GAME_CTX
     let fields = {
-        let guard = GAME_CONTEXT.lock().unwrap();
+        let guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|ctx| {
             // Clone only the fields that dispatch wrappers and entity_adapters read
             myq2_game::g_local::GameCtx {
@@ -541,7 +541,7 @@ pub use myq2_game::game::{
 pub use myq2_common::q_shared::MAX_ENT_CLUSTERS;
 
 // ============================================================
-// Edict — entity dictionary (server-side view)
+// Edict â€” entity dictionary (server-side view)
 //
 // This is the single canonical server-side Edict type, used by
 // sv_game, sv_world, sv_ents, game_ffi, and server_game_import.
@@ -624,7 +624,7 @@ impl Default for Edict {
 }
 
 // ============================================================
-// GClient — server-side view of client data
+// GClient â€” server-side view of client data
 // ============================================================
 
 #[derive(Default)]
@@ -635,7 +635,7 @@ pub struct GClient {
 
 
 // ============================================================
-// GameExport — functions exported by the game subsystem
+// GameExport â€” functions exported by the game subsystem
 // ============================================================
 
 #[derive(Default)]
@@ -768,7 +768,7 @@ impl GameExport {
 }
 
 // ============================================================
-// GameImport — functions provided by the engine to the game
+// GameImport â€” functions provided by the engine to the game
 // ============================================================
 
 /// The game import table, containing all engine callbacks the game DLL can call.
@@ -983,7 +983,7 @@ pub fn pf_configstring(ctx: &mut ServerContext, index: i32, val: &str) {
 }
 
 // ============================================================
-// PF_Write* — message writing helpers
+// PF_Write* â€” message writing helpers
 //
 // These all write to sv.multicast
 // ============================================================
@@ -1122,7 +1122,7 @@ pub fn sv_shutdown_game_progs(ctx: &mut ServerContext) {
         // Dynamic DLL or game_module-based shutdown
         game_module.shutdown();
     } else if let Some(ref ge) = ctx.ge {
-        // Static game stored in ctx.ge — call shutdown directly
+        // Static game stored in ctx.ge â€” call shutdown directly
         if let Some(shutdown_fn) = ge.shutdown {
             shutdown_fn();
         }
@@ -1134,7 +1134,7 @@ pub fn sv_shutdown_game_progs(ctx: &mut ServerContext) {
     clear_ffi_server_context();
     crate::server_game_import::clear_server_context();
 
-    // Sys_UnloadGame equivalent — drop the game module
+    // Sys_UnloadGame equivalent â€” drop the game module
     ctx.game_module = None;
 
     ctx.ge = None;
@@ -1318,7 +1318,7 @@ pub use myq2_common::common::{
 
 
 
-/// SV_ModelIndex — Look up or register a model name in the configstrings.
+/// SV_ModelIndex â€” Look up or register a model name in the configstrings.
 ///
 /// Searches the CS_MODELS configstring range for the given name.
 /// If not found and the server is loading, adds it. Returns the
@@ -1327,7 +1327,7 @@ pub fn sv_model_index(ctx: &mut ServerContext, name: &str) -> i32 {
     crate::sv_init::sv_model_index(ctx, name)
 }
 
-/// CM_InlineModel — Get the collision model for an inline BSP model (e.g., "*1", "*2").
+/// CM_InlineModel â€” Get the collision model for an inline BSP model (e.g., "*1", "*2").
 ///
 /// Inline models are brush entities embedded in the map (doors, platforms, etc).
 /// Returns the CModel with mins/maxs for the brush entity.
@@ -1335,7 +1335,7 @@ pub fn cm_inline_model(_ctx: &ServerContext, name: &str) -> CModel {
     myq2_common::cmodel::cm_inline_model(name)
 }
 
-/// SV_LinkEdict — Links an entity into the world spatial partitioning.
+/// SV_LinkEdict â€” Links an entity into the world spatial partitioning.
 ///
 /// Sets the absolute bounding box, computes PVS cluster membership,
 /// and inserts into the appropriate area node lists.
@@ -1409,7 +1409,7 @@ pub fn sv_link_edict(_ctx: &mut ServerContext, ent: &mut Edict) {
 }
 
 
-/// SV_StartSound — Starts a sound on an entity.
+/// SV_StartSound â€” Starts a sound on an entity.
 ///
 /// Each entity can have eight independent sound sources.
 /// If channel & 8, the sound is sent to everyone (no PHS check).
@@ -1523,7 +1523,7 @@ pub fn sv_start_sound(
     }
 }
 
-/// CM_ClusterPVS — Get the Potentially Visible Set for a cluster.
+/// CM_ClusterPVS â€” Get the Potentially Visible Set for a cluster.
 ///
 /// Returns a bit vector where each bit represents whether a cluster
 /// is potentially visible from the given cluster. Returns None if
@@ -1533,7 +1533,7 @@ pub fn cm_cluster_pvs(_ctx: &ServerContext, cluster: i32) -> Option<Vec<u8>> {
     if v.is_empty() { None } else { Some(v) }
 }
 
-/// CM_ClusterPHS — Get the Potentially Hearable Set for a cluster.
+/// CM_ClusterPHS â€” Get the Potentially Hearable Set for a cluster.
 ///
 /// Returns a bit vector where each bit represents whether a cluster
 /// is potentially hearable from the given cluster. Returns None if
@@ -1571,7 +1571,7 @@ fn load_game_module_static(ctx: &mut ServerContext) -> GameExport {
     game_ctx.maxclients = maxclients as f32;
 
     // Store globally
-    *GAME_CONTEXT.lock().unwrap() = Some(game_ctx);
+    *GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner()) = Some(game_ctx);
 
     // Build the GameExport with real callback functions
     let mut ge = GameExport::default();
@@ -1595,7 +1595,7 @@ fn load_game_module_static(ctx: &mut ServerContext) -> GameExport {
     ge.write_level = Some(game_cb_write_level);
     ge.read_level = Some(game_cb_read_level);
 
-    // Wire client callbacks — these use ent.s.number to get the edict index,
+    // Wire client callbacks â€” these use ent.s.number to get the edict index,
     // then dispatch to the game module via the global GAME_CONTEXT.
     ge.client_connect = Some(game_cb_client_connect);
     ge.client_begin = Some(game_cb_client_begin);
@@ -1608,7 +1608,7 @@ fn load_game_module_static(ctx: &mut ServerContext) -> GameExport {
 }
 
 // ============================================================
-// Game callback functions — plain fn pointers that operate
+// Game callback functions â€” plain fn pointers that operate
 // on the global GAME_CONTEXT.
 // ============================================================
 
@@ -1635,7 +1635,7 @@ fn game_cb_init() {
 
 fn game_cb_shutdown() {
     // Drop the game context
-    *GAME_CONTEXT.lock().unwrap() = None;
+    *GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 fn game_cb_spawn_entities(mapname: &str, entstring: &str, spawnpoint: &str) {
@@ -2250,7 +2250,7 @@ mod tests {
     #[test]
     fn test_pf_centerprintf_invalid_entity() {
         let mut ctx = make_test_server_context();
-        let ent = Edict::default(); // number 0 — out of range
+        let ent = Edict::default(); // number 0 â€” out of range
         // Should return early without modifying anything
         pf_centerprintf(&mut ctx, &ent, "test");
         assert_eq!(ctx.sv.multicast.cursize, 0);

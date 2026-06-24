@@ -2,12 +2,21 @@
 //!
 //! Batches BSP surfaces into VBOs grouped by texture.
 
+use std::collections::HashMap;
 use super::{VertexBuffer, IndexBuffer, VertexArray};
 
 /// Vertex format for BSP world surfaces.
 ///
-/// Extends the original glpoly_t VERTEXSIZE=7 layout with lightmap layer index
-/// for per-pixel lightmap sampling via GPU texture array.
+/// Includes normal and tangent vectors for Doom 3 style per-pixel normal-mapped lighting.
+/// Stride: 60 bytes.
+///
+/// Layout:
+///   position   [f32; 3]  offset  0  (12 bytes)
+///   tex_coord  [f32; 2]  offset 12  ( 8 bytes)
+///   lm_coord   [f32; 2]  offset 20  ( 8 bytes)
+///   lm_layer   f32       offset 28  ( 4 bytes)
+///   normal     [f32; 3]  offset 32  (12 bytes)
+///   tangent    [f32; 4]  offset 44  (16 bytes) — w = handedness (+1/-1)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BspVertex {
@@ -19,19 +28,25 @@ pub struct BspVertex {
     pub lm_coord: [f32; 2],
     /// Lightmap texture array layer index (-1.0 = no lightmap / full bright).
     pub lm_layer: f32,
+    /// Surface normal in world space (for per-pixel normal mapping).
+    pub normal: [f32; 3],
+    /// Surface tangent in world space; w = handedness (+1/-1) for bitangent reconstruction.
+    pub tangent: [f32; 4],
 }
 
 impl BspVertex {
     /// Size of vertex in bytes.
     pub const SIZE: usize = std::mem::size_of::<Self>();
 
-    /// Create a new BSP vertex with no lightmap (full bright).
+    /// Create a new BSP vertex with no lightmap (full bright), no normal/tangent.
     pub fn new(position: [f32; 3], tex_coord: [f32; 2], lm_coord: [f32; 2]) -> Self {
         Self {
             position,
             tex_coord,
             lm_coord,
             lm_layer: -1.0,
+            normal: [0.0, 0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         }
     }
 
@@ -42,7 +57,21 @@ impl BspVertex {
             tex_coord,
             lm_coord,
             lm_layer: layer,
+            normal: [0.0, 0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         }
+    }
+
+    /// Create a vertex with normal and tangent for Doom 3 style lighting.
+    pub fn with_tangent_frame(
+        position: [f32; 3],
+        tex_coord: [f32; 2],
+        lm_coord: [f32; 2],
+        layer: f32,
+        normal: [f32; 3],
+        tangent: [f32; 4],
+    ) -> Self {
+        Self { position, tex_coord, lm_coord, lm_layer: layer, normal, tangent }
     }
 }
 
@@ -52,6 +81,8 @@ pub const SURF_DRAWTURB: u32 = 0x10;
 pub const SURF_TRANS33: u32 = 0x20;
 /// Translucent surface flag (66% opacity).
 pub const SURF_TRANS66: u32 = 0x40;
+/// Flowing water/lava texture scroll flag.
+pub const SURF_FLOWING: u32 = 0x80;
 
 /// Per-surface draw information for PVS culling.
 #[derive(Clone, Debug)]
@@ -66,6 +97,8 @@ pub struct SurfaceDrawInfo {
     pub lightmap_id: u32,
     /// Surface flags (SURF_DRAWTURB, SURF_FLOWING, etc.).
     pub flags: u32,
+    /// BSP leaf cluster this surface belongs to (-1 = unclassified).
+    pub cluster: i32,
 }
 
 /// A batch of surfaces sharing the same texture.
@@ -98,6 +131,13 @@ pub struct BspGeometryManager {
     index_count: u32,
     /// Whether geometry has been built.
     initialized: bool,
+    /// CPU-side vertex positions (xyz only) for shadow volume generation.
+    pub cpu_positions: Vec<[f32; 3]>,
+    /// CPU-side sorted index buffer for shadow volume generation.
+    pub cpu_indices: Vec<u32>,
+    /// Per-cluster draw list: cluster → Vec<(first_index, index_count, texture_id)>.
+    /// Used by the D3 lit pass to restrict illumination to the light's own BSP cluster.
+    cluster_draws: HashMap<i32, Vec<(u32, u32, u32)>>,
 }
 
 impl BspGeometryManager {
@@ -112,6 +152,9 @@ impl BspGeometryManager {
             vertex_count: 0,
             index_count: 0,
             initialized: false,
+            cpu_positions: Vec::new(),
+            cpu_indices: Vec::new(),
+            cluster_draws: HashMap::new(),
         }
     }
 
@@ -152,6 +195,7 @@ impl BspGeometryManager {
                 texture_id: surf.texture_id,
                 lightmap_id: surf.lightmap_id,
                 flags: surf.flags,
+                cluster: surf.cluster,
             });
         }
 
@@ -159,8 +203,29 @@ impl BspGeometryManager {
         self.ibo.upload_u32(&sorted_indices, 0);
         self.index_count = sorted_indices.len() as u32;
 
+        // Store CPU-side positions for shadow volume generation (positions only, not full BspVertex)
+        self.cpu_positions = vertices.iter().map(|v| v.position).collect();
+        self.cpu_indices = sorted_indices.clone();
+
         // Store sorted surface info
         self.surfaces = sorted_surfaces;
+
+        // Build per-cluster draw list for D3 lit pass cluster culling.
+        // Maps cluster → opaque (non-alpha, non-turb) surface draw tuples.
+        let mut cluster_draws: HashMap<i32, Vec<(u32, u32, u32)>> = HashMap::new();
+        for surf in &self.surfaces {
+            if surf.flags & (SURF_TRANS33 | SURF_TRANS66 | SURF_DRAWTURB) != 0 {
+                continue;
+            }
+            if surf.cluster < 0 {
+                continue;
+            }
+            cluster_draws
+                .entry(surf.cluster)
+                .or_default()
+                .push((surf.first_index, surf.index_count, surf.texture_id));
+        }
+        self.cluster_draws = cluster_draws;
 
         // Build texture batches (now contiguous by texture)
         self.build_batches();
@@ -221,18 +286,24 @@ impl BspGeometryManager {
         self.batches = batches;
     }
 
-    /// Configure the VAO with vertex attributes.
+    /// Configure the VAO with vertex attributes (including normal and tangent).
     fn setup_vao(&mut self) {
         self.vao.bind();
         self.vbo.bind();
         self.ibo.bind();
 
-        // Position: location 0, vec3
+        // Position: location 0, vec3, offset 0
         self.vao.set_attribute_float(0, 3, BspVertex::SIZE as i32, 0);
-        // Tex coord: location 1, vec2
+        // Tex coord: location 1, vec2, offset 12
         self.vao.set_attribute_float(1, 2, BspVertex::SIZE as i32, 12);
-        // Lightmap coord: location 2, vec2
+        // Lightmap coord: location 2, vec2, offset 20
         self.vao.set_attribute_float(2, 2, BspVertex::SIZE as i32, 20);
+        // Lightmap layer: location 3, float, offset 28
+        self.vao.set_attribute_float(3, 1, BspVertex::SIZE as i32, 28);
+        // Normal: location 4, vec3, offset 32
+        self.vao.set_attribute_float(4, 3, BspVertex::SIZE as i32, 32);
+        // Tangent: location 5, vec4, offset 44
+        self.vao.set_attribute_float(5, 4, BspVertex::SIZE as i32, 44);
 
         VertexArray::unbind();
         VertexBuffer::unbind();
@@ -292,6 +363,18 @@ impl BspGeometryManager {
             .collect()
     }
 
+    /// Get opaque draw tuples for a specific BSP cluster (for D3 lit pass culling).
+    ///
+    /// Returns `(first_index, index_count, texture_id)` for every opaque surface
+    /// whose centroid is in `cluster`.  Returns an empty slice if the cluster is
+    /// unknown or -1.
+    pub fn surfaces_for_cluster(&self, cluster: i32) -> &[(u32, u32, u32)] {
+        if cluster < 0 {
+            return &[];
+        }
+        self.cluster_draws.get(&cluster).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
     /// Get all turbulent surfaces (water/lava/slime with SURF_DRAWTURB).
     pub fn turb_surfaces(&self) -> Vec<&SurfaceDrawInfo> {
         self.surfaces.iter()
@@ -303,9 +386,12 @@ impl BspGeometryManager {
     pub fn clear(&mut self) {
         self.surfaces.clear();
         self.batches.clear();
+        self.cluster_draws.clear();
         self.vertex_count = 0;
         self.index_count = 0;
         self.initialized = false;
+        self.cpu_positions.clear();
+        self.cpu_indices.clear();
     }
 }
 

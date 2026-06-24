@@ -585,7 +585,7 @@ pub static BROWSER: LazyLock<Mutex<ServerBrowser>> = LazyLock::new(|| Mutex::new
 
 /// Initialize the server browser.
 pub fn browser_init() {
-    let mut browser = BROWSER.lock().unwrap();
+    let mut browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     if let Err(e) = browser.init() {
         com_printf(&format!("Server browser init failed: {}\n", e));
     }
@@ -598,7 +598,7 @@ pub fn browser_init() {
 
 /// Refresh the server list (query masters and existing servers).
 pub fn browser_refresh() {
-    let mut browser = BROWSER.lock().unwrap();
+    let mut browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     browser.query_masters();
     browser.query_lan();
     browser.refresh_all();
@@ -606,19 +606,19 @@ pub fn browser_refresh() {
 
 /// Process incoming server responses (call periodically).
 pub fn browser_update() {
-    let mut browser = BROWSER.lock().unwrap();
+    let mut browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     browser.process_responses();
 }
 
 /// Add a server manually.
 pub fn browser_add_server(address: &str) {
-    let mut browser = BROWSER.lock().unwrap();
+    let mut browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     browser.add_manual(address);
 }
 
 /// Toggle favorite status for selected server.
 pub fn browser_toggle_favorite(address: &str) {
-    let mut browser = BROWSER.lock().unwrap();
+    let mut browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     if browser.favorites.contains(address) {
         browser.remove_favorite(address);
         com_printf(&format!("Removed {} from favorites.\n", address));
@@ -635,13 +635,13 @@ pub fn browser_toggle_favorite(address: &str) {
 
 /// Set filter options.
 pub fn browser_set_filter(filter: ServerFilter) {
-    let mut browser = BROWSER.lock().unwrap();
+    let mut browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     browser.filter = filter;
 }
 
 /// Set sort column.
 pub fn browser_set_sort(column: SortColumn, ascending: bool) {
-    let mut browser = BROWSER.lock().unwrap();
+    let mut browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     browser.sort_column = column;
     browser.sort_ascending = ascending;
     browser.sort();
@@ -649,7 +649,7 @@ pub fn browser_set_sort(column: SortColumn, ascending: bool) {
 
 /// Print browser info.
 pub fn cmd_browser_info() {
-    let browser = BROWSER.lock().unwrap();
+    let browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     com_printf(&format!(
         "Server Browser Info:\n\
          Total servers: {}\n\
@@ -667,7 +667,7 @@ pub fn cmd_browser_info() {
 
 /// Print server list.
 pub fn cmd_serverlist() {
-    let browser = BROWSER.lock().unwrap();
+    let browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     let filtered = browser.get_filtered_servers();
 
     if filtered.is_empty() {
@@ -695,7 +695,7 @@ pub fn cmd_serverlist() {
 
 /// Clear server list.
 pub fn cmd_browser_clear() {
-    let mut browser = BROWSER.lock().unwrap();
+    let mut browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     browser.clear();
     com_printf("Server list cleared.\n");
 }

@@ -16,13 +16,13 @@ pub fn with_sv_world_ctx<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut SvWorldContext) -> R,
 {
-    let mut guard = SV_WORLD_CTX.lock().unwrap();
+    let mut guard = SV_WORLD_CTX.lock().unwrap_or_else(|e| e.into_inner());
     guard.as_mut().map(f)
 }
 
 /// Initialize the global world context.
 pub fn init_sv_world_ctx() {
-    *SV_WORLD_CTX.lock().unwrap() = Some(SvWorldContext::new());
+    *SV_WORLD_CTX.lock().unwrap_or_else(|e| e.into_inner()) = Some(SvWorldContext::new());
 }
 
 // ===============================================================================
@@ -69,7 +69,7 @@ impl Default for AreaNode {
 use crate::server::ServerState;
 
 // ============================================================
-// MoveClip — internal trace structure
+// MoveClip â€” internal trace structure
 // ============================================================
 
 struct MoveClip {
@@ -166,7 +166,7 @@ pub trait CollisionModel: Sync {
 }
 
 // ============================================================
-// SvWorldContext — holds all former C globals
+// SvWorldContext â€” holds all former C globals
 // ============================================================
 
 pub struct SvWorldContext {

@@ -1,4 +1,4 @@
-// platform.rs — Platform-layer dispatch for client subsystems
+// platform.rs â€” Platform-layer dispatch for client subsystems
 //
 // The client crate cannot depend on myq2-sys (that would be circular),
 // so we define callback function pointers here that myq2-sys registers
@@ -89,7 +89,7 @@ fn dispatch() -> &'static Mutex<ClientPlatformDispatch> {
 
 /// Register all client platform callbacks at once.
 pub fn client_platform_register(d: ClientPlatformDispatch) {
-    *dispatch().lock().unwrap() = d;
+    *dispatch().lock().unwrap_or_else(|e| e.into_inner()) = d;
 }
 
 // ============================================================
@@ -97,62 +97,62 @@ pub fn client_platform_register(d: ClientPlatformDispatch) {
 // ============================================================
 
 pub fn vid_init() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.vid_init { f(); }
 }
 
 pub fn vid_shutdown() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.vid_shutdown { f(); }
 }
 
 pub fn vid_check_changes() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.vid_check_changes { f(); }
 }
 
 pub fn r_set_palette(palette: Option<&[u8]>) {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.r_set_palette { f(palette); }
 }
 
 pub fn in_init() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.in_init { f(); }
 }
 
 pub fn in_shutdown() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.in_shutdown { f(); }
 }
 
 pub fn in_commands() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.in_commands { f(); }
 }
 
 pub fn in_frame() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.in_frame { f(); }
 }
 
 pub fn in_move(cmd: &mut myq2_common::q_shared::UserCmd, viewangles: &mut myq2_common::q_shared::Vec3, in_strafe_state: i32) {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.in_move { f(cmd, viewangles, in_strafe_state); }
 }
 
 pub fn sys_send_key_events() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.sys_send_key_events { f(); }
 }
 
 pub fn sys_app_activate() {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.sys_app_activate { f(); }
 }
 
 pub fn net_config(multiplayer: bool) {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.net_config {
         f(multiplayer);
     } else {
@@ -162,16 +162,16 @@ pub fn net_config(multiplayer: bool) {
 }
 
 pub fn sv_shutdown(msg: &str, reconnect: bool) {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.sv_shutdown { f(msg, reconnect); }
 }
 
 pub fn sv_start_map(mapname: &str) {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.sv_start_map { f(mapname); }
 }
 
 pub fn con_print(text: &str) {
-    let d = dispatch().lock().unwrap();
+    let d = dispatch().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref f) = d.con_print { f(text); }
 }

@@ -1033,7 +1033,7 @@ impl PostProcessor {
                     enable_polyblend: if enable_polyblend { 1 } else { 0 },
                     gamma,
                     enable_gamma: if enable_gamma { 1 } else { 0 },
-                    _pad: 0,
+                    ..Default::default()
                 };
 
                 // SAFETY: PostProcessUniforms is #[repr(C)] with no padding holes,

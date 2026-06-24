@@ -159,8 +159,8 @@ pub fn r_init_particle_texture() {
 // JPEG quality controlled by gl_screenshot_quality cvar (0-100)
 // ============================================================
 pub fn vk_screen_shot_f() {
-    // SAFETY: Accesses vk_local stubs and renderer globals
-    unsafe {
+    // Main-thread-only access to vk_local stubs and renderer globals.
+    {
         let globals = rg();
         use std::fs;
         use std::path::Path;
@@ -394,8 +394,8 @@ pub fn vk_set_default_state() {
 // vk_update_swap_interval
 // ============================================================
 pub fn vk_update_swap_interval() {
-    // SAFETY: Accesses renderer globals
-    unsafe {
+    // Main-thread-only renderer-globals access.
+    {
         if rcvars().vk_swapinterval.is_modified() {
             rcvars().vk_swapinterval.clear_modified();
 

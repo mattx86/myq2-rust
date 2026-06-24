@@ -154,7 +154,10 @@ impl WavParser {
 
         if info.samples != 0 {
             if samples < info.samples {
-                panic!("Sound {} has a bad loop length", name);
+                // Malformed WAV: loop extends past the sample data. Clamp instead
+                // of crashing so the sound still loads (just without the bad loop).
+                com_printf(&format!("Sound {} has a bad loop length\n", name));
+                info.samples = samples;
             }
         } else {
             info.samples = samples;
