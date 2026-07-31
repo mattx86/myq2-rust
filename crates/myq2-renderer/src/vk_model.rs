@@ -11,7 +11,7 @@ use crate::vk_rmain::vid_printf;
 use myq2_common::q_shared::{
     CPlane, Vec3, dot_product, vector_length, little_float,
     CONTENTS_WATER, CONTENTS_SLIME, CONTENTS_LAVA,
-    SURF_SKY, SURF_TRANS33, SURF_TRANS66, SURF_FLOWING, SURF_WARP,
+    SURF_SKY, SURF_TRANS33, SURF_TRANS66, SURF_FLOWING, SURF_WARP, SURF_LIGHT,
     MAX_QPATH, PRINT_ALL, ERR_DROP,
 };
 use myq2_common::common::com_error;
@@ -779,20 +779,30 @@ unsafe fn mod_load_faces(state: &mut ModelState, l: *const Lump) {
 
         if (*(*outp).texinfo).flags & SURF_WARP != 0 {
             (*outp).flags |= SURF_DRAWTURB;
-            for i in 0..2 {
-                (*outp).extents[i] = 16384;
-                (*outp).texturemins[i] = -8192;
-            }
-            vk_subdivide_surface(outp); // cut up polygon for warps
+            // NOTE: we intentionally do NOT clobber extents/texturemins to the
+            // classic 16384/-8192 warp values. Keeping the real surface extents
+            // lets vk_create_surface_lightmap build a normal-sized lightmap for the
+            // liquid so it is lit like its surroundings; the warp texture-coordinate
+            // turbulence is computed from texinfo and is independent of extents.
         }
 
-        // create lightmaps and polygons
-        if (*(*outp).texinfo).flags & (SURF_SKY | SURF_TRANS33 | SURF_TRANS66 | SURF_WARP) == 0 {
+        // create lightmaps and polygons. Liquids (SURF_WARP) are included now so they
+        // receive a lightmap and are lit like their surroundings — even translucent
+        // liquids (water is commonly SURF_WARP | SURF_TRANS66). Skip only sky and
+        // NON-warp translucent surfaces (glass, force fields). This must run BEFORE
+        // vk_subdivide_surface so the warp polygon can read the assigned light_s/light_t.
+        let ti_flags = (*(*outp).texinfo).flags;
+        let is_warp = ti_flags & SURF_WARP != 0;
+        let is_trans = ti_flags & (SURF_TRANS33 | SURF_TRANS66) != 0;
+        let skip_lightmap = (ti_flags & SURF_SKY != 0) || (is_trans && !is_warp);
+        if !skip_lightmap {
             vk_create_surface_lightmap(outp);
             vk_create_surface_stainmap(outp);
         }
 
-        if (*(*outp).texinfo).flags & SURF_WARP == 0 {
+        if (*(*outp).texinfo).flags & SURF_WARP != 0 {
+            vk_subdivide_surface(outp); // cut up polygon for warps (also sets lm coords)
+        } else {
             vk_build_polygon_from_surface(outp);
         }
 
@@ -800,7 +810,107 @@ unsafe fn mod_load_faces(state: &mut ModelState, l: *const Lump) {
         outp = outp.add(1);
     }
 
+    // Compute one flat light level per contiguous water body so liquids are lit as a
+    // whole instead of per-BSP-face (the map compiler slices a body into many faces).
+    group_water_bodies(out, count);
+
     vk_end_building_lightmaps();
+}
+
+/// Group liquid (SURF_WARP) faces into contiguous bodies (same plane + texture) and
+/// assign each face a single flat light colour: the average of whichever group —
+/// dark or bright texels — dominates across the WHOLE body. This removes the
+/// per-face "slicing" look from water/lava/slime lighting. Stores the result in
+/// `MSurface::water_body_light` (0..1), read later by the water draw path.
+///
+/// # Safety
+/// `surfaces` must point to `count` valid MSurface entries with their texinfo, plane,
+/// extents and samples already loaded.
+unsafe fn group_water_bodies(surfaces: *mut MSurface, count: usize) {
+    use std::collections::HashMap;
+
+    // Bucket water faces by their plane (quantised normal + distance) and texture. A
+    // liquid surface is a flat plane, so faces sharing a plane+texture are the body.
+    let mut groups: HashMap<(i32, i32, i32, i32, usize), Vec<usize>> = HashMap::new();
+    for i in 0..count {
+        let surf = &mut *surfaces.add(i);
+        if surf.texinfo.is_null() || (*surf.texinfo).flags & SURF_WARP == 0 {
+            continue;
+        }
+        // default for liquids until/unless a body average is computed below
+        surf.water_body_light = [-1.0, -1.0, -1.0];
+        if surf.samples.is_null() || surf.plane.is_null() {
+            continue;
+        }
+        let n = (*surf.plane).normal;
+        let d = (*surf.plane).dist;
+        let key = (
+            (n[0] * 128.0).round() as i32,
+            (n[1] * 128.0).round() as i32,
+            (n[2] * 128.0).round() as i32,
+            (d * 8.0).round() as i32,
+            surf.texinfo as usize,
+        );
+        groups.entry(key).or_default().push(i);
+    }
+
+    for faces in groups.values() {
+        // Pass 1: luminance range across the entire body's style-0 lightmap texels.
+        let mut min_l = f32::MAX;
+        let mut max_l = f32::MIN;
+        for &fi in faces {
+            let surf = &*surfaces.add(fi);
+            let smax = (surf.extents[0] as i32 >> 4) + 1;
+            let tmax = (surf.extents[1] as i32 >> 4) + 1;
+            let sz = (smax * tmax).max(0) as usize;
+            for t in 0..sz {
+                let r = *surf.samples.add(t * 3) as f32;
+                let g = *surf.samples.add(t * 3 + 1) as f32;
+                let b = *surf.samples.add(t * 3 + 2) as f32;
+                let l = r * 0.299 + g * 0.587 + b * 0.114;
+                if l < min_l { min_l = l; }
+                if l > max_l { max_l = l; }
+            }
+        }
+        let threshold = (min_l + max_l) * 0.5;
+
+        // Pass 2: average only the dominant (dark or bright) group over the whole body.
+        let mut dark = [0.0f32; 3];
+        let mut dn = 0u32;
+        let mut bright = [0.0f32; 3];
+        let mut bn = 0u32;
+        for &fi in faces {
+            let surf = &*surfaces.add(fi);
+            let smax = (surf.extents[0] as i32 >> 4) + 1;
+            let tmax = (surf.extents[1] as i32 >> 4) + 1;
+            let sz = (smax * tmax).max(0) as usize;
+            for t in 0..sz {
+                let r = *surf.samples.add(t * 3) as f32;
+                let g = *surf.samples.add(t * 3 + 1) as f32;
+                let b = *surf.samples.add(t * 3 + 2) as f32;
+                if r * 0.299 + g * 0.587 + b * 0.114 < threshold {
+                    dark[0] += r; dark[1] += g; dark[2] += b; dn += 1;
+                } else {
+                    bright[0] += r; bright[1] += g; bright[2] += b; bn += 1;
+                }
+            }
+        }
+
+        let avg = if dn >= bn && dn > 0 {
+            let n = dn as f32;
+            [dark[0] / n, dark[1] / n, dark[2] / n]
+        } else if bn > 0 {
+            let n = bn as f32;
+            [bright[0] / n, bright[1] / n, bright[2] / n]
+        } else {
+            [255.0, 255.0, 255.0]
+        };
+        // Normalise to the 0..1 range the world lightmap shader uses (raw / 255).
+        let col = [avg[0] / 255.0, avg[1] / 255.0, avg[2] / 255.0];
+        for &fi in faces {
+            (*surfaces.add(fi)).water_body_light = col;
+        }
+    }
 }
 
 /// Recursively set parent pointers for BSP nodes.
@@ -1304,6 +1414,10 @@ unsafe fn build_modern_bsp_geometry() {
 
     let model = &*rfs().r_worldmodel;
     let num_surfaces = model.numsurfaces;
+    // Surfaces [0..world_surface_count) belong to the static world; the rest
+    // belong to inline submodels (func_plat/door/etc.) and must NOT be drawn in
+    // the world pass (they are drawn as moving brush-model entities instead).
+    let world_surface_count = model.nummodelsurfaces;
     let surfaces_ptr = model.surfaces;
     if surfaces_ptr.is_null() || num_surfaces <= 0 {
         return;
@@ -1344,6 +1458,7 @@ unsafe fn build_modern_bsp_geometry() {
             if ti_flags & SURF_TRANS33 != 0 { flags |= 0x20; } // bsp.rs SURF_TRANS33
             if ti_flags & SURF_TRANS66 != 0 { flags |= 0x40; } // bsp.rs SURF_TRANS66
             if ti_flags & SURF_FLOWING != 0 { flags |= 0x80; } // bsp.rs SURF_FLOWING
+            if ti_flags & SURF_LIGHT != 0 { flags |= 0x100; }  // bsp.rs SURF_LIGHT (emissive)
         }
 
         // Walk the GlPoly chain for this surface
@@ -1358,11 +1473,14 @@ unsafe fn build_modern_bsp_geometry() {
             let base_vertex = vertices.len() as u32;
 
             // Extract vertices from the GlPoly with lightmap layer index
-            let has_lightmap = surface.flags & (SURF_DRAWSKY | SURF_DRAWTURB) as i32 == 0;
+            // Water (SURF_DRAWTURB) now also carries a lightmap so liquids are lit
+            // like their surroundings instead of rendering full-bright. Only sky has
+            // no lightmap.
+            let has_lightmap = surface.flags & SURF_DRAWSKY as i32 == 0;
             let lm_layer = if has_lightmap {
                 surface.lightmaptexturenum as f32
             } else {
-                -1.0 // No lightmap (sky/water) — shader uses full bright
+                -1.0 // No lightmap (sky) — shader uses full bright
             };
 
             // Compute surface normal from the BSP plane (negate for SURF_PLANEBACK).
@@ -1471,6 +1589,14 @@ unsafe fn build_modern_bsp_geometry() {
                 lightmap_id,
                 flags,
                 cluster: surface_cluster,
+                orig_index: i as u32,
+                is_inline: (i as i32) >= world_surface_count,
+                // Per-body flat liquid light computed in group_water_bodies().
+                flat_light: surface.water_body_light,
+                // Overwritten with real values in BspGeometryManager::build().
+                plane_z: 0.0,
+                is_horizontal: false,
+                centroid: [0.0; 3],
             });
 
             poly = (*poly).next;

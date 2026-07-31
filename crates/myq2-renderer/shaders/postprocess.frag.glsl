@@ -16,7 +16,8 @@ layout(push_constant) uniform PushConstants {
     float u_ShadowLift;        // 4 bytes
     int   u_LutEnabled;        // 4 bytes
     float u_LutIntensity;      // 4 bytes
-} pc;                          // 56 bytes total
+    float u_BloomIntensity;    // 4 bytes — 0 = off
+} pc;                          // 60 bytes total
 
 layout(location = 0) out vec4 FragColor;
 
@@ -42,6 +43,39 @@ void main() {
         cC = mix(cC, (cN + cS + cE + cW) * 0.25, blend);
     }
     vec4 color = vec4(cC, 1.0);
+
+    // Bloom — single-pass HDR glow folded into the composite.
+    // The scene FBO is float16 HDR, so emissive light textures and the sky are boosted well
+    // above 1.0 by the world/sky shaders. We gather neighbours, keep only the part above the
+    // HDR threshold, blur it radially, and add a soft glow BEFORE ACES so the highlight reads
+    // as light spilling out of the fixture rather than a flat bright texel. (The standalone
+    // multi-pass bloom in PostProcessor is dead code; this is the live path.)
+    if (pc.u_BloomIntensity > 0.0) {
+        const float threshold = 1.0;
+        vec3  glow = max(cC - threshold, vec3(0.0));
+        float wsum = 1.0;
+        // Dense, ROTATED rings: 6 rings × 12 taps. Rotating each ring decorrelates the sample
+        // directions so a single bright texel spreads into a smooth disc instead of a sparse
+        // starburst of discrete ghost dots (the "pixelated" look). Radius is modest so the
+        // taps stay dense enough to overlap.
+        const int   RINGS = 6;
+        const int   TAPS  = 12;
+        const float DA    = 6.2831853 / float(TAPS);
+        for (int ring = 1; ring <= RINGS; ++ring) {
+            float radius = float(ring) * 3.5;          // scene texels
+            float w      = exp(-float(ring * ring) / 14.0);
+            float rot    = float(ring) * 0.5;          // decorrelate rings
+            for (int k = 0; k < TAPS; ++k) {
+                float ang = rot + float(k) * DA;
+                vec2  off = vec2(cos(ang), sin(ang)) * radius * px;
+                glow += max(texture(u_SceneTexture, v_TexCoord + off).rgb - threshold, vec3(0.0)) * w;
+                wsum += w;
+            }
+        }
+        glow /= wsum;
+        // r_bloom_intensity (default 0.3) scaled so the averaged glow reads without blowing out.
+        color.rgb += glow * pc.u_BloomIntensity * 3.0;
+    }
 
     // Polyblend overlay (damage flash, underwater tint)
     if ((pc.u_EnablePolyBlend != 0) && pc.u_PolyBlend.a > 0.0) {

@@ -216,6 +216,7 @@ pub fn scr_update_screen() {
             (*CL_PTR).predicted_origin = cl_mutex.predicted_origin;
             (*CL_PTR).predicted_angles = cl_mutex.predicted_angles;
             (*CL_PTR).prediction_error = cl_mutex.prediction_error;
+            (*CL_PTR).predicted_groundentity = cl_mutex.predicted_groundentity;
             (*CL_PTR).predicted_step = cl_mutex.predicted_step;
             (*CL_PTR).predicted_step_time = cl_mutex.predicted_step_time;
             (*CL_PTR).lerpfrac = cl_mutex.lerpfrac;

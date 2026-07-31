@@ -20,12 +20,12 @@ const LIGHTMAP_BYTES: i32 = 4;
 
 /// Lightmap atlas dimensions. 16x the original Q2 value (128→2048) so each surface's
 /// lightmap data is bicubic-upscaled 16x, giving high-quality smooth shadow gradients.
-const BLOCK_WIDTH: i32 = 2048;
-const BLOCK_HEIGHT: i32 = 2048;
+pub const BLOCK_WIDTH: i32 = 2048;
+pub const BLOCK_HEIGHT: i32 = 2048;
 
 /// Upscale factor applied to each surface lightmap when building the atlas.
 /// 16 means each source texel expands to a 16×16 block with bicubic blending.
-const LM_UPSCALE: i32 = 16;
+pub const LM_UPSCALE: i32 = 16;
 
 const MAX_LIGHTMAPS: usize = 128;
 
@@ -130,6 +130,108 @@ pub fn parse_static_lights() {
     }
 
     *STATIC_LIGHTS.lock().unwrap_or_else(|e| e.into_inner()) = lights;
+}
+
+/// Turn emissive SURFACES into light sources: `SURF_LIGHT` textures (lamps, glowing panels)
+/// and the sky. They are appended to `STATIC_LIGHTS` so they emit through the D3 lit pass
+/// and cast real shadows via the same cubemap system as `light` entities — in dynamic (D3)
+/// mode this is what actually lights a room from its ceiling lights / sky opening.
+///
+/// Contiguous emitters are merged on a coarse grid (per the project's "treat connected
+/// surfaces as one piece" rule), so a multi-face light fixture or a sky opening becomes a
+/// single light rather than dozens — which also keeps the count within the shadow-light cap.
+/// After appending, `STATIC_LIGHTS` is sorted by intensity so the strongest emitters win the
+/// limited shadow-casting slots. Called once at world load, after `parse_static_lights`.
+pub fn parse_surface_lights() {
+    use std::collections::HashMap;
+    use crate::vk_model_types::{SURF_DRAWSKY, SURF_PLANEBACK, VERTEXSIZE};
+
+    /// Merge radius for connected emitter faces.
+    const GRID: f32 = 192.0;
+    /// Push the light this far off the surface into the room along its normal.
+    const OFFSET: f32 = 24.0;
+
+    struct Acc { c: [f64; 3], n: [f64; 3], count: u32 }
+
+    // SAFETY: the world model and its surface/polygon data are fully built by the time
+    // vk_end_building_lightmaps runs; pointers are valid for the level lifetime, main thread.
+    unsafe {
+        // Use loadmodel, not r_worldmodel: this runs DURING the world load (from
+        // vk_end_building_lightmaps), before r_worldmodel has been assigned.
+        let world = crate::vk_local::rfs().loadmodel;
+        if world.is_null() { return; }
+        let nsurf = (*world).numsurfaces;
+        let surfaces = (*world).surfaces;
+        if surfaces.is_null() || nsurf <= 0 { return; }
+
+        // Bucket emissive faces by coarse grid cell + kind (0 = light texture, 1 = sky).
+        let mut cells: HashMap<(i32, i32, i32, u8), Acc> = HashMap::new();
+
+        for i in 0..nsurf {
+            let surf = &*surfaces.offset(i as isize);
+            let ti = surf.texinfo;
+            let is_sky = surf.flags & SURF_DRAWSKY != 0;
+            let is_light = !ti.is_null()
+                && ((*ti).flags & myq2_common::q_shared::SURF_LIGHT) != 0;
+            if !is_sky && !is_light { continue; }
+            let kind: u8 = if is_sky { 1 } else { 0 };
+
+            let poly = surf.polys;
+            if poly.is_null() { continue; }
+            let nv = (*poly).numverts;
+            if nv <= 0 { continue; }
+            // verts is a flexible array (numverts × VERTEXSIZE floats); index by raw pointer.
+            let vptr = (*poly).verts.as_ptr() as *const f32;
+            let mut c = [0.0f32; 3];
+            for v in 0..nv as usize {
+                let base = vptr.add(v * VERTEXSIZE);
+                c[0] += *base; c[1] += *base.add(1); c[2] += *base.add(2);
+            }
+            let inv = 1.0 / nv as f32;
+            c = [c[0] * inv, c[1] * inv, c[2] * inv];
+
+            // Surface normal, flipped for SURF_PLANEBACK so it points into the room.
+            let mut n = if surf.plane.is_null() { [0.0, 0.0, 1.0] } else { (*surf.plane).normal };
+            if surf.flags & SURF_PLANEBACK != 0 { n = [-n[0], -n[1], -n[2]]; }
+
+            let key = (
+                (c[0] / GRID).floor() as i32,
+                (c[1] / GRID).floor() as i32,
+                (c[2] / GRID).floor() as i32,
+                kind,
+            );
+            let e = cells.entry(key).or_insert(Acc { c: [0.0; 3], n: [0.0; 3], count: 0 });
+            e.c[0] += c[0] as f64; e.c[1] += c[1] as f64; e.c[2] += c[2] as f64;
+            e.n[0] += n[0] as f64; e.n[1] += n[1] as f64; e.n[2] += n[2] as f64;
+            e.count += 1;
+        }
+
+        let mut lights = STATIC_LIGHTS.lock().unwrap_or_else(|e| e.into_inner());
+        for ((_, _, _, kind), e) in cells.iter() {
+            let inv = 1.0 / e.count as f64;
+            let mut origin = [
+                (e.c[0] * inv) as f32, (e.c[1] * inv) as f32, (e.c[2] * inv) as f32,
+            ];
+            let mut n = [
+                (e.n[0] * inv) as f32, (e.n[1] * inv) as f32, (e.n[2] * inv) as f32,
+            ];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if len > 1e-4 { n = [n[0] / len, n[1] / len, n[2] / len]; }
+            origin = [origin[0] + n[0] * OFFSET, origin[1] + n[1] * OFFSET, origin[2] + n[2] * OFFSET];
+
+            // Sky emits cool (skylight); light textures emit close to neutral white — a
+            // strong warm bias here is what tips many overlapping lights into a red cast.
+            let (color, intensity) = if *kind == 1 {
+                ([0.75, 0.85, 1.0], 400.0)
+            } else {
+                ([1.0, 0.97, 0.92], 300.0)
+            };
+            let leafnum = myq2_common::cmodel::cm_point_leafnum(&origin) as i32;
+            let cluster = myq2_common::cmodel::cm_leaf_cluster(leafnum as usize);
+            lights.push(StaticLight { origin, color, intensity, cluster });
+        }
+
+    }
 }
 
 // ============================================================
@@ -919,7 +1021,9 @@ pub unsafe fn vk_build_polygon_from_surface(fa: &mut MSurface) {
 pub unsafe fn vk_create_surface_lightmap(surf: &mut MSurface) {
     let mut ss = SURFACE_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
-    if surf.flags & (SURF_DRAWSKY | SURF_DRAWTURB) != 0 {
+    // Sky never has a lightmap. Warp/turb (water/lava/slime) DO get one now so
+    // liquids are lit like their surroundings instead of rendering full-bright.
+    if surf.flags & SURF_DRAWSKY != 0 {
         return;
     }
 
@@ -1243,6 +1347,16 @@ pub unsafe fn vk_end_building_lightmaps() {
     vk_enable_multitexture(false);
     drop(ss); // release lock before calling parse_static_lights
     parse_static_lights();
+    // Also turn emissive light textures and the sky into light sources.
+    parse_surface_lights();
+
+    // VXGI Phase 1: voxelize the static world once, now that surfaces/polys are built.
+    if crate::vk_rmain::rcvars().r_vxgi.fresh_value() != 0.0 {
+        // fresh_value(), NOT .value: .value is the registration snapshot (always the default 128),
+        // so a runtime `r_vxgi_res 256` + map reload was silently re-baking at 128 the whole time.
+        let res = crate::vk_rmain::rcvars().r_vxgi_res.fresh_value() as u32;
+        crate::modern::vxgi::voxelize_world(res);
+    }
 }
 
 // MAX_MAP_LEAFS imported from myq2_common::qfiles

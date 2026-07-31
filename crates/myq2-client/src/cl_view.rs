@@ -586,36 +586,6 @@ pub fn v_render_view(
         });
     }
 
-    // DEBUG: Log refdef values once to diagnose view issues
-    {
-        static VIEW_DEBUG: std::sync::Once = std::sync::Once::new();
-        VIEW_DEBUG.call_once(|| {
-            com_printf(&format!(
-                "v_render_view: refdef vieworg=({:.1},{:.1},{:.1}), viewangles=({:.1},{:.1},{:.1}), fov_x={:.1}, fov_y={:.1}\n",
-                cl.refdef.vieworg[0], cl.refdef.vieworg[1], cl.refdef.vieworg[2],
-                cl.refdef.viewangles[0], cl.refdef.viewangles[1], cl.refdef.viewangles[2],
-                cl.refdef.fov_x, cl.refdef.fov_y
-            ));
-            com_printf(&format!(
-                "v_render_view: frame.valid={}, ps.pmove.origin=({},{},{}), ps.viewoffset=({:.1},{:.1},{:.1}), ps.fov={:.1}\n",
-                cl.frame.valid,
-                cl.frame.playerstate.pmove.origin[0], cl.frame.playerstate.pmove.origin[1], cl.frame.playerstate.pmove.origin[2],
-                cl.frame.playerstate.viewoffset[0], cl.frame.playerstate.viewoffset[1], cl.frame.playerstate.viewoffset[2],
-                cl.frame.playerstate.fov
-            ));
-            com_printf(&format!(
-                "v_render_view: predicted_origin=({:.1},{:.1},{:.1}), predicted_angles=({:.1},{:.1},{:.1}), lerpfrac={:.3}\n",
-                cl.predicted_origin[0], cl.predicted_origin[1], cl.predicted_origin[2],
-                cl.predicted_angles[0], cl.predicted_angles[1], cl.predicted_angles[2],
-                cl.lerpfrac
-            ));
-            com_printf(&format!(
-                "v_render_view: refdef size={}x{}, num_entities={}, playernum={}\n",
-                cl.refdef.width, cl.refdef.height, cl.refdef.num_entities, cl.playernum
-            ));
-        });
-    }
-
     r_render_frame(&cl.refdef);
     if cvar_value_str("cl_stats") != 0.0 {
         com_printf(&format!(

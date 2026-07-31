@@ -856,6 +856,10 @@ pub fn sv_prep_world_frame(ctx: &mut ServerContext) {
             ge.clear_edict_event(i);
         }
     }
+    // Also clear events on the GAME edicts. Otherwise the next frame's
+    // game->server sync re-copies the stale event and it replays every frame
+    // (e.g. footsteps stuttering ~10/sec instead of firing once per step).
+    crate::sv_game::clear_game_edict_events();
 }
 
 // ============================================================
@@ -863,7 +867,6 @@ pub fn sv_prep_world_frame(ctx: &mut ServerContext) {
 // ============================================================
 
 pub fn sv_run_game_frame(ctx: &mut ServerContext) {
-    eprintln!("sv_run_game_frame called");
     let host_speeds = ctx.cvars.variable_value("host_speeds");
 
     if host_speeds != 0.0 {

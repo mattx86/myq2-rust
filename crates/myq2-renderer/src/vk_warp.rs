@@ -307,9 +307,16 @@ unsafe fn subdivide_polygon(warpface: *mut MSurface, numverts: usize, verts: &mu
     let mut total = [0.0f32; 3];
     let mut total_s: f32 = 0.0;
     let mut total_t: f32 = 0.0;
+    let mut total_ls: f32 = 0.0;
+    let mut total_lt: f32 = 0.0;
 
     let wf = &*warpface;
     let texinfo = &*wf.texinfo;
+
+    // Lightmap-coordinate parameters (must match vk_build_polygon_from_surface so
+    // liquids sample the same atlas the same way as normal world surfaces).
+    let texel_world: f32 = 16.0 / crate::vk_rsurf::LM_UPSCALE as f32;
+    let half_texel: f32 = texel_world * 0.5;
 
     for idx in 0..numverts {
         let v_off = idx * 3;
@@ -332,11 +339,40 @@ unsafe fn subdivide_polygon(warpface: *mut MSurface, numverts: usize, verts: &mu
         total = vector_add(&total, vert);
 
         glpoly_set_st(poly, (idx + 1) as i32, s, t);
+
+        // lightmap texture coordinates (same formula as world surfaces)
+        let mut ls = dot_product(
+            vert,
+            &[texinfo.vecs[0][0], texinfo.vecs[0][1], texinfo.vecs[0][2]],
+        ) + texinfo.vecs[0][3];
+        ls -= wf.texturemins[0] as f32;
+        ls += wf.light_s as f32 * texel_world;
+        ls += half_texel;
+        ls /= crate::vk_rsurf::BLOCK_WIDTH as f32 * texel_world;
+
+        let mut lt = dot_product(
+            vert,
+            &[texinfo.vecs[1][0], texinfo.vecs[1][1], texinfo.vecs[1][2]],
+        ) + texinfo.vecs[1][3];
+        lt -= wf.texturemins[1] as f32;
+        lt += wf.light_t as f32 * texel_world;
+        lt += half_texel;
+        lt /= crate::vk_rsurf::BLOCK_HEIGHT as f32 * texel_world;
+
+        total_ls += ls;
+        total_lt += lt;
+        glpoly_set_lm_st(poly, (idx + 1) as i32, ls, lt);
     }
 
     let center = vector_scale(&total, 1.0 / numverts as f32);
     glpoly_set_vert(poly, 0, &center);
     glpoly_set_st(poly, 0, total_s / numverts as f32, total_t / numverts as f32);
+    glpoly_set_lm_st(
+        poly,
+        0,
+        total_ls / numverts as f32,
+        total_lt / numverts as f32,
+    );
 
     // copy first vertex to last
     glpoly_copy_vert(poly, (numverts + 1) as i32, 1);

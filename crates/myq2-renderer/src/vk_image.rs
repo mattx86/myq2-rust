@@ -20,6 +20,28 @@ use std::sync::{OnceLock, Mutex};
 /// Initialized once in draw_get_palette(), then read-only.
 static D_8TO24TABLE: OnceLock<[u32; 256]> = OnceLock::new();
 
+/// VXGI: per-texnum average colour (albedo), filled at upload, read during voxelization.
+static TEXTURE_AVG: OnceLock<std::sync::Mutex<std::collections::HashMap<i32, [u8; 3]>>> = OnceLock::new();
+
+fn texture_avg_map() -> &'static std::sync::Mutex<std::collections::HashMap<i32, [u8; 3]>> {
+    TEXTURE_AVG.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Average colour (albedo, 0..255) of the texture with this `texnum`, or a neutral grey.
+pub fn texture_avg_color(texnum: i32) -> [u8; 3] {
+    texture_avg_map().lock().unwrap_or_else(|e| e.into_inner()).get(&texnum).copied().unwrap_or([150, 150, 150])
+}
+
+/// Whether a texnum has a recorded average colour (for diagnostics).
+pub fn texture_avg_has(texnum: i32) -> bool {
+    texture_avg_map().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&texnum)
+}
+
+/// Number of textures with recorded average colours.
+pub fn texture_avg_len() -> usize {
+    texture_avg_map().lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
 /// Get the 8-to-24 palette table.
 pub fn d_8to24table() -> &'static [u32; 256] {
     D_8TO24TABLE.get().expect("draw_get_palette() not called")
@@ -848,6 +870,30 @@ pub unsafe fn vk_load_pic(
         (*image).has_alpha = vk_upload8(&mut is, pic, width, height, mipmap, image);
     } else {
         (*image).has_alpha = vk_upload32(&mut is, pic as *const u32, width, height, mipmap, bits, image);
+    }
+
+    // VXGI: record this texture's average colour (albedo) for the voxel albedo volume.
+    {
+        let n = (width.max(0) * height.max(0)) as usize;
+        let (mut r, mut g, mut b, mut cnt) = (0u64, 0u64, 0u64, 0u64);
+        if bits == 8 {
+            let pal = d_8to24table();
+            for i in 0..n {
+                let idx = *pic.add(i) as usize;
+                if idx == 255 { continue; } // palette 255 = transparent
+                let c = pal[idx];
+                r += (c & 0xFF) as u64; g += ((c >> 8) & 0xFF) as u64; b += ((c >> 16) & 0xFF) as u64; cnt += 1;
+            }
+        } else {
+            let p32 = pic as *const u32;
+            for i in 0..n {
+                let c = *p32.add(i);
+                if ((c >> 24) & 0xFF) < 128 { continue; } // skip transparent texels
+                r += (c & 0xFF) as u64; g += ((c >> 8) & 0xFF) as u64; b += ((c >> 16) & 0xFF) as u64; cnt += 1;
+            }
+        }
+        let avg = if cnt > 0 { [(r / cnt) as u8, (g / cnt) as u8, (b / cnt) as u8] } else { [150, 150, 150] };
+        texture_avg_map().lock().unwrap_or_else(|e| e.into_inner()).insert((*image).texnum, avg);
     }
 
     (*image).upload_width = is.upload_width;

@@ -1245,7 +1245,11 @@ pub fn cl_add_packet_entities(
                     // Check if on ground (using pmove flags would be ideal, but we use velocity heuristic)
                     let is_on_ground = cent.velocity.velocity[2].abs() < 50.0;
 
-                    // Update footstep prediction with current position
+                    // Footstep prediction is ONLY for maintaining audio continuity
+                    // during packet loss. In normal play the server sends real
+                    // EV_FOOTSTEP events, so predicting here too would double up and
+                    // stutter. Keep the tracker updated either way, but only play a
+                    // predicted footstep while packets are actually being lost.
                     let should_play = if cl.packet_loss_frames > 0 && cent.velocity.valid {
                         // During packet loss, use velocity-based prediction
                         let time_since_update = cl.time - cent.velocity.last_update_time;
@@ -1256,16 +1260,18 @@ pub fn cl_add_packet_entities(
                             time_since_update,
                         )
                     } else {
-                        // Normal update - check if moved enough for a footstep
+                        // Normal play: just keep the position tracker current; the
+                        // server's EV_FOOTSTEP events are authoritative.
                         cl.smoothing.footstep_prediction.update_entity(
                             entity_num,
                             &ent.origin,
                             cl.time,
                             is_on_ground,
-                        )
+                        );
+                        false
                     };
 
-                    // Play predicted footstep sound
+                    // Play predicted footstep sound (packet-loss only)
                     if should_play && is_on_ground {
                         callbacks.cl_play_footstep(&ent.origin, s1.number);
                     }
@@ -1397,6 +1403,16 @@ pub fn cl_add_packet_entities(
                 callbacks.v_add_light(&ent.origin, 225.0, -1.0, -1.0, -1.0);
             }
 
+            // Add the player's own body as a SHADOW-ONLY caster. It carries RF_VIEWERMODEL,
+            // so the renderer does not draw it in the first-person view, but it is still fed
+            // into the shadow map — so you cast a shadow on the floor/lift you stand on.
+            // Zero pitch/roll: the body angles carry the view pitch, which would tilt the
+            // upright body in the shadow map and skew the cast shadow into/through the floor
+            // (worst when crouching and looking down). The standing body casts yaw-only.
+            let mut shadow_ent = ent;
+            shadow_ent.angles[0] = 0.0;
+            shadow_ent.angles[2] = 0.0;
+            callbacks.v_add_entity(&shadow_ent);
             continue;
         }
 
@@ -1857,40 +1873,24 @@ pub fn cl_add_view_weapon(
                 cl.smoothing.weapon_anim.update(ps.gunframe, current_time);
             }
 
-            // Use smoothed frames if enabled
-            if cl.smoothing.weapon_anim.enabled {
-                let (frame, oldframe, backlerp) = cl.smoothing.weapon_anim.get_smooth_frames();
-                gun.frame = frame;
-                gun.oldframe = oldframe;
-                gun.backlerp = backlerp;
+            // Always use the ORIGINAL interpolation (ps/ops gunframe). The weapon_anim
+            // smoothing system can extrapolate gunframe past the weapon's real animation;
+            // the renderer clamps that to the model's last frame, which is often a
+            // contorted mid-sequence pose — the "bent arm". Server frames are the truth.
+            gun.oldframe = ops.gunframe;
+            if gun.frame != gun.oldframe {
+                gun.backlerp = 1.0 - cl.lerpfrac;
             } else {
-                // Fallback to standard interpolation
-                gun.oldframe = ops.gunframe;
-                if gun.frame != gun.oldframe {
-                    gun.backlerp = 1.0 - cl.lerpfrac;
-                } else {
-                    gun.backlerp = 0.0;
-                }
+                gun.backlerp = 0.0;
             }
         }
     }
 
-    // Apply view-weapon positioning offset.
-    // The gun model is positioned at vieworg; without a forward push the barrel
-    // geometry may sit behind or at the near clip plane.  Apply forward + right + up
-    // offsets so the weapon renders correctly in the Vulkan viewport.
-    {
-        let mut fwd = [0.0f32; 3];
-        let mut right_vec = [0.0f32; 3];
-        let mut up_vec = [0.0f32; 3];
-        angle_vectors(&gun.angles, Some(&mut fwd), Some(&mut right_vec), Some(&mut up_vec));
-        let scaled_fwd   = vector_scale(&fwd,       14.0);
-        let scaled_right = vector_scale(&right_vec, -8.0);
-        let scaled_up    = vector_scale(&up_vec,    -5.0);
-        gun.origin = vector_add(&gun.origin, &scaled_fwd);
-        gun.origin = vector_add(&gun.origin, &scaled_right);
-        gun.origin = vector_add(&gun.origin, &scaled_up);
-    }
+    // No positional offset: the weapon view-models are authored to sit correctly at the
+    // view origin (original CL_AddViewWeapon adds none). The old +14 forward / -8 right /
+    // -5 up push was a workaround for the renderer ignoring RF_DEPTHHACK (the gun clipped
+    // the 4-unit near plane) — it displaced the arm and made the weapon look bent. The
+    // renderer now honours RF_DEPTHHACK (compressed depth range), matching the original.
 
     gun.flags = RF_MINLIGHT | RF_DEPTHHACK | RF_WEAPONMODEL;
     gun.oldorigin = vector_copy(&gun.origin); // don't lerp at all
@@ -1969,6 +1969,35 @@ pub fn cl_calc_view_values(
                     * (ps.pmove.origin[i] as f32 * 0.125 + ps.viewoffset[i]
                         - (ops.pmove.origin[i] as f32 * 0.125 + ops.viewoffset[i]));
         }
+    }
+
+    // If standing on a moving brush model (lift/door/train), the prediction tracks
+    // the mover's latest SNAPSHOT origin (which steps at the ~10Hz packet rate),
+    // but the mover is RENDERED at its smoothly-interpolated origin. Shift the view
+    // by the mover's interpolation delta (lerp_origin - snapshot origin) so the rider
+    // follows the same smooth motion the platform is drawn at — this cancels the
+    // snapshot stepping that otherwise makes riding a mover bounce. The delta is zero
+    // when the mover is at rest, so standing still is unaffected. Mirrors R1Q2/Q2Pro.
+    // Standing on a moving brush model (lift/door/train): the prediction snaps the
+    // player to the mover's latest SNAPSHOT position, which steps at the ~10Hz
+    // server rate (the platform only advances once per server frame). The player
+    // isn't driving this vertical motion — the platform is — so predicting it adds
+    // nothing and merely exposes those 10Hz steps as a bounce. Instead interpolate
+    // the vertical view from the server player-states (ops->ps) the same way the
+    // platform's own render is interpolated, so rider and platform glide together.
+    let ge = cl.predicted_groundentity;
+    if cl_predict_enabled
+        && (cl.frame.playerstate.pmove.pm_flags & PMF_NO_PREDICTION) == 0
+        && ge > 0
+        && (ge as usize) < ent_state.cl_entities.len()
+        && ent_state.cl_entities[ge as usize].current.solid == 31
+    {
+        let interp_z = ops.pmove.origin[2] as f32 * 0.125
+            + ops.viewoffset[2]
+            + lerp
+                * (ps.pmove.origin[2] as f32 * 0.125 + ps.viewoffset[2]
+                    - (ops.pmove.origin[2] as f32 * 0.125 + ops.viewoffset[2]));
+        cl.refdef.vieworg[2] = interp_z;
     }
 
     // if not running a demo or on a locked frame, add the local angle movement

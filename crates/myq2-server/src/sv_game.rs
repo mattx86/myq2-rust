@@ -395,6 +395,25 @@ where
     result
 }
 
+/// Clear transient entity events on the GAME edicts after the frame is sent.
+///
+/// Mirrors the original engine's `SV_PrepWorldFrame` ("events only last for a
+/// single message"). In the original, game and server shared one edict, so
+/// zeroing `ent->s.event` there was enough. This port keeps separate game and
+/// server edict arrays and re-syncs game->server every frame, so a stale event
+/// left on the GAME edict would be copied back onto the server edict and
+/// re-networked every frame — making a one-shot event (footstep, jump, etc.)
+/// replay continuously and stutter. This must run AFTER the frame is sent so the
+/// event is delivered exactly once.
+pub fn clear_game_edict_events() {
+    let mut guard = GAME_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref mut ctx) = *guard {
+        for ent in ctx.edicts.iter_mut() {
+            ent.s.event = 0;
+        }
+    }
+}
+
 /// Sync server-visible edict fields from the game context into the server's GameExport.edicts.
 /// Called after game code runs to propagate changes back to the server.
 ///
@@ -453,6 +472,30 @@ pub fn sync_edicts_to_server(ge: &mut GameExport) {
                 myq2_game::game::Solid::Bsp => Solid::Bsp,
             };
             dst.clipmask = src.clipmask;
+
+            // Pack the networked s.solid from the synced solid/mins/maxs (mirrors
+            // SV_LinkEdict). The game never sets s.solid, and `dst.s = src.s.clone()`
+            // above would leave it 0, which makes clients skip brush-model movers in
+            // prediction (player falls through trains/lifts/doors). Re-derive it here
+            // so every sent entity carries the correct solid encoding.
+            if dst.solid == Solid::Bbox
+                && (dst.svflags & myq2_game::game::SVF_DEADMONSTER) == 0
+            {
+                let mut i = (dst.maxs[0] / 8.0) as i32;
+                if i < 1 { i = 1; }
+                if i > 31 { i = 31; }
+                let mut j = ((-dst.mins[2]) / 8.0) as i32;
+                if j < 1 { j = 1; }
+                if j > 31 { j = 31; }
+                let mut k = ((dst.maxs[2] + 32.0) / 8.0) as i32;
+                if k < 1 { k = 1; }
+                if k > 63 { k = 63; }
+                dst.s.solid = (k << 10) | (j << 5) | i;
+            } else if dst.solid == Solid::Bsp {
+                dst.s.solid = 31;
+            } else {
+                dst.s.solid = 0;
+            }
 
             // Engine-only fields are NOT copied from GAME_CONTEXT.
             // They are set by linkentity directly on ge.edicts and must be preserved:
@@ -1188,6 +1231,8 @@ pub fn sv_init_game_progs_ex(ctx: &mut ServerContext, dll_path: Option<&str>) {
                 api_version,
                 if module.is_dynamic() { "dynamic" } else { "static" }
             ));
+            eprintln!("=== MYQ2 BUILD MARKER 2026-06-24-D : EXTERNAL game DLL loaded ({} mode) ===",
+                if module.is_dynamic() { "dynamic" } else { "static" });
 
             ctx.game_module = Some(module);
 
@@ -1199,6 +1244,7 @@ pub fn sv_init_game_progs_ex(ctx: &mut ServerContext, dll_path: Option<&str>) {
         None => {
             // Fall back to statically linked Rust game
             com_printf("Using statically linked Rust game module\n");
+            eprintln!("=== MYQ2 BUILD MARKER 2026-06-24-D : STATIC game module active ===");
 
             let ge = load_game_module_static(ctx);
 
@@ -1241,6 +1287,21 @@ pub fn sv_init_game_progs_ex(ctx: &mut ServerContext, dll_path: Option<&str>) {
 
 /// Try to load a game DLL from standard search paths
 fn try_load_game_dll(ctx: &mut ServerContext) -> Option<GameModule> {
+    // Prefer the built-in, statically-linked Rust game by default. The external
+    // C-ABI game DLL path (myq2-game-dll) is an incomplete skeleton — it keeps a
+    // SEPARATE, unsynced edict array from the game logic, the rich Rust `Edict`
+    // (String/Vec/Option fields) is not layout-compatible with the C `edict_t`,
+    // and the client callbacks (ClientBegin/Think/...) are stubs. Loading it makes
+    // entities read as zeroed (e.g. the player spawns at the origin, inside the
+    // floor). So only attempt to load an external DLL when the user explicitly
+    // opts in via `sv_gamedll 1`. Default (0) always uses the complete static game.
+    // Register the cvar (default "0") so it is visible/settable, then read it.
+    let _ = myq2_common::cvar::cvar_get("sv_gamedll", "0", 0);
+    if myq2_common::cvar::cvar_variable_value("sv_gamedll") == 0.0 {
+        com_dprintf("sv_gamedll 0: using built-in static game (external game DLL disabled)\n");
+        return None;
+    }
+
     // Get game directory from cvar (e.g., "baseq2", "ctf", etc.)
     let game = myq2_common::cvar::cvar_variable_string("game");
     let basedir = myq2_common::cvar::cvar_variable_string("basedir");
@@ -1649,7 +1710,6 @@ fn game_cb_spawn_entities(mapname: &str, entstring: &str, spawnpoint: &str) {
 }
 
 fn game_cb_run_frame() {
-    eprintln!("game_cb_run_frame called");
     // Sync to GLOBAL_GAME_CTX so dispatch wrappers have current game state
     sync_to_global_game_ctx();
     with_game_context(|ctx| {
@@ -1734,7 +1794,6 @@ fn game_cb_client_connect(ent: &mut Edict, userinfo: &str) -> bool {
 
 fn game_cb_client_begin(ent: &mut Edict) {
     let ent_idx = ent.s.number as usize;
-    eprintln!("game_cb_client_begin called for entity {}", ent_idx);
     with_game_context(|ctx| {
         myq2_game::p_client::client_begin(ctx, ent_idx);
     });
@@ -1768,7 +1827,6 @@ fn game_cb_client_command(ent: &mut Edict) {
 
 fn game_cb_client_think(ent: &mut Edict, cmd: &UserCmd) {
     let ent_idx = ent.s.number as usize;
-    eprintln!("game_cb_client_think called for entity {}", ent_idx);
     with_game_context(|ctx| {
         myq2_game::p_client::client_think(ctx, ent_idx, cmd);
     });

@@ -470,20 +470,17 @@ pub fn cl_predict_movement(
     cl.predicted_origin[1] = pm.s.origin[1] as f32 * 0.125;
     cl.predicted_origin[2] = pm.s.origin[2] as f32 * 0.125;
 
-    // === Moving platform/brush velocity prediction ===
-    // If standing on a mover (door, elevator, platform), add platform velocity
-    // to predicted position for smoother riding
-    if pm.groundentity > 0 && cl.smoothing.mover_prediction.enabled {
-        // Get time delta for velocity application (frametime is in seconds)
-        let delta_time = cls.frametime;
-        let platform_offset = cl.smoothing.mover_prediction
-            .get_platform_offset(pm.groundentity, delta_time);
+    // Remember what the player is standing on so the view can follow a moving
+    // brush model's *interpolated* position (see cl_calc_view_values).
+    cl.predicted_groundentity = pm.groundentity;
 
-        // Apply platform offset to predicted position
-        cl.predicted_origin[0] += platform_offset[0];
-        cl.predicted_origin[1] += platform_offset[1];
-        cl.predicted_origin[2] += platform_offset[2];
-    }
+    // NOTE: We deliberately do NOT add a "platform velocity" offset here. The
+    // prediction trace already clips the player against moving brush models
+    // (lifts/doors/trains) and keeps them planted on the surface, so the pmove
+    // result already tracks the server. An earlier experiment added the mover's
+    // velocity*frametime on top of that already-correct position, which injected
+    // a fluctuating error (growing with the mover's speed) and made riding movers
+    // visibly jitter. Original Q2 applies no such offset.
 
     cl.predicted_angles = pm.viewangles;
 }

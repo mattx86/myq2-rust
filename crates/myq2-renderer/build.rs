@@ -72,6 +72,16 @@ fn main() {
         "shadow_cube.frag.glsl",
         "world_lit.vert.glsl",
         "world_lit.frag.glsl",
+        // Projective (depth-based) dynamic shadows for entities/movers
+        "shadow_resolve.vert.glsl",
+        "shadow_resolve.frag.glsl",
+        "shadow_caster.frag.glsl",
+        "shadow_bsp.vert.glsl",
+        // VXGI voxel cone-traced GI
+        "vxgi_debug.frag.glsl",
+        "vxgi_gi.frag.glsl",
+        // Water ripple shimmer (caustic light on walls near water)
+        "water_shimmer.frag.glsl",
     ];
 
     // Ray tracing shaders (in rt/ subdirectory)

@@ -1,4 +1,4 @@
-// g_func.rs — Brush entity functions (doors, platforms, buttons, trains, rotating, etc.)
+// g_func.rs Ã¢â‚¬â€ Brush entity functions (doors, platforms, buttons, trains, rotating, etc.)
 // Converted from: myq2-original/game/g_func.c
 
 use crate::g_local::*;
@@ -55,6 +55,20 @@ fn acceleration_distance(target: f32, rate: f32) -> f32 {
 
 
 impl GameContext {
+    /// Equivalent of the original C `gi.setmodel` for brush entities.
+    ///
+    /// `gi_setmodel` (the engine import) is responsible for assigning the inline
+    /// brush model AND setting `ent->mins/maxs/modelindex` on the game edict â€” in
+    /// the DLL/dynamic path the engine writes them straight onto the shared edict
+    /// pointer (game_ffi::gi_setmodel), and in the static path the engine writes
+    /// them back via GAME_CTX_PTR (ServerGameImport::setmodel). The game module
+    /// must NOT derive the bounds itself: when loaded as a cdylib it has its own
+    /// empty copy of the collision-model globals, so `cm_inline_model` here would
+    /// return zero and clobber the correct bounds the engine just set.
+    fn set_brush_model(&mut self, ent: usize, name: &str) {
+        gi_setmodel(ent as i32, name);
+    }
+
     // =========================================================
     // Support routines for movement (changes in origin using velocity)
     // =========================================================
@@ -67,9 +81,7 @@ impl GameContext {
     }
 
     pub fn move_final(&mut self, ent: usize) {
-        eprintln!("move_final called for entity {}", ent);
         if self.edicts[ent].moveinfo.remaining_distance == 0.0 {
-            eprintln!("move_final: remaining_distance is 0, calling move_done for entity {}", ent);
             self.move_done(ent);
             return;
         }
@@ -80,13 +92,10 @@ impl GameContext {
 
         self.edicts[ent].think_fn = Some(crate::dispatch::THINK_FUNC_MOVE_DONE);
         self.edicts[ent].nextthink = self.level.time + FRAMETIME;
-        eprintln!("move_final: entity {} set nextthink to {:.3}, think_fn to MOVE_DONE, velocity={:.1?}", ent, self.edicts[ent].nextthink, self.edicts[ent].velocity);
     }
 
     pub fn move_begin(&mut self, ent: usize) {
-        eprintln!("move_begin called for entity {}", ent);
         if (self.edicts[ent].moveinfo.speed * FRAMETIME) >= self.edicts[ent].moveinfo.remaining_distance {
-            eprintln!("move_begin: moving directly to final for entity {}", ent);
             self.move_final(ent);
             return;
         }
@@ -99,11 +108,9 @@ impl GameContext {
         self.edicts[ent].moveinfo.remaining_distance -= frames * speed * FRAMETIME;
         self.edicts[ent].nextthink = self.level.time + frames * FRAMETIME;
         self.edicts[ent].think_fn = Some(crate::dispatch::THINK_FUNC_MOVE_FINAL);
-        eprintln!("move_begin: entity {} set nextthink to {:.3}, think_fn to MOVE_FINAL", ent, self.edicts[ent].nextthink);
     }
 
     pub fn move_calc(&mut self, ent: usize, dest: [f32; 3], endfunc: usize) {
-        eprintln!("move_calc called for entity {}, current_entity={}", ent, self.level.current_entity);
         vec3_clear(&mut self.edicts[ent].velocity);
         let origin = self.edicts[ent].s.origin;
         vec3_subtract(&dest, &origin, &mut self.edicts[ent].moveinfo.dir);
@@ -116,12 +123,9 @@ impl GameContext {
 
         if mi_speed == mi_accel && mi_speed == mi_decel {
             let is_current = self.level.current_entity == self.get_team_entity(ent);
-            eprintln!("move_calc: entity {} is_current={}, current_entity={}, team_entity={}", ent, is_current, self.level.current_entity, self.get_team_entity(ent));
             if is_current {
-                eprintln!("move_calc: calling move_begin immediately for entity {}", ent);
                 self.move_begin(ent);
             } else {
-                eprintln!("move_calc: scheduling move_begin for next frame for entity {}", ent);
                 self.edicts[ent].nextthink = self.level.time + FRAMETIME;
                 self.edicts[ent].think_fn = Some(crate::dispatch::THINK_FUNC_MOVE_BEGIN);
             }
@@ -412,6 +416,7 @@ impl GameContext {
         if self.edicts[plat].moveinfo.state == STATE_BOTTOM {
             self.plat_go_up(plat);
         } else if self.edicts[plat].moveinfo.state == STATE_TOP {
+            // the player is still on the plat, so delay going down
             self.edicts[plat].nextthink = self.level.time + 1.0;
         }
     }
@@ -462,7 +467,7 @@ impl GameContext {
         self.edicts[ent].movetype = MoveType::Push;
 
         let model = self.edicts[ent].model.clone();
-        gi_setmodel(ent as i32, &model);
+        self.set_brush_model(ent, &model);
 
         self.edicts[ent].blocked_fn = Some(crate::dispatch::BLOCKED_FUNC_PLAT);
 
@@ -617,7 +622,7 @@ impl GameContext {
         }
 
         let model = self.edicts[ent].model.clone();
-        gi_setmodel(ent as i32, &model);
+        self.set_brush_model(ent, &model);
         gi_linkentity(ent as i32);
     }
 
@@ -705,7 +710,7 @@ impl GameContext {
         self.edicts[ent].movetype = MoveType::Stop;
         self.edicts[ent].solid = Solid::Bsp;
         let model = self.edicts[ent].model.clone();
-        gi_setmodel(ent as i32, &model);
+        self.set_brush_model(ent, &model);
 
         if self.edicts[ent].sounds != 1 {
             self.edicts[ent].moveinfo.sound_start = gi_soundindex("switches/butn2.wav");
@@ -1085,7 +1090,7 @@ impl GameContext {
         self.edicts[ent].movetype = MoveType::Push;
         self.edicts[ent].solid = Solid::Bsp;
         let model = self.edicts[ent].model.clone();
-        gi_setmodel(ent as i32, &model);
+        self.set_brush_model(ent, &model);
 
         self.edicts[ent].blocked_fn = Some(crate::dispatch::BLOCKED_FUNC_DOOR);
         self.edicts[ent].use_fn = Some(crate::dispatch::USE_FUNC_DOOR);
@@ -1217,7 +1222,7 @@ impl GameContext {
         self.edicts[ent].movetype = MoveType::Push;
         self.edicts[ent].solid = Solid::Bsp;
         let model = self.edicts[ent].model.clone();
-        gi_setmodel(ent as i32, &model);
+        self.set_brush_model(ent, &model);
 
         self.edicts[ent].blocked_fn = Some(crate::dispatch::BLOCKED_FUNC_DOOR);
         self.edicts[ent].use_fn = Some(crate::dispatch::USE_FUNC_DOOR);
@@ -1314,7 +1319,7 @@ impl GameContext {
         self.edicts[self_ent].movetype = MoveType::Push;
         self.edicts[self_ent].solid = Solid::Bsp;
         let model = self.edicts[self_ent].model.clone();
-        gi_setmodel(self_ent as i32, &model);
+        self.set_brush_model(self_ent, &model);
 
         match self.edicts[self_ent].sounds {
             1 => {
@@ -1450,7 +1455,6 @@ impl GameContext {
     }
 
     pub fn train_next(&mut self, self_ent: usize) {
-        eprintln!("train_next called for entity {}", self_ent);
         let mut first = true;
 
         loop {
@@ -1526,7 +1530,6 @@ impl GameContext {
     }
 
     pub fn func_train_find(&mut self, self_ent: usize) {
-        eprintln!("func_train_find called for entity {}", self_ent);
         if self.edicts[self_ent].target.is_empty() {
             gi_dprintf("train_find: no target");
             return;
@@ -1586,7 +1589,7 @@ impl GameContext {
         }
         self.edicts[self_ent].solid = Solid::Bsp;
         let model = self.edicts[self_ent].model.clone();
-        gi_setmodel(self_ent as i32, &model);
+        self.set_brush_model(self_ent, &model);
 
         if !self.st.noise.is_empty() {
             let noise = self.st.noise.clone();
@@ -1755,7 +1758,7 @@ impl GameContext {
         self.edicts[self_ent].use_fn = Some(crate::dispatch::USE_FUNC_CONVEYOR);
 
         let model = self.edicts[self_ent].model.clone();
-        gi_setmodel(self_ent as i32, &model);
+        self.set_brush_model(self_ent, &model);
         self.edicts[self_ent].solid = Solid::Bsp;
         gi_linkentity(self_ent as i32);
     }
@@ -1848,7 +1851,7 @@ impl GameContext {
         self.edicts[ent].movetype = MoveType::Push;
         self.edicts[ent].solid = Solid::Bsp;
         let model = self.edicts[ent].model.clone();
-        gi_setmodel(ent as i32, &model);
+        self.set_brush_model(ent, &model);
 
         self.edicts[ent].blocked_fn = Some(crate::dispatch::BLOCKED_DOOR_SECRET);
         self.edicts[ent].use_fn = Some(crate::dispatch::USE_FUNC_DOOR_SECRET);
@@ -1923,7 +1926,7 @@ impl GameContext {
 
     pub fn sp_func_killbox(&mut self, ent: usize) {
         let model = self.edicts[ent].model.clone();
-        gi_setmodel(ent as i32, &model);
+        self.set_brush_model(ent, &model);
         self.edicts[ent].use_fn = Some(crate::dispatch::USE_FUNC_KILLBOX);
         self.edicts[ent].svflags = SVF_NOCLIENT;
     }
@@ -1952,7 +1955,7 @@ impl GameContext {
 }
 
 // =========================================================
-// Callback enums — used as dispatch table indices
+// Callback enums Ã¢â‚¬â€ used as dispatch table indices
 // =========================================================
 
 /// End function IDs (moveinfo.endfunc callbacks).

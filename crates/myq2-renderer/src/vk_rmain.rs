@@ -127,6 +127,9 @@ pub struct RendererCvars {
     pub vk_cull: CvarRef,
     pub vk_polyblend: CvarRef,
     pub vk_flashblend: CvarRef,
+    /// Draw an HDR-bright additive glow core at every light (dynamic + static map light) so
+    /// the source itself blooms through the composite bloom pass. 0 = off.
+    pub r_light_bloom: CvarRef,
     pub vk_saturatelighting: CvarRef,
     pub vk_swapinterval: CvarRef,
     pub vk_texturemode: CvarRef,
@@ -191,6 +194,36 @@ pub struct RendererCvars {
     pub r_d3_extrude: CvarRef,
     /// Blinn-Phong specular exponent (default 32.0).
     pub r_d3_spec_power: CvarRef,
+    /// Real-time surface-light emission: number of nearest light emitters that additively
+    /// fill the DARK areas of nearby surfaces (the baked lightmap stays the base; this only
+    /// brightens shadowed walls/floors near a fixture, avoiding the global warm tint of naive
+    /// additive lighting). 0 = off. Uses shadow cubemaps for occlusion.
+    pub r_surf_emit: CvarRef,
+    /// Voxel cone-traced GI master switch. When on, the static world is voxelized at level
+    /// load (Phase 1). 0 = off.
+    pub r_vxgi: CvarRef,
+    /// VXGI voxel grid resolution per axis (memory is res³·4 bytes; 64 = 1 MiB, 128 = 8 MiB).
+    pub r_vxgi_res: CvarRef,
+    /// Debug: raymarch and display the voxel grid instead of the scene (1 = on).
+    pub r_vxgi_debug: CvarRef,
+    /// Enable the diffuse cone-traced GI pass (adds bounced light to the scene). 0 = off.
+    pub r_vxgi_gi: CvarRef,
+    /// GI strength multiplier (how bright the gathered indirect light is added).
+    pub r_vxgi_strength: CvarRef,
+    /// Baked-lightmap scale: 1.0 = full baked (classic), lower lets real-time VXGI DRIVE the
+    /// lighting instead of the baked radiosity (e.g. 0.3). 0 = baked fully off.
+    pub r_vxgi_bake: CvarRef,
+    /// Multi-bounce radiosity passes baked into the voxel radiance volume at load (so light
+    /// spreads globally like radiosity). 0 = direct emission only. Changing it needs a map reload.
+    pub r_vxgi_bounces: CvarRef,
+    /// Planar water reflections: 0 = off, 1 = mirrored world+sky rendered into a half-res
+    /// target and Fresnel-blended onto the dominant horizontal water plane.
+    pub r_water_reflect: CvarRef,
+    /// Water reflection blend strength (scales the Fresnel term).
+    pub r_water_reflect_strength: CvarRef,
+    /// Animated water-ripple light on walls/floors near the active water plane.
+    /// 0 = off; otherwise a strength multiplier (1 = default look).
+    pub r_water_shimmer: CvarRef,
 }
 
 static RENDERER_CVARS: OnceLock<RendererCvars> = OnceLock::new();
@@ -995,11 +1028,16 @@ pub fn r_render_view(fd: &RefdefLocal) {
 
         // Populate sorted D3 point-light list for this frame.
         {
-            let max_lights = rcvars().r_d3_maxlights.fresh_value().max(0.0) as usize;
+            // The lit pass serves two modes: the (abandoned, default-off) D3 flat-base mode
+            // (r_d3_maxlights) and the dark-fill surface emission (r_surf_emit, keeps the
+            // baked base). Run it for whichever wants more lights.
+            let d3_lights   = rcvars().r_d3_maxlights.fresh_value().max(0.0) as usize;
+            let surf_lights = rcvars().r_surf_emit.fresh_value().max(0.0) as usize;
+            let max_lights = d3_lights.max(surf_lights);
             let ambient    = rcvars().r_d3_ambient.fresh_value().max(0.0);
             let extrude    = rcvars().r_d3_extrude.fresh_value().max(0.1);
             let spec_power = rcvars().r_d3_spec_power.fresh_value().max(1.0);
-            modern.update_d3_lights(max_lights, ambient, extrude, spec_power);
+            modern.update_d3_lights(max_lights, ambient, extrude, spec_power, fd.vieworg);
         }
 
         // World geometry
@@ -1188,6 +1226,7 @@ pub fn r_register() {
             vk_cull: cvar_get("vk_cull", "1", CVAR_ARCHIVE),
             vk_polyblend: cvar_get("vk_polyblend", "1", CVAR_ARCHIVE),
             vk_flashblend: cvar_get("vk_flashblend", "1", CVAR_ARCHIVE),
+            r_light_bloom: cvar_get("r_light_bloom", "1", CVAR_ARCHIVE),
             vk_monolightmap: cvar_get("vk_monolightmap","0", CVAR_ZERO),
             vk_driver: cvar_get("vk_driver","opengl32", CVAR_ARCHIVE),
             vk_texturemode: cvar_get("vk_texturemode","VK_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE),
@@ -1235,9 +1274,20 @@ pub fn r_register() {
             r_lightmap_gamma: cvar_get("r_lightmap_gamma","1.0", CVAR_ARCHIVE),
             r_lightmap_contrast: cvar_get("r_lightmap_contrast","1.0", CVAR_ARCHIVE),
             r_d3_ambient: cvar_get("r_d3_ambient","0.15", CVAR_ARCHIVE),
-            r_d3_maxlights: cvar_get("r_d3_maxlights","16", CVAR_ARCHIVE),
+            r_d3_maxlights: cvar_get("r_d3_maxlights","0", CVAR_ARCHIVE),
             r_d3_extrude: cvar_get("r_d3_extrude","1.0", CVAR_ARCHIVE),
             r_d3_spec_power: cvar_get("r_d3_spec_power","32.0", CVAR_ARCHIVE),
+            r_surf_emit: cvar_get("r_surf_emit","0", CVAR_ARCHIVE),
+            r_vxgi: cvar_get("r_vxgi","1", CVAR_ARCHIVE),
+            r_vxgi_res: cvar_get("r_vxgi_res","128", CVAR_ARCHIVE),
+            r_vxgi_debug: cvar_get("r_vxgi_debug","0", CVAR_ARCHIVE),
+            r_vxgi_gi: cvar_get("r_vxgi_gi","0", CVAR_ARCHIVE),
+            r_vxgi_strength: cvar_get("r_vxgi_strength","2", CVAR_ARCHIVE),
+            r_vxgi_bake: cvar_get("r_vxgi_bake","0.7", CVAR_ARCHIVE),
+            r_vxgi_bounces: cvar_get("r_vxgi_bounces","5", CVAR_ARCHIVE),
+            r_water_reflect: cvar_get("r_water_reflect","1", CVAR_ARCHIVE),
+            r_water_reflect_strength: cvar_get("r_water_reflect_strength","0.4", CVAR_ARCHIVE),
+            r_water_shimmer: cvar_get("r_water_shimmer","1", CVAR_ARCHIVE),
         };
 
         myq2_common::common::com_printf("r_register: Cvars registered, calling with_device\n");

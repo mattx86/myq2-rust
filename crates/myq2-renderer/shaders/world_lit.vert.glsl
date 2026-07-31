@@ -21,6 +21,7 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec3 v_WorldPos;
 layout(location = 1) out vec3 v_Normal;
 layout(location = 2) out vec2 v_TexCoord;
+layout(location = 3) out vec3 v_LmCoordLayer;  // baked lightmap (u, v, layer) for dark-fill
 
 void main() {
     gl_Position = pc.u_MVP * vec4(a_Position, 1.0);
@@ -29,4 +30,5 @@ void main() {
     // use a placeholder — the diffuse lighting will dominate.
     v_Normal    = vec3(0.0, 0.0, 1.0);
     v_TexCoord  = a_TexCoord;
+    v_LmCoordLayer = vec3(a_LmCoord, a_LmLayer);
 }

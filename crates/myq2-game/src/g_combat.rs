@@ -108,7 +108,7 @@ pub fn findradius(from: Option<usize>, origin: Vec3, radius: f32, edicts: &[Edic
 ///
 /// Bridges to the real `g_ai::found_target` implementation by borrowing
 /// the global game context and building an `AiContext` via `mem::take`.
-fn found_target(self_idx: usize, edicts: &mut [Edict]) {
+fn found_target(self_idx: usize, edicts: &mut Vec<Edict>) {
     crate::g_local::with_global_game_ctx(|ctx| {
         use std::mem;
         // Sync caller's edicts into the global context before bridging
@@ -145,7 +145,7 @@ fn found_target(self_idx: usize, edicts: &mut [Edict]) {
 /// Fires death targets and clears the monster's targeting state.
 /// Delegates to the complete implementation in g_monster.rs which
 /// calls g_use_targets with the enemy as activator.
-fn monster_death_use(self_idx: usize, edicts: &mut [Edict]) {
+fn monster_death_use(self_idx: usize, edicts: &mut Vec<Edict>) {
     crate::g_local::with_global_game_ctx(|ctx| {
         // Sync local edicts into the global context
         ctx.edicts.clear();
@@ -337,7 +337,7 @@ pub fn killed(
     attacker_idx: usize,
     damage: i32,
     point: Vec3,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     if edicts[targ_idx].health < -999 {
@@ -400,7 +400,7 @@ fn check_power_armor(
     normal: Vec3,
     damage: i32,
     dflags: DamageFlags,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) -> i32 {
     if damage == 0 {
@@ -492,7 +492,7 @@ fn check_armor(
     damage: i32,
     te_sparks: i32,
     dflags: DamageFlags,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
 ) -> i32 {
     if damage == 0 {
         return 0;
@@ -554,7 +554,7 @@ fn check_armor(
 }
 
 /// Monster reaction to damage
-pub fn m_react_to_damage(targ_idx: usize, attacker_idx: usize, edicts: &mut [Edict]) {
+pub fn m_react_to_damage(targ_idx: usize, attacker_idx: usize, edicts: &mut Vec<Edict>) {
     let attacker = &edicts[attacker_idx];
 
     if attacker.client.is_none() && (attacker.svflags & SVF_MONSTER) == 0 {
@@ -668,7 +668,7 @@ pub fn t_damage(
     knockback: i32,
     dflags: DamageFlags,
     mod_type: i32,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     if edicts[targ_idx].takedamage == 0 {
@@ -869,7 +869,7 @@ pub fn t_radius_damage(
     ignore_idx: Option<usize>,
     radius: f32,
     mod_type: i32,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     let inflictor_origin = edicts[inflictor_idx].s.origin;

@@ -457,7 +457,17 @@ fn s_update(origin: &Vec3, forward: &Vec3, right: &Vec3, up: &Vec3) {
                     &mut org,
                     &ent_state,
                     Some(&|model_idx: i32| {
-                        let name = format!("*{}", model_idx);
+                        // Inline submodels are named "*N" where N is the submodel
+                        // index, and the engine precaches them as modelindex N+1
+                        // (modelindex 1 is the world bsp). So an entity's modelindex
+                        // maps to inline name "*(modelindex-1)". Using the modelindex
+                        // directly here requested a non-existent "*N" (off-by-one),
+                        // spamming CM_InlineModel "bad number" errors every frame for
+                        // any brush-model entity with a sound (lifts/doors/trains).
+                        if model_idx < 2 {
+                            return None;
+                        }
+                        let name = format!("*{}", model_idx - 1);
                         let cm = myq2_common::cmodel::cm_inline_model(&name);
                         Some((cm.mins, cm.maxs))
                     }),
@@ -779,12 +789,21 @@ fn cl_predict_movement() {
     let pm_frame_parse_entities = cl.frame.parse_entities;
     let pm_playernum = cl.playernum;
     let pm_model_clip = cl.model_clip.to_vec();
-    // Lock parse entities once and copy the snapshot into a boxed array.
+    // Copy the parsed entity snapshot the prediction clips against. This MUST read
+    // ENT_STATE.cl_parse_entities — the array the network parser actually writes
+    // (cl_ents.rs). The old code read the separate CL_PARSE_ENTITIES global, which
+    // is never populated (always default, solid=0), so client prediction never
+    // clipped ANY brush model (lifts/doors/plats) — the player fell through them
+    // in prediction and rubber-banded ("bounce") while the server carried them.
     let pm_parse_ents: Box<[myq2_common::q_shared::EntityState; MAX_PARSE_ENTITIES]> = {
-        let guard = CL_PARSE_ENTITIES.lock().unwrap_or_else(|e| e.into_inner());
-        let v: Vec<myq2_common::q_shared::EntityState> = guard.iter().take(MAX_PARSE_ENTITIES).cloned().collect();
+        let guard = ENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let src = &guard.cl_parse_entities;
+        let mut v: Vec<myq2_common::q_shared::EntityState> = Vec::with_capacity(MAX_PARSE_ENTITIES);
+        for i in 0..MAX_PARSE_ENTITIES {
+            v.push(src.get(i).cloned().unwrap_or_default());
+        }
         let boxed_slice = v.into_boxed_slice();
-        // SAFETY: we collected exactly MAX_PARSE_ENTITIES elements from guard which has that size
+        // SAFETY: we pushed exactly MAX_PARSE_ENTITIES elements above.
         unsafe {
             let ptr = Box::into_raw(boxed_slice) as *mut [myq2_common::q_shared::EntityState; MAX_PARSE_ENTITIES];
             Box::from_raw(ptr)

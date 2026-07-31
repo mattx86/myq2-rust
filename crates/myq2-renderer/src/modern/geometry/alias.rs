@@ -217,6 +217,13 @@ pub struct AliasInstance {
     pub backlerp: f32,
     /// Flags (RF_* values).
     pub flags: u32,
+    /// World-space Z of the plane the blob shadow is projected onto (entity's feet).
+    /// The shadow lands here, so it sits on whatever surface the entity stands on —
+    /// including a moving lift deck.
+    pub shadow_ground_z: f32,
+    /// Horizontal shadow shear vector (toward the nearest light) so the blob shadow leans
+    /// away from the light instead of straight down. (0,0) = straight down.
+    pub shadow_skew: [f32; 2],
 }
 
 impl AliasInstance {

@@ -11,11 +11,11 @@ use crate::g_local::{CPlane, CSurface, Edict, GameContext, GameLocals, LevelLoca
 // Type aliases for callback signatures
 // ============================================================
 
-pub type ThinkFn = fn(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals);
+pub type ThinkFn = fn(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals);
 pub type PainFn = fn(
     self_idx: usize,
     attacker_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
     kick: f32,
     damage: i32,
@@ -24,7 +24,7 @@ pub type DieFn = fn(
     self_idx: usize,
     inflictor_idx: usize,
     attacker_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
     damage: i32,
     point: Vec3,
@@ -32,7 +32,7 @@ pub type DieFn = fn(
 pub type TouchFn = fn(
     self_idx: usize,
     other_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
     plane: Option<&CPlane>,
     surf: Option<&CSurface>,
@@ -41,18 +41,18 @@ pub type UseFn = fn(
     self_idx: usize,
     other_idx: usize,
     activator_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 );
 pub type BlockedFn = fn(
     self_idx: usize,
     other_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 );
-pub type MonsterThinkFn = fn(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals);
+pub type MonsterThinkFn = fn(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals);
 pub type CheckAttackFn =
-    fn(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) -> bool;
+    fn(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) -> bool;
 
 // ============================================================
 // Named constants — Think callbacks
@@ -568,7 +568,7 @@ pub const MCHECKATTACK_TABLE_SIZE: usize = 16;
 // individual monster/entity modules are adapted.
 // ============================================================
 
-fn think_placeholder(self_idx: usize, _edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn think_placeholder(self_idx: usize, _edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     // Default fallback for unregistered dispatch table slots — logs a warning.
     crate::game_import::gi_dprintf(&format!("dispatch: unimplemented think callback for edict {}", self_idx));
 }
@@ -576,7 +576,7 @@ fn think_placeholder(self_idx: usize, _edicts: &mut [Edict], _level: &mut LevelL
 fn pain_placeholder(
     self_idx: usize,
     _attacker_idx: usize,
-    _edicts: &mut [Edict],
+    _edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals,
     _kick: f32,
     _damage: i32,
@@ -588,7 +588,7 @@ fn die_placeholder(
     self_idx: usize,
     _inflictor_idx: usize,
     _attacker_idx: usize,
-    _edicts: &mut [Edict],
+    _edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals,
     _damage: i32,
     _point: Vec3,
@@ -599,7 +599,7 @@ fn die_placeholder(
 fn touch_placeholder(
     self_idx: usize,
     _other_idx: usize,
-    _edicts: &mut [Edict],
+    _edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals,
     _plane: Option<&CPlane>,
     _surf: Option<&CSurface>,
@@ -611,7 +611,7 @@ fn use_placeholder(
     self_idx: usize,
     _other_idx: usize,
     _activator_idx: usize,
-    _edicts: &mut [Edict],
+    _edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals,
 ) {
     crate::game_import::gi_dprintf(&format!("dispatch: unimplemented use callback for edict {}", self_idx));
@@ -620,19 +620,19 @@ fn use_placeholder(
 fn blocked_placeholder(
     self_idx: usize,
     _other_idx: usize,
-    _edicts: &mut [Edict],
+    _edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals,
 ) {
     crate::game_import::gi_dprintf(&format!("dispatch: unimplemented blocked callback for edict {}", self_idx));
 }
 
-fn monster_think_placeholder(self_idx: usize, _edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn monster_think_placeholder(self_idx: usize, _edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     crate::game_import::gi_dprintf(&format!("dispatch: unimplemented monster think callback for edict {}", self_idx));
 }
 
 fn checkattack_placeholder(
     self_idx: usize,
-    _edicts: &mut [Edict],
+    _edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals,
 ) -> bool {
     crate::game_import::gi_dprintf(&format!("dispatch: unimplemented checkattack callback for edict {}", self_idx));
@@ -663,85 +663,85 @@ fn sync_level(level: &mut LevelLocals, ctx: &GameContext) {
 
 // --- g_monster wrappers ---
 
-fn w_m_flies_off(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_m_flies_off(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
-    ctx.edicts = edicts.to_vec();
+    std::mem::swap(edicts, &mut ctx.edicts);
     crate::g_monster::m_flies_off(&mut ctx, self_idx as i32);
     sync_level(level, &ctx);
-    edicts.clone_from_slice(&ctx.edicts);
+    std::mem::swap(edicts, &mut ctx.edicts);
 }
 
-fn w_m_flies_on(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_m_flies_on(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
-    ctx.edicts = edicts.to_vec();
+    std::mem::swap(edicts, &mut ctx.edicts);
     crate::g_monster::m_flies_on(&mut ctx, self_idx as i32);
     sync_level(level, &ctx);
-    edicts.clone_from_slice(&ctx.edicts);
+    std::mem::swap(edicts, &mut ctx.edicts);
 }
 
-fn w_monster_triggered_spawn(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_monster_triggered_spawn(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
-    ctx.edicts = edicts.to_vec();
+    std::mem::swap(edicts, &mut ctx.edicts);
     crate::g_monster::monster_triggered_spawn(&mut ctx, self_idx as i32);
     sync_level(level, &ctx);
-    edicts.clone_from_slice(&ctx.edicts);
+    std::mem::swap(edicts, &mut ctx.edicts);
 }
 
-fn w_walkmonster_start_go(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_walkmonster_start_go(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
-    ctx.edicts = edicts.to_vec();
+    std::mem::swap(edicts, &mut ctx.edicts);
     crate::g_monster::walkmonster_start_go(&mut ctx, self_idx as i32);
     sync_level(level, &ctx);
-    edicts.clone_from_slice(&ctx.edicts);
+    std::mem::swap(edicts, &mut ctx.edicts);
 }
 
-fn w_flymonster_start_go(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_flymonster_start_go(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
-    ctx.edicts = edicts.to_vec();
+    std::mem::swap(edicts, &mut ctx.edicts);
     crate::g_monster::flymonster_start_go(&mut ctx, self_idx as i32);
     sync_level(level, &ctx);
-    edicts.clone_from_slice(&ctx.edicts);
+    std::mem::swap(edicts, &mut ctx.edicts);
 }
 
-fn w_swimmonster_start_go(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_swimmonster_start_go(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
-    ctx.edicts = edicts.to_vec();
+    std::mem::swap(edicts, &mut ctx.edicts);
     crate::g_monster::swimmonster_start_go(&mut ctx, self_idx as i32);
     sync_level(level, &ctx);
-    edicts.clone_from_slice(&ctx.edicts);
+    std::mem::swap(edicts, &mut ctx.edicts);
 }
 
 fn w_monster_use(
     self_idx: usize,
     other_idx: usize,
     activator_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     let mut ctx = make_temp_ctx(level);
-    ctx.edicts = edicts.to_vec();
+    std::mem::swap(edicts, &mut ctx.edicts);
     crate::g_monster::monster_use(&mut ctx, self_idx as i32, other_idx as i32, activator_idx as i32);
     sync_level(level, &ctx);
-    edicts.clone_from_slice(&ctx.edicts);
+    std::mem::swap(edicts, &mut ctx.edicts);
 }
 
 fn w_monster_triggered_spawn_use(
     self_idx: usize,
     other_idx: usize,
     activator_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     let mut ctx = make_temp_ctx(level);
-    ctx.edicts = edicts.to_vec();
+    std::mem::swap(edicts, &mut ctx.edicts);
     crate::g_monster::monster_triggered_spawn_use(&mut ctx, self_idx as i32, other_idx as i32, activator_idx as i32);
     sync_level(level, &ctx);
-    edicts.clone_from_slice(&ctx.edicts);
+    std::mem::swap(edicts, &mut ctx.edicts);
 }
 
 // --- m_hover wrappers ---
 
-fn w_hover_deadthink(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_hover_deadthink(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
     ctx.edicts = edicts.to_vec();
     crate::m_hover::hover_deadthink(&mut edicts[self_idx], &mut ctx);
@@ -750,7 +750,7 @@ fn w_hover_deadthink(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLoc
 
 // --- g_free_edict wrapper ---
 
-fn w_free_edict(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_free_edict(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     crate::game_import::gi_unlinkentity(self_idx as i32);
 
     let level_time = level.time;
@@ -791,38 +791,38 @@ fn make_items_ctx(edicts: &[Edict], level: &LevelLocals) -> GameContext {
     }
 }
 
-fn sync_items_ctx(edicts: &mut [Edict], level: &mut LevelLocals, ctx: &GameContext) {
+fn sync_items_ctx(edicts: &mut Vec<Edict>, level: &mut LevelLocals, ctx: &GameContext) {
     *level = ctx.level.clone();
     let len = edicts.len().min(ctx.edicts.len());
     edicts[..len].clone_from_slice(&ctx.edicts[..len]);
 }
 
-fn w_do_respawn(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_do_respawn(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_items_ctx(edicts, level);
     crate::g_items::do_respawn(&mut ctx, self_idx);
     sync_items_ctx(edicts, level, &ctx);
 }
 
-fn w_megahealth_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_megahealth_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_items_ctx(edicts, level);
     crate::g_items::megahealth_think(&mut ctx, self_idx);
     sync_items_ctx(edicts, level, &ctx);
 }
 
-fn w_drop_make_touchable(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_drop_make_touchable(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_items_ctx(edicts, level);
     crate::g_items::drop_make_touchable(&mut ctx, self_idx);
     sync_items_ctx(edicts, level, &ctx);
 }
 
-fn w_droptofloor(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_droptofloor(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_items_ctx(edicts, level);
     crate::g_items::droptofloor(&mut ctx, self_idx);
     sync_items_ctx(edicts, level, &ctx);
 }
 
 fn w_touch_item(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_items_ctx(edicts, level);
@@ -831,7 +831,7 @@ fn w_touch_item(
 }
 
 fn w_drop_temp_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_items_ctx(edicts, level);
@@ -841,7 +841,7 @@ fn w_drop_temp_touch(
 
 fn w_use_item_trigger(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_items_ctx(edicts, level);
     crate::g_items::use_item_trigger(&mut ctx, self_idx);
@@ -850,19 +850,19 @@ fn w_use_item_trigger(
 
 // --- g_trigger wrappers ---
 
-fn w_multi_wait(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_multi_wait(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     edicts[self_idx].nextthink = 0.0;
 }
 
 fn w_trigger_gravity_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     edicts[other_idx].gravity = edicts[self_idx].gravity;
 }
 
 fn w_trigger_monsterjump_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     if edicts[other_idx].flags.intersects(crate::g_local::FL_FLY) { return; }
@@ -907,7 +907,7 @@ fn make_trigger_ctx(edicts: &[Edict], level: &LevelLocals) -> GameContext {
     }
 }
 
-fn sync_trigger_ctx(edicts: &mut [Edict], level: &mut LevelLocals, ctx: &GameContext) {
+fn sync_trigger_ctx(edicts: &mut Vec<Edict>, level: &mut LevelLocals, ctx: &GameContext) {
     *level = ctx.level.clone();
     let len = edicts.len().min(ctx.edicts.len());
     edicts[..len].clone_from_slice(&ctx.edicts[..len]);
@@ -916,7 +916,7 @@ fn sync_trigger_ctx(edicts: &mut [Edict], level: &mut LevelLocals, ctx: &GameCon
 // --- g_trigger wrappers ---
 
 fn w_touch_multi(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_trigger_ctx(edicts, level);
@@ -925,7 +925,7 @@ fn w_touch_multi(
 }
 
 fn w_trigger_push_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_trigger_ctx(edicts, level);
@@ -934,7 +934,7 @@ fn w_trigger_push_touch(
 }
 
 fn w_hurt_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_trigger_ctx(edicts, level);
@@ -944,7 +944,7 @@ fn w_hurt_touch(
 
 fn w_use_multi(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_trigger_ctx(edicts, level);
     crate::g_trigger::use_multi(&mut ctx, self_idx, _other_idx, activator_idx);
@@ -953,7 +953,7 @@ fn w_use_multi(
 
 fn w_trigger_enable(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_trigger_ctx(edicts, level);
     crate::g_trigger::trigger_enable(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -962,7 +962,7 @@ fn w_trigger_enable(
 
 fn w_trigger_relay_use(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_trigger_ctx(edicts, level);
     crate::g_trigger::trigger_relay_use(&mut ctx, self_idx, _other_idx, activator_idx);
@@ -971,7 +971,7 @@ fn w_trigger_relay_use(
 
 fn w_trigger_counter_use(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_trigger_ctx(edicts, level);
     crate::g_trigger::trigger_counter_use(&mut ctx, self_idx, _other_idx, activator_idx);
@@ -980,7 +980,7 @@ fn w_trigger_counter_use(
 
 fn w_trigger_key_use(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_trigger_ctx(edicts, level);
     crate::g_trigger::trigger_key_use(&mut ctx, self_idx, _other_idx, activator_idx);
@@ -989,7 +989,7 @@ fn w_trigger_key_use(
 
 fn w_hurt_use(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_trigger_ctx(edicts, level);
     crate::g_trigger::hurt_use(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -1025,7 +1025,7 @@ fn make_misc_ctx(edicts: &[Edict], level: &LevelLocals) -> GameContext {
     }
 }
 
-fn sync_misc_ctx(edicts: &mut [Edict], level: &mut LevelLocals, ctx: &GameContext) {
+fn sync_misc_ctx(edicts: &mut Vec<Edict>, level: &mut LevelLocals, ctx: &GameContext) {
     *level = ctx.level.clone();
     let len = edicts.len().min(ctx.edicts.len());
     edicts[..len].clone_from_slice(&ctx.edicts[..len]);
@@ -1033,98 +1033,98 @@ fn sync_misc_ctx(edicts: &mut [Edict], level: &mut LevelLocals, ctx: &GameContex
 
 // --- g_misc wrappers ---
 
-fn w_gib_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_gib_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::gib_think(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_th_viewthing(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_th_viewthing(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::th_viewthing(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_misc_blackhole_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_misc_blackhole_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_blackhole_think(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_misc_eastertank_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_misc_eastertank_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_eastertank_think(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_misc_easterchick_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_misc_easterchick_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_easterchick_think(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_misc_easterchick2_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_misc_easterchick2_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_easterchick2_think(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_commander_body_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_commander_body_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::commander_body_think(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_commander_body_drop(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_commander_body_drop(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::commander_body_drop(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_boss3_stand_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_boss3_stand_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::m_boss3::think_boss3_stand(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_misc_banner_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_misc_banner_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_banner_think(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_misc_satellite_dish_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_misc_satellite_dish_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_satellite_dish_think(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_barrel_explode(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_barrel_explode(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::barrel_explode(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_func_object_release(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_object_release(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::func_object_release(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_func_clock_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_clock_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::func_clock_think(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
-fn w_misc_viper_bomb_prethink(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_misc_viper_bomb_prethink(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_viper_bomb_prethink(&mut ctx, self_idx);
     sync_misc_ctx(edicts, level, &ctx);
 }
 
 fn w_gib_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -1135,7 +1135,7 @@ fn w_gib_touch(
 }
 
 fn w_func_object_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -1145,7 +1145,7 @@ fn w_func_object_touch(
 }
 
 fn w_barrel_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -1155,7 +1155,7 @@ fn w_barrel_touch(
 }
 
 fn w_misc_viper_bomb_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -1165,7 +1165,7 @@ fn w_misc_viper_bomb_touch(
 }
 
 fn w_teleporter_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -1175,7 +1175,7 @@ fn w_teleporter_touch(
 
 fn w_use_areaportal(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::use_areaportal(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -1184,7 +1184,7 @@ fn w_use_areaportal(
 
 fn w_light_use(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::light_use(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -1193,7 +1193,7 @@ fn w_light_use(
 
 fn w_func_wall_use(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::func_wall_use(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -1202,7 +1202,7 @@ fn w_func_wall_use(
 
 fn w_func_object_use(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::func_object_use(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -1211,7 +1211,7 @@ fn w_func_object_use(
 
 fn w_func_explosive_use(
     self_idx: usize, other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::func_explosive_use(&mut ctx, self_idx, other_idx, _activator_idx);
@@ -1220,7 +1220,7 @@ fn w_func_explosive_use(
 
 fn w_func_explosive_spawn(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::func_explosive_spawn(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -1229,7 +1229,7 @@ fn w_func_explosive_spawn(
 
 fn w_gib_die(
     self_idx: usize, inflictor_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     damage: i32, point: Vec3,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -1239,7 +1239,7 @@ fn w_gib_die(
 
 fn w_debris_die(
     self_idx: usize, inflictor_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     damage: i32, point: Vec3,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -1249,7 +1249,7 @@ fn w_debris_die(
 
 fn w_func_explosive_die(
     self_idx: usize, inflictor_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     damage: i32, point: Vec3,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -1259,7 +1259,7 @@ fn w_func_explosive_die(
 
 fn w_barrel_delay_die(
     self_idx: usize, inflictor_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     damage: i32, point: Vec3,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -1269,7 +1269,7 @@ fn w_barrel_delay_die(
 
 fn w_deadsoldier_die(
     self_idx: usize, inflictor_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     damage: i32, point: Vec3,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -1279,7 +1279,7 @@ fn w_deadsoldier_die(
 
 fn w_misc_blackhole_use(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_blackhole_use(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -1288,7 +1288,7 @@ fn w_misc_blackhole_use(
 
 fn w_commander_body_use(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::commander_body_use(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -1297,7 +1297,7 @@ fn w_commander_body_use(
 
 fn w_boss3_use(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::m_boss3::use_boss3(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -1306,7 +1306,7 @@ fn w_boss3_use(
 
 fn w_misc_satellite_dish_use(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_satellite_dish_use(&mut ctx, self_idx, _other_idx, _activator_idx);
@@ -1315,7 +1315,7 @@ fn w_misc_satellite_dish_use(
 
 fn w_misc_viper_use(
     self_idx: usize, other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_viper_use(&mut ctx, self_idx, other_idx, activator_idx);
@@ -1324,7 +1324,7 @@ fn w_misc_viper_use(
 
 fn w_misc_viper_bomb_use(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_viper_bomb_use(&mut ctx, self_idx, _other_idx, activator_idx);
@@ -1333,7 +1333,7 @@ fn w_misc_viper_bomb_use(
 
 fn w_misc_strogg_ship_use(
     self_idx: usize, other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::misc_strogg_ship_use(&mut ctx, self_idx, other_idx, activator_idx);
@@ -1342,7 +1342,7 @@ fn w_misc_strogg_ship_use(
 
 fn w_func_clock_use(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::func_clock_use(&mut ctx, self_idx, _other_idx, activator_idx);
@@ -1366,20 +1366,20 @@ fn make_g_utils_ctx(edicts: &[Edict], level: &LevelLocals) -> GameContext {
     }
 }
 
-fn sync_g_utils_ctx(edicts: &mut [Edict], ctx: &GameContext) {
+fn sync_g_utils_ctx(edicts: &mut Vec<Edict>, ctx: &GameContext) {
     let len = edicts.len().min(ctx.edicts.len());
     edicts[..len].clone_from_slice(&ctx.edicts[..len]);
 }
 
 // --- g_target wrappers (functions take GameContext) ---
 
-fn w_target_explosion_explode(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_target_explosion_explode(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::target_explosion_explode(&mut game, level, self_idx as i32);
     sync_g_utils_ctx(edicts, &game);
 }
 
-fn w_target_crosslevel_target(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_target_crosslevel_target(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut game = make_g_utils_ctx(edicts, level);
     let game_locals = crate::g_local::with_global_game_ctx(|gctx| gctx.game.clone())
         .unwrap_or_default();
@@ -1387,25 +1387,25 @@ fn w_target_crosslevel_target(self_idx: usize, edicts: &mut [Edict], level: &mut
     sync_g_utils_ctx(edicts, &game);
 }
 
-fn w_target_laser_start(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_target_laser_start(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::target_laser_start(&mut game, level, self_idx as i32);
     sync_g_utils_ctx(edicts, &game);
 }
 
-fn w_target_laser_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_target_laser_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::target_laser_think(&mut game, level, self_idx as i32);
     sync_g_utils_ctx(edicts, &game);
 }
 
-fn w_target_lightramp_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_target_lightramp_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::target_lightramp_think(&mut game, level, self_idx as i32);
     sync_g_utils_ctx(edicts, &game);
 }
 
-fn w_target_earthquake_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_target_earthquake_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::target_earthquake_think(&mut game, level, self_idx as i32);
     sync_g_utils_ctx(edicts, &game);
@@ -1413,7 +1413,7 @@ fn w_target_earthquake_think(self_idx: usize, edicts: &mut [Edict], level: &mut 
 
 fn w_use_target_tent(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::use_target_tent(&mut game, self_idx as i32, _other_idx as i32, _activator_idx as i32);
@@ -1422,7 +1422,7 @@ fn w_use_target_tent(
 
 fn w_use_target_speaker(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::use_target_speaker(&mut game, self_idx as i32, _other_idx as i32, _activator_idx as i32);
@@ -1431,7 +1431,7 @@ fn w_use_target_speaker(
 
 fn w_use_target_explosion(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::use_target_explosion(&mut game, level, self_idx as i32, _other_idx as i32, activator_idx as i32);
@@ -1440,7 +1440,7 @@ fn w_use_target_explosion(
 
 fn w_use_target_changelevel(
     self_idx: usize, other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let (mut game_locals, clients, deathmatch, coop, dmflags) =
         crate::g_local::with_global_game_ctx(|gctx| {
@@ -1457,7 +1457,7 @@ fn w_use_target_changelevel(
 
 fn w_use_target_splash(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::use_target_splash(&mut game, level, self_idx as i32, _other_idx as i32, activator_idx as i32);
@@ -1466,7 +1466,7 @@ fn w_use_target_splash(
 
 fn w_use_target_spawner(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::use_target_spawner(&mut game, self_idx as i32, _other_idx as i32, _activator_idx as i32);
@@ -1475,7 +1475,7 @@ fn w_use_target_spawner(
 
 fn w_use_target_blaster(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::use_target_blaster(&mut game, self_idx as i32, _other_idx as i32, _activator_idx as i32);
@@ -1484,7 +1484,7 @@ fn w_use_target_blaster(
 
 fn w_use_target_laser(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::target_laser_use(&mut game, level, self_idx as i32, _other_idx as i32, activator_idx as i32);
@@ -1493,7 +1493,7 @@ fn w_use_target_laser(
 
 fn w_use_target_lightramp(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::target_lightramp_use(&mut game, level, self_idx as i32, _other_idx as i32, _activator_idx as i32);
@@ -1502,7 +1502,7 @@ fn w_use_target_lightramp(
 
 fn w_use_target_earthquake(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::target_earthquake_use(&mut game, level, self_idx as i32, _other_idx as i32, activator_idx as i32);
@@ -1511,7 +1511,7 @@ fn w_use_target_earthquake(
 
 fn w_use_target_help(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     let mut game_locals = crate::g_local::with_global_game_ctx(|gctx| gctx.game.clone())
@@ -1522,7 +1522,7 @@ fn w_use_target_help(
 
 fn w_use_target_secret(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::use_target_secret(&mut game, level, self_idx as i32, _other_idx as i32, activator_idx as i32);
@@ -1531,7 +1531,7 @@ fn w_use_target_secret(
 
 fn w_use_target_goal(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_target::use_target_goal(&mut game, level, self_idx as i32, _other_idx as i32, activator_idx as i32);
@@ -1540,7 +1540,7 @@ fn w_use_target_goal(
 
 fn w_trigger_crosslevel_trigger_use(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut game = make_g_utils_ctx(edicts, level);
     let mut game_locals = crate::g_local::with_global_game_ctx(|gctx| gctx.game.clone())
@@ -1551,7 +1551,7 @@ fn w_trigger_crosslevel_trigger_use(
 
 fn w_use_target_string(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
     crate::g_misc::target_string_use(&mut ctx, self_idx, _other_idx, activator_idx);
@@ -1560,7 +1560,7 @@ fn w_use_target_string(
 
 // --- g_utils wrappers (think_delay) ---
 
-fn w_think_delay(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_think_delay(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut game = make_g_utils_ctx(edicts, level);
     crate::g_utils::think_delay(&mut game, self_idx as i32);
     sync_g_utils_ctx(edicts, &game);
@@ -1601,7 +1601,7 @@ fn make_pclient_ctx(edicts: &[Edict], level: &LevelLocals) -> GameContext {
     }
 }
 
-fn sync_pclient_ctx(edicts: &mut [Edict], level: &mut LevelLocals, ctx: &GameContext) {
+fn sync_pclient_ctx(edicts: &mut Vec<Edict>, level: &mut LevelLocals, ctx: &GameContext) {
     *level = ctx.level.clone();
     let len = edicts.len().min(ctx.edicts.len());
     edicts[..len].clone_from_slice(&ctx.edicts[..len]);
@@ -1609,13 +1609,13 @@ fn sync_pclient_ctx(edicts: &mut [Edict], level: &mut LevelLocals, ctx: &GameCon
 
 // --- p_client wrappers ---
 
-fn w_sp_create_coop_spots(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_sp_create_coop_spots(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_pclient_ctx(edicts, level);
     crate::p_client::sp_create_coop_spots(&mut ctx, self_idx);
     sync_pclient_ctx(edicts, level, &ctx);
 }
 
-fn w_sp_fix_coop_spots(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_sp_fix_coop_spots(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_pclient_ctx(edicts, level);
     crate::p_client::sp_fix_coop_spots(&mut ctx, self_idx);
     sync_pclient_ctx(edicts, level, &ctx);
@@ -1623,7 +1623,7 @@ fn w_sp_fix_coop_spots(self_idx: usize, edicts: &mut [Edict], level: &mut LevelL
 
 fn w_player_pain(
     self_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     kick: f32, damage: i32,
 ) {
     let mut ctx = make_pclient_ctx(edicts, level);
@@ -1633,7 +1633,7 @@ fn w_player_pain(
 
 fn w_player_die(
     self_idx: usize, inflictor_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     damage: i32, point: Vec3,
 ) {
     let mut ctx = make_pclient_ctx(edicts, level);
@@ -1643,7 +1643,7 @@ fn w_player_die(
 
 fn w_body_die(
     self_idx: usize, inflictor_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     damage: i32, point: Vec3,
 ) {
     let mut ctx = make_pclient_ctx(edicts, level);
@@ -1653,21 +1653,21 @@ fn w_body_die(
 
 // --- g_weapon wrappers (Vec<Edict> bridge) ---
 
-fn w_grenade_explode(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_grenade_explode(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut v = edicts.to_vec();
     crate::g_weapon::grenade_explode(self_idx, &mut v, level);
     let len = edicts.len().min(v.len());
     edicts[..len].clone_from_slice(&v[..len]);
 }
 
-fn w_bfg_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_bfg_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut v = edicts.to_vec();
     crate::g_weapon::bfg_think(self_idx, &mut v, level);
     let len = edicts.len().min(v.len());
     edicts[..len].clone_from_slice(&v[..len]);
 }
 
-fn w_bfg_explode(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_bfg_explode(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut v = edicts.to_vec();
     crate::g_weapon::bfg_explode(self_idx, &mut v, level);
     let len = edicts.len().min(v.len());
@@ -1675,7 +1675,7 @@ fn w_bfg_explode(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals)
 }
 
 fn w_blaster_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut v = edicts.to_vec();
@@ -1685,7 +1685,7 @@ fn w_blaster_touch(
 }
 
 fn w_grenade_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut v = edicts.to_vec();
@@ -1695,7 +1695,7 @@ fn w_grenade_touch(
 }
 
 fn w_rocket_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut v = edicts.to_vec();
@@ -1705,7 +1705,7 @@ fn w_rocket_touch(
 }
 
 fn w_bfg_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut v = edicts.to_vec();
@@ -1736,7 +1736,7 @@ fn make_func_ctx(edicts: &[Edict], level: &LevelLocals) -> GameContext {
     ctx
 }
 
-fn sync_func_ctx(edicts: &mut [Edict], level: &mut LevelLocals, ctx: &GameContext) {
+fn sync_func_ctx(edicts: &mut Vec<Edict>, level: &mut LevelLocals, ctx: &GameContext) {
     *level = ctx.level.clone();
     let len = edicts.len().min(ctx.edicts.len());
     edicts[..len].clone_from_slice(&ctx.edicts[..len]);
@@ -1744,88 +1744,87 @@ fn sync_func_ctx(edicts: &mut [Edict], level: &mut LevelLocals, ctx: &GameContex
 
 // --- g_func wrappers ---
 
-fn w_func_door_go_up(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_door_go_up(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     let activator = edicts[self_idx].activator as usize;
     ctx.door_go_up(self_idx, activator);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_door_go_down(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_door_go_down(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_go_down(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_door_secret_move1(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_door_secret_move1(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_secret_move1(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_door_secret_move2(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_door_secret_move2(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_secret_move2(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_door_secret_move3(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_door_secret_move3(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_secret_move3(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_door_secret_move4(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_door_secret_move4(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_secret_move4(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_door_secret_move5(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_door_secret_move5(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_secret_move5(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_door_secret_move6(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_door_secret_move6(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_secret_move6(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_door_secret_done(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_door_secret_done(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_secret_done(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_train_next(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
-    eprintln!("w_func_train_next called for entity {}", self_idx);
+fn w_func_train_next(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.train_next(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_plat_go_up(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_plat_go_up(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.plat_go_up(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_plat_go_down(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_plat_go_down(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.plat_go_down(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_train_find(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_train_find(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.func_train_find(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
 fn w_touch_door_trigger(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
@@ -1835,7 +1834,7 @@ fn w_touch_door_trigger(
 
 fn w_door_use(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_use(self_idx, _other_idx, activator_idx);
@@ -1844,7 +1843,7 @@ fn w_door_use(
 
 fn w_button_use(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.button_use(self_idx, _other_idx, activator_idx);
@@ -1853,7 +1852,7 @@ fn w_button_use(
 
 fn w_train_use(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.train_use(self_idx, _other_idx, activator_idx);
@@ -1862,7 +1861,7 @@ fn w_train_use(
 
 fn w_func_timer_use(
     self_idx: usize, _other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.func_timer_use(self_idx, _other_idx, activator_idx);
@@ -1871,80 +1870,80 @@ fn w_func_timer_use(
 
 fn w_use_killbox(
     self_idx: usize, _other_idx: usize, _activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.use_killbox(self_idx, _other_idx, _activator_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_move_done(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_move_done(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.move_done(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_move_final(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_move_final(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.move_final(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_move_begin(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_move_begin(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.move_begin(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_accel_move(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_accel_move(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.think_accel_move(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_angle_move_done(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_angle_move_done(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.angle_move_done(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_angle_move_final(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_angle_move_final(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.angle_move_final(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_angle_move_begin(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_angle_move_begin(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.angle_move_begin(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_button_return(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_button_return(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.button_return(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_calc_move_speed(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_calc_move_speed(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.think_calc_move_speed(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_spawn_door_trigger(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_spawn_door_trigger(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.think_spawn_door_trigger(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_trigger_elevator_init(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_trigger_elevator_init(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.trigger_elevator_init(self_idx);
     sync_func_ctx(edicts, level, &ctx);
 }
 
-fn w_func_timer_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_func_timer_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.func_timer_think(self_idx);
     sync_func_ctx(edicts, level, &ctx);
@@ -1952,7 +1951,7 @@ fn w_func_timer_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLo
 
 fn w_use_plat(
     self_idx: usize, other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.use_plat(self_idx, other_idx, activator_idx);
@@ -1961,7 +1960,7 @@ fn w_use_plat(
 
 fn w_rotating_use(
     self_idx: usize, other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.rotating_use(self_idx, other_idx, activator_idx);
@@ -1970,7 +1969,7 @@ fn w_rotating_use(
 
 fn w_door_secret_use(
     self_idx: usize, other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_secret_use(self_idx, other_idx, activator_idx);
@@ -1979,7 +1978,7 @@ fn w_door_secret_use(
 
 fn w_trigger_elevator_use(
     self_idx: usize, other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.trigger_elevator_use(self_idx, other_idx, activator_idx);
@@ -1988,7 +1987,7 @@ fn w_trigger_elevator_use(
 
 fn w_func_conveyor_use(
     self_idx: usize, other_idx: usize, activator_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.func_conveyor_use(self_idx, other_idx, activator_idx);
@@ -1996,7 +1995,7 @@ fn w_func_conveyor_use(
 }
 
 fn w_touch_plat_center(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     plane: Option<&CPlane>, surf: Option<&CSurface>,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
@@ -2005,7 +2004,7 @@ fn w_touch_plat_center(
 }
 
 fn w_rotating_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     plane: Option<&CPlane>, surf: Option<&CSurface>,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
@@ -2014,7 +2013,7 @@ fn w_rotating_touch(
 }
 
 fn w_button_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     plane: Option<&CPlane>, surf: Option<&CSurface>,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
@@ -2023,7 +2022,7 @@ fn w_button_touch(
 }
 
 fn w_door_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     plane: Option<&CPlane>, surf: Option<&CSurface>,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
@@ -2032,7 +2031,7 @@ fn w_door_touch(
 }
 
 fn w_door_secret_blocked(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_secret_blocked(self_idx, other_idx);
@@ -2041,7 +2040,7 @@ fn w_door_secret_blocked(
 
 fn w_button_killed_die(
     self_idx: usize, inflictor_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     damage: i32, point: Vec3,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
@@ -2051,7 +2050,7 @@ fn w_button_killed_die(
 
 fn w_door_killed_die(
     self_idx: usize, inflictor_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     damage: i32, point: Vec3,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
@@ -2061,7 +2060,7 @@ fn w_door_killed_die(
 
 fn w_door_secret_die(
     self_idx: usize, inflictor_idx: usize, attacker_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     damage: i32, point: Vec3,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
@@ -2071,7 +2070,7 @@ fn w_door_secret_die(
 
 fn w_door_blocked(
     self_idx: usize, other_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.door_blocked(self_idx, other_idx);
@@ -2080,7 +2079,7 @@ fn w_door_blocked(
 
 fn w_plat_blocked(
     self_idx: usize, other_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.plat_blocked(self_idx, other_idx);
@@ -2089,7 +2088,7 @@ fn w_plat_blocked(
 
 fn w_train_blocked(
     self_idx: usize, other_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.train_blocked(self_idx, other_idx);
@@ -2098,7 +2097,7 @@ fn w_train_blocked(
 
 fn w_rotating_blocked(
     self_idx: usize, other_idx: usize,
-    edicts: &mut [Edict], level: &mut LevelLocals,
+    edicts: &mut Vec<Edict>, level: &mut LevelLocals,
 ) {
     let mut ctx = make_func_ctx(edicts, level);
     ctx.rotating_blocked(self_idx, other_idx);
@@ -2108,7 +2107,7 @@ fn w_rotating_blocked(
 // --- g_misc touch wrappers (path_corner, point_combat) ---
 
 fn w_path_corner_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -2117,7 +2116,7 @@ fn w_path_corner_touch(
 }
 
 fn w_point_combat_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let mut ctx = make_misc_ctx(edicts, level);
@@ -2127,7 +2126,7 @@ fn w_point_combat_touch(
 
 // --- g_monster think wrapper ---
 
-fn w_monster_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_monster_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
     ctx.edicts = edicts.to_vec();
     crate::g_monster::monster_think(&mut ctx, self_idx as i32);
@@ -2141,7 +2140,7 @@ fn w_monster_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocal
 fn w_mutant_jump_touch(
     self_idx: usize,
     other_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals,
     plane: Option<&CPlane>,
     surf: Option<&CSurface>,
@@ -2150,28 +2149,28 @@ fn w_mutant_jump_touch(
 }
 
 // --- Soldier ---
-fn w_soldier_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_soldier_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_soldier::soldier_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_soldier_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_soldier_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_soldier::soldier_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_soldier_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_soldier_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_soldier::soldier_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_soldier_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_soldier_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_soldier::soldier_idle(&mut edicts[self_idx], &mut ctx);
 }
-fn w_soldier_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_soldier_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_soldier::soldier_sight(&mut edicts[self_idx], &mut dummy);
 }
 fn w_soldier_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2180,7 +2179,7 @@ fn w_soldier_pain(
     sync_level(level, &ctx);
 }
 fn w_soldier_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2189,43 +2188,43 @@ fn w_soldier_die(
     crate::m_soldier::soldier_die(&mut edicts[self_idx], &mut dummy1, &mut dummy2, damage, point, &mut ctx);
     sync_level(level, &ctx);
 }
-fn w_soldier_dodge(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_soldier_dodge(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
     crate::m_soldier::soldier_dodge(&mut edicts[self_idx], 0, 0.0, &mut ctx);
     sync_level(level, &ctx);
 }
-fn w_soldier_attack(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_soldier_attack(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
     crate::m_soldier::soldier_attack(&mut edicts[self_idx], &mut ctx);
     sync_level(level, &ctx);
 }
 
 // --- Berserk ---
-fn w_berserk_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_berserk_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_berserk::berserk_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_berserk_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_berserk_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_berserk::berserk_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_berserk_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_berserk_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_berserk::berserk_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_berserk_melee(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_berserk_melee(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_berserk::berserk_melee(&mut edicts[self_idx], &mut ctx);
 }
-fn w_berserk_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_berserk_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_berserk::berserk_sight(&mut edicts[self_idx], &mut dummy);
 }
-fn w_berserk_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_berserk_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     crate::m_berserk::berserk_search(&mut edicts[self_idx]);
 }
 fn w_berserk_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2234,7 +2233,7 @@ fn w_berserk_pain(
     sync_level(level, &ctx);
 }
 fn w_berserk_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2245,7 +2244,7 @@ fn w_berserk_die(
 }
 
 // --- Actor ---
-fn w_actor_attack(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_actor_attack(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut edicts_vec = edicts.to_vec();
     crate::m_actor::actor_attack(&mut edicts_vec, self_idx, level);
     edicts.clone_from_slice(&edicts_vec);
@@ -2254,30 +2253,30 @@ fn w_actor_use(
     self_idx: usize,
     other_idx: usize,
     activator_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     let mut edicts_vec = edicts.to_vec();
     crate::m_actor::actor_use(&mut edicts_vec, self_idx, other_idx, activator_idx, level);
     edicts.clone_from_slice(&edicts_vec);
 }
-fn w_actor_stand(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_actor_stand(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut edicts_vec = edicts.to_vec();
     crate::m_actor::actor_stand(&mut edicts_vec, self_idx, level);
     edicts.clone_from_slice(&edicts_vec);
 }
-fn w_actor_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_actor_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut edicts_vec = edicts.to_vec();
     crate::m_actor::actor_walk(&mut edicts_vec, self_idx);
     edicts.clone_from_slice(&edicts_vec);
 }
-fn w_actor_run(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_actor_run(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut edicts_vec = edicts.to_vec();
     crate::m_actor::actor_run(&mut edicts_vec, self_idx, level);
     edicts.clone_from_slice(&edicts_vec);
 }
 fn w_actor_pain(
-    self_idx: usize, attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut edicts_vec = edicts.to_vec();
@@ -2285,7 +2284,7 @@ fn w_actor_pain(
     edicts.clone_from_slice(&edicts_vec);
 }
 fn w_actor_die(
-    self_idx: usize, inflictor_idx: usize, attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, inflictor_idx: usize, attacker_idx: usize, edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut edicts_vec = edicts.to_vec();
@@ -2294,7 +2293,7 @@ fn w_actor_die(
 }
 
 fn w_target_actor_touch(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals,
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals,
     _plane: Option<&CPlane>, _surf: Option<&CSurface>,
 ) {
     let game_locals = crate::g_local::with_global_game_ctx(|gctx| gctx.game.clone())
@@ -2305,113 +2304,113 @@ fn w_target_actor_touch(
 }
 
 // --- Floater ---
-fn w_floater_stand(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_floater_stand(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
     crate::m_float::floater_stand(&mut edicts[self_idx], &mut ctx);
     sync_level(level, &ctx);
 }
-fn w_floater_walk(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_floater_walk(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
     crate::m_float::floater_walk(&mut edicts[self_idx], &mut ctx);
     sync_level(level, &ctx);
 }
-fn w_floater_run(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_floater_run(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(level);
     crate::m_float::floater_run(&mut edicts[self_idx], &mut ctx);
     sync_level(level, &ctx);
 }
 fn w_floater_pain(
-    self_idx: usize, other_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, other_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
-    ctx.edicts = edicts.to_vec();
+    std::mem::swap(edicts, &mut ctx.edicts);
     crate::m_float::floater_pain(&mut ctx, self_idx as i32, other_idx as i32, kick, damage);
     sync_level(level, &ctx);
-    edicts.clone_from_slice(&ctx.edicts);
+    std::mem::swap(edicts, &mut ctx.edicts);
 }
 fn w_floater_die(
-    self_idx: usize, inflictor_idx: usize, attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, inflictor_idx: usize, attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
-    ctx.edicts = edicts.to_vec();
+    std::mem::swap(edicts, &mut ctx.edicts);
     crate::m_float::floater_die(&mut ctx, self_idx as i32, inflictor_idx as i32, attacker_idx as i32, damage, point);
     sync_level(level, &ctx);
-    edicts.clone_from_slice(&ctx.edicts);
+    std::mem::swap(edicts, &mut ctx.edicts);
 }
 
 // --- Brain ---
-fn w_brain_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_brain_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_brain::brain_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_brain_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_brain_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_brain::brain_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_brain_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_brain_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_brain::brain_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_brain_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_brain_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_brain::brain_idle(&mut edicts[self_idx], &mut ctx);
 }
-fn w_brain_melee(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_brain_melee(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_brain::brain_melee(&mut edicts[self_idx], &mut ctx);
 }
-fn w_brain_dodge(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_brain_dodge(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     crate::m_brain::brain_dodge(&mut edicts[self_idx], 0, 0.0, level);
 }
-fn w_brain_sight(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+fn w_brain_sight(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     crate::m_brain::brain_sight(&mut edicts[self_idx], 0, level);
 }
-fn w_brain_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_brain_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_brain::brain_search(&mut edicts[self_idx], &mut ctx);
 }
 fn w_brain_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     crate::m_brain::brain_pain(&mut edicts[self_idx], _attacker_idx as i32, kick, damage, level);
 }
 fn w_brain_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     crate::m_brain::brain_die(&mut edicts[self_idx], _inflictor_idx as i32, _attacker_idx as i32, damage, point, level);
 }
 
 // --- Tank ---
-fn w_tank_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_tank_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_tank::tank_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_tank_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_tank_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_tank::tank_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_tank_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_tank_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_tank::tank_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_tank_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_tank_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_tank::tank_idle(&mut edicts[self_idx], &mut ctx);
 }
-fn w_tank_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_tank_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_tank::tank_sight(&mut edicts[self_idx], &mut dummy);
 }
-fn w_tank_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_tank_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_tank::tank_attack(&mut edicts[self_idx], &mut ctx);
 }
 fn w_tank_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2420,7 +2419,7 @@ fn w_tank_pain(
     sync_level(level, &ctx);
 }
 fn w_tank_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2431,37 +2430,37 @@ fn w_tank_die(
 }
 
 // --- Infantry ---
-fn w_infantry_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_infantry_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_infantry::infantry_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_infantry_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_infantry_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_infantry::infantry_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_infantry_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_infantry_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_infantry::infantry_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_infantry_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_infantry_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_infantry::infantry_sight(&mut edicts[self_idx], &mut dummy);
 }
-fn w_infantry_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_infantry_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_infantry::infantry_attack(&mut edicts[self_idx], &mut ctx);
 }
-fn w_infantry_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_infantry_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_infantry::infantry_fidget(&mut edicts[self_idx], &mut ctx);
 }
-fn w_infantry_dodge(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_infantry_dodge(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     let mut dummy = Edict::default();
     crate::m_infantry::infantry_dodge(&mut edicts[self_idx], &mut dummy, 0.0, &mut ctx);
 }
 fn w_infantry_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2470,7 +2469,7 @@ fn w_infantry_pain(
     sync_level(level, &ctx);
 }
 fn w_infantry_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2481,40 +2480,40 @@ fn w_infantry_die(
 }
 
 // --- Gladiator ---
-fn w_gladiator_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gladiator_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gladiator::gladiator_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gladiator_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gladiator_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gladiator::gladiator_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gladiator_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gladiator_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gladiator::gladiator_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gladiator_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gladiator_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gladiator::gladiator_idle(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gladiator_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gladiator_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gladiator::gladiator_sight(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gladiator_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gladiator_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gladiator::gladiator_search(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gladiator_melee(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gladiator_melee(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gladiator::gladiator_melee(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gladiator_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gladiator_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gladiator::gladiator_attack(&mut edicts[self_idx], &mut ctx);
 }
 fn w_gladiator_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2523,7 +2522,7 @@ fn w_gladiator_pain(
     sync_level(level, &ctx);
 }
 fn w_gladiator_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2534,45 +2533,45 @@ fn w_gladiator_die(
 }
 
 // --- Gunner ---
-fn w_gunner_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gunner_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gunner::gunner_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gunner_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gunner_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gunner::gunner_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gunner_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gunner_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gunner::gunner_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gunner_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gunner_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gunner::gunner_idlesound(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gunner_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gunner_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_gunner::gunner_sight(&mut edicts[self_idx], &mut dummy);
 }
-fn w_gunner_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gunner_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     crate::m_gunner::gunner_search(&mut edicts[self_idx]);
 }
-fn w_gunner_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gunner_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_gunner::gunner_attack(&mut edicts[self_idx], &mut ctx);
 }
-fn w_gunner_dodge(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_gunner_dodge(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     crate::m_gunner::gunner_dodge(&mut edicts[self_idx], 0, 0.0);
 }
 fn w_gunner_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut dummy = Edict::default();
     crate::m_gunner::gunner_pain(&mut edicts[self_idx], &mut dummy, kick, damage, level);
 }
 fn w_gunner_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut dummy1 = Edict::default();
@@ -2581,36 +2580,36 @@ fn w_gunner_die(
 }
 
 // --- Parasite ---
-fn w_parasite_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_parasite_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_parasite::parasite_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_parasite_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_parasite_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_parasite::parasite_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_parasite_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_parasite_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_parasite::parasite_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_parasite_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_parasite_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_parasite::parasite_idle(&mut edicts[self_idx], &mut ctx);
 }
-fn w_parasite_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_parasite_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_parasite::parasite_sight(&mut edicts[self_idx], &mut dummy);
 }
-fn w_parasite_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_parasite_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_parasite::parasite_search(&mut edicts[self_idx], &mut ctx);
 }
-fn w_parasite_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_parasite_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_parasite::parasite_attack(&mut edicts[self_idx], &mut ctx);
 }
 fn w_parasite_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2619,7 +2618,7 @@ fn w_parasite_pain(
     sync_level(level, &ctx);
 }
 fn w_parasite_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2630,108 +2629,108 @@ fn w_parasite_die(
 }
 
 // --- Flipper ---
-fn w_flipper_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flipper_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_flipper::flipper_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_flipper_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flipper_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_flipper::flipper_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_flipper_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flipper_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_flipper::flipper_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_flipper_melee(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flipper_melee(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_flipper::flipper_melee(&mut edicts[self_idx], &mut ctx);
 }
-fn w_flipper_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flipper_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_flipper::flipper_sight(&mut edicts[self_idx], &mut dummy);
 }
 fn w_flipper_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     crate::m_flipper::flipper_pain(&mut edicts[self_idx], _attacker_idx, kick, damage, level, 0.0);
 }
 fn w_flipper_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     crate::m_flipper::flipper_die(&mut edicts[self_idx], _inflictor_idx, _attacker_idx, damage, point);
 }
 
 // --- Flyer ---
-fn w_flyer_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flyer_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_flyer::flyer_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_flyer_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flyer_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_flyer::flyer_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_flyer_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flyer_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_flyer::flyer_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_flyer_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flyer_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_flyer::flyer_idle(&mut edicts[self_idx], &mut ctx);
 }
-fn w_flyer_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flyer_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_flyer::flyer_sight(&mut edicts[self_idx], &mut dummy);
 }
-fn w_flyer_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flyer_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_flyer::flyer_attack(&mut edicts[self_idx], &mut ctx);
 }
-fn w_flyer_melee(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_flyer_melee(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_flyer::flyer_melee(&mut edicts[self_idx], &mut ctx);
 }
 fn w_flyer_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut dummy = Edict::default();
     crate::m_flyer::flyer_pain(&mut edicts[self_idx], &mut dummy, kick, damage);
 }
 fn w_flyer_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     _level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     crate::m_flyer::flyer_die(&mut edicts[self_idx], _inflictor_idx as i32, _attacker_idx as i32, damage, point);
 }
 
 // --- Hover ---
-fn w_hover_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_hover_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_hover::hover_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_hover_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_hover_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_hover::hover_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_hover_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_hover_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_hover::hover_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_hover_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_hover_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_hover::hover_sight(&mut edicts[self_idx], &mut dummy);
 }
-fn w_hover_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_hover_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     crate::m_hover::hover_search(&mut edicts[self_idx]);
 }
-fn w_hover_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_hover_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_hover::hover_attack(&mut edicts[self_idx], &mut ctx);
 }
 fn w_hover_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2740,7 +2739,7 @@ fn w_hover_pain(
     sync_level(level, &ctx);
 }
 fn w_hover_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2751,37 +2750,37 @@ fn w_hover_die(
 }
 
 // --- Chick ---
-fn w_chick_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_chick_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_chick::chick_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_chick_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_chick_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_chick::chick_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_chick_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_chick_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_chick::chick_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_chick_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_chick_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_chick::chick_sight(&mut edicts[self_idx], &mut dummy);
 }
-fn w_chick_melee(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_chick_melee(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_chick::chick_melee(&mut edicts[self_idx], &mut ctx);
 }
-fn w_chick_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_chick_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_chick::chick_attack(&mut edicts[self_idx], &mut ctx);
 }
-fn w_chick_dodge(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_chick_dodge(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     let mut dummy = Edict::default();
     crate::m_chick::chick_dodge(&mut edicts[self_idx], &mut dummy, 0.0, &mut ctx);
 }
 fn w_chick_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2790,7 +2789,7 @@ fn w_chick_pain(
     sync_level(level, &ctx);
 }
 fn w_chick_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2801,43 +2800,43 @@ fn w_chick_die(
 }
 
 // --- Mutant ---
-fn w_mutant_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_mutant_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_mutant::mutant_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_mutant_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_mutant_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_mutant::mutant_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_mutant_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_mutant_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_mutant::mutant_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_mutant_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_mutant_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_mutant::mutant_idle(&mut edicts[self_idx], &mut ctx);
 }
-fn w_mutant_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_mutant_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_mutant::mutant_sight(&mut edicts[self_idx], &mut dummy);
 }
-fn w_mutant_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_mutant_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     crate::m_mutant::mutant_search(&mut edicts[self_idx]);
 }
-fn w_mutant_jump(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_mutant_jump(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_mutant::mutant_jump(&mut edicts[self_idx], &mut ctx);
 }
-fn w_mutant_melee(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_mutant_melee(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_mutant::mutant_melee(&mut edicts[self_idx], &mut ctx);
 }
-fn w_mutant_checkattack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) -> bool {
+fn w_mutant_checkattack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) -> bool {
     let mut ctx = make_temp_ctx(_level);
     crate::m_mutant::mutant_checkattack(&mut edicts[self_idx], &mut ctx)
 }
 fn w_mutant_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2846,7 +2845,7 @@ fn w_mutant_pain(
     sync_level(level, &ctx);
 }
 fn w_mutant_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2857,20 +2856,20 @@ fn w_mutant_die(
 }
 
 // --- Insane ---
-fn w_insane_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_insane_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_insane::insane_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_insane_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_insane_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_insane::insane_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_insane_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_insane_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_insane::insane_run(&mut edicts[self_idx], &mut ctx);
 }
 fn w_insane_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2879,7 +2878,7 @@ fn w_insane_pain(
     sync_level(level, &ctx);
 }
 fn w_insane_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2890,41 +2889,41 @@ fn w_insane_die(
 }
 
 // --- Medic ---
-fn w_medic_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_medic_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_medic::medic_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_medic_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_medic_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_medic::medic_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_medic_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_medic_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_medic::medic_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_medic_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_medic_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_medic::medic_idle(&mut edicts[self_idx], &mut ctx);
 }
-fn w_medic_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_medic_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut dummy = Edict::default();
     crate::m_medic::medic_sight(&mut edicts[self_idx], &mut dummy);
 }
-fn w_medic_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_medic_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_medic::medic_search(&mut edicts[self_idx], &mut ctx);
 }
-fn w_medic_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_medic_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_medic::medic_attack(&mut edicts[self_idx], &mut ctx);
 }
-fn w_medic_dodge(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_medic_dodge(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     let mut dummy = Edict::default();
     crate::m_medic::medic_dodge(&mut edicts[self_idx], &mut dummy, 0.0, &mut ctx);
 }
 fn w_medic_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2933,7 +2932,7 @@ fn w_medic_pain(
     sync_level(level, &ctx);
 }
 fn w_medic_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2944,28 +2943,28 @@ fn w_medic_die(
 }
 
 // --- Supertank ---
-fn w_supertank_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_supertank_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_supertank::supertank_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_supertank_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_supertank_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_supertank::supertank_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_supertank_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_supertank_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_supertank::supertank_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_supertank_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_supertank_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_supertank::supertank_search(&mut edicts[self_idx], &mut ctx);
 }
-fn w_supertank_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_supertank_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_supertank::supertank_attack(&mut edicts[self_idx], &mut ctx);
 }
 fn w_supertank_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2974,7 +2973,7 @@ fn w_supertank_pain(
     sync_level(level, &ctx);
 }
 fn w_supertank_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -2985,28 +2984,28 @@ fn w_supertank_die(
 }
 
 // --- Boss2 ---
-fn w_boss2_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_boss2_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss2::boss2_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_boss2_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_boss2_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss2::boss2_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_boss2_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_boss2_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss2::boss2_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_boss2_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_boss2_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss2::boss2_search(&mut edicts[self_idx], &mut ctx);
 }
-fn w_boss2_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_boss2_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss2::boss2_attack(&mut edicts[self_idx], &mut ctx);
 }
 fn w_boss2_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -3014,7 +3013,7 @@ fn w_boss2_pain(
     sync_level(level, &ctx);
 }
 fn w_boss2_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -3023,32 +3022,32 @@ fn w_boss2_die(
 }
 
 // --- Jorg (boss31) ---
-fn w_jorg_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_jorg_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss31::jorg_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_jorg_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_jorg_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss31::jorg_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_jorg_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_jorg_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss31::jorg_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_jorg_idle(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_jorg_idle(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss31::jorg_idle(&mut edicts[self_idx], &mut ctx);
 }
-fn w_jorg_search(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_jorg_search(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss31::jorg_search(&mut edicts[self_idx], &mut ctx);
 }
-fn w_jorg_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_jorg_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss31::jorg_attack(&mut edicts[self_idx], &mut ctx);
 }
 fn w_jorg_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -3056,7 +3055,7 @@ fn w_jorg_pain(
     sync_level(level, &ctx);
 }
 fn w_jorg_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -3065,28 +3064,28 @@ fn w_jorg_die(
 }
 
 // --- Makron (boss32) ---
-fn w_makron_stand(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_makron_stand(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss32::makron_stand(&mut edicts[self_idx], &mut ctx);
 }
-fn w_makron_walk(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_makron_walk(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss32::makron_walk(&mut edicts[self_idx], &mut ctx);
 }
-fn w_makron_run(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_makron_run(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss32::makron_run(&mut edicts[self_idx], &mut ctx);
 }
-fn w_makron_sight(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_makron_sight(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss32::makron_sight(&mut edicts[self_idx], None, &mut ctx);
 }
-fn w_makron_attack(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_makron_attack(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss32::makron_attack(&mut edicts[self_idx], &mut ctx);
 }
 fn w_makron_pain(
-    self_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, kick: f32, damage: i32,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -3094,7 +3093,7 @@ fn w_makron_pain(
     sync_level(level, &ctx);
 }
 fn w_makron_die(
-    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut [Edict],
+    self_idx: usize, _inflictor_idx: usize, _attacker_idx: usize, edicts: &mut Vec<Edict>,
     level: &mut LevelLocals, damage: i32, point: Vec3,
 ) {
     let mut ctx = make_temp_ctx(level);
@@ -3104,28 +3103,28 @@ fn w_makron_die(
 
 // --- CheckAttack wrappers ---
 
-fn w_jorg_checkattack(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) -> bool {
+fn w_jorg_checkattack(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) -> bool {
     let mut ctx = make_temp_ctx(level);
     let result = crate::m_boss31::jorg_check_attack(&mut edicts[self_idx], &mut ctx);
     sync_level(level, &ctx);
     result
 }
 
-fn w_makron_checkattack(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) -> bool {
+fn w_makron_checkattack(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) -> bool {
     let mut ctx = make_temp_ctx(level);
     let result = crate::m_boss32::makron_check_attack(&mut edicts[self_idx], &mut ctx);
     sync_level(level, &ctx);
     result
 }
 
-fn w_boss2_checkattack(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) -> bool {
+fn w_boss2_checkattack(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) -> bool {
     let mut ctx = make_temp_ctx(level);
     let result = crate::m_boss2::boss2_check_attack(&mut edicts[self_idx], &mut ctx);
     sync_level(level, &ctx);
     result
 }
 
-fn w_medic_checkattack(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) -> bool {
+fn w_medic_checkattack(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) -> bool {
     let mut ctx = make_temp_ctx(level);
     let result = crate::m_medic::medic_checkattack(&mut edicts[self_idx], &mut ctx);
     sync_level(level, &ctx);
@@ -3134,12 +3133,12 @@ fn w_medic_checkattack(self_idx: usize, edicts: &mut [Edict], level: &mut LevelL
 
 // --- Additional search wrappers ---
 
-fn w_jorg_search_fn(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_jorg_search_fn(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss31::jorg_search(&mut edicts[self_idx], &mut ctx);
 }
 
-fn w_boss2_search_fn(self_idx: usize, edicts: &mut [Edict], _level: &mut LevelLocals) {
+fn w_boss2_search_fn(self_idx: usize, edicts: &mut Vec<Edict>, _level: &mut LevelLocals) {
     let mut ctx = make_temp_ctx(_level);
     crate::m_boss2::boss2_search(&mut edicts[self_idx], &mut ctx);
 }
@@ -3629,7 +3628,7 @@ pub static MCHECKATTACK_TABLE: [CheckAttackFn; MCHECKATTACK_TABLE_SIZE] = {
 // ============================================================
 
 /// Dispatch a think callback. Panics if the edict has no think_fn set.
-pub fn dispatch_think(idx: usize, self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn dispatch_think(idx: usize, self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     THINK_TABLE[idx](self_idx, edicts, level);
 }
 
@@ -3638,7 +3637,7 @@ pub fn dispatch_pain(
     idx: usize,
     self_idx: usize,
     attacker_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
     kick: f32,
     damage: i32,
@@ -3652,7 +3651,7 @@ pub fn dispatch_die(
     self_idx: usize,
     inflictor_idx: usize,
     attacker_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
     damage: i32,
     point: Vec3,
@@ -3665,7 +3664,7 @@ pub fn dispatch_touch(
     idx: usize,
     self_idx: usize,
     other_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
     plane: Option<&CPlane>,
     surf: Option<&CSurface>,
@@ -3679,7 +3678,7 @@ pub fn dispatch_use(
     self_idx: usize,
     other_idx: usize,
     activator_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     USE_TABLE[idx](self_idx, other_idx, activator_idx, edicts, level);
@@ -3690,24 +3689,24 @@ pub fn dispatch_blocked(
     idx: usize,
     self_idx: usize,
     other_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     BLOCKED_TABLE[idx](self_idx, other_idx, edicts, level);
 }
 
 /// Dispatch a monster stand callback.
-pub fn dispatch_stand(idx: usize, self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn dispatch_stand(idx: usize, self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     MSTAND_TABLE[idx](self_idx, edicts, level);
 }
 
 /// Dispatch a monster walk callback.
-pub fn dispatch_walk(idx: usize, self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn dispatch_walk(idx: usize, self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     MWALK_TABLE[idx](self_idx, edicts, level);
 }
 
 /// Dispatch a monster run callback.
-pub fn dispatch_run(idx: usize, self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn dispatch_run(idx: usize, self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     MRUN_TABLE[idx](self_idx, edicts, level);
 }
 
@@ -3715,7 +3714,7 @@ pub fn dispatch_run(idx: usize, self_idx: usize, edicts: &mut [Edict], level: &m
 pub fn dispatch_dodge(
     idx: usize,
     self_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     MDODGE_TABLE[idx](self_idx, edicts, level);
@@ -3725,7 +3724,7 @@ pub fn dispatch_dodge(
 pub fn dispatch_attack(
     idx: usize,
     self_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     MATTACK_TABLE[idx](self_idx, edicts, level);
@@ -3735,7 +3734,7 @@ pub fn dispatch_attack(
 pub fn dispatch_melee(
     idx: usize,
     self_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     MMELEE_TABLE[idx](self_idx, edicts, level);
@@ -3745,14 +3744,14 @@ pub fn dispatch_melee(
 pub fn dispatch_sight(
     idx: usize,
     self_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     MSIGHT_TABLE[idx](self_idx, edicts, level);
 }
 
 /// Dispatch a monster idle callback.
-pub fn dispatch_idle(idx: usize, self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn dispatch_idle(idx: usize, self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     MIDLE_TABLE[idx](self_idx, edicts, level);
 }
 
@@ -3760,7 +3759,7 @@ pub fn dispatch_idle(idx: usize, self_idx: usize, edicts: &mut [Edict], level: &
 pub fn dispatch_search(
     idx: usize,
     self_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     MSEARCH_TABLE[idx](self_idx, edicts, level);
@@ -3770,7 +3769,7 @@ pub fn dispatch_search(
 pub fn dispatch_checkattack(
     idx: usize,
     self_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) -> bool {
     MCHECKATTACK_TABLE[idx](self_idx, edicts, level)
@@ -3781,7 +3780,7 @@ pub fn dispatch_checkattack(
 // ============================================================
 
 /// Call the think_fn on an edict if set.
-pub fn call_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn call_think(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     if let Some(idx) = edicts[self_idx].think_fn {
         dispatch_think(idx, self_idx, edicts, level);
     }
@@ -3791,7 +3790,7 @@ pub fn call_think(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals
 pub fn call_pain(
     self_idx: usize,
     attacker_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
     kick: f32,
     damage: i32,
@@ -3806,7 +3805,7 @@ pub fn call_die(
     self_idx: usize,
     inflictor_idx: usize,
     attacker_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
     damage: i32,
     point: Vec3,
@@ -3820,7 +3819,7 @@ pub fn call_die(
 pub fn call_touch(
     self_idx: usize,
     other_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
     plane: Option<&CPlane>,
     surf: Option<&CSurface>,
@@ -3835,7 +3834,7 @@ pub fn call_use(
     self_idx: usize,
     other_idx: usize,
     activator_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     if let Some(idx) = edicts[self_idx].use_fn {
@@ -3847,7 +3846,7 @@ pub fn call_use(
 pub fn call_blocked(
     self_idx: usize,
     other_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) {
     if let Some(idx) = edicts[self_idx].blocked_fn {
@@ -3856,21 +3855,21 @@ pub fn call_blocked(
 }
 
 /// Call the monsterinfo.stand_fn on an edict if set.
-pub fn call_stand(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn call_stand(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     if let Some(idx) = edicts[self_idx].monsterinfo.stand_fn {
         dispatch_stand(idx, self_idx, edicts, level);
     }
 }
 
 /// Call the monsterinfo.walk_fn on an edict if set.
-pub fn call_walk(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn call_walk(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     if let Some(idx) = edicts[self_idx].monsterinfo.walk_fn {
         dispatch_walk(idx, self_idx, edicts, level);
     }
 }
 
 /// Call the monsterinfo.run_fn on an edict if set.
-pub fn call_run(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn call_run(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     if let Some(idx) = edicts[self_idx].monsterinfo.run_fn {
         dispatch_run(idx, self_idx, edicts, level);
     }
@@ -3879,7 +3878,7 @@ pub fn call_run(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) 
 /// Call the monsterinfo.checkattack_fn on an edict if set.
 pub fn call_checkattack(
     self_idx: usize,
-    edicts: &mut [Edict],
+    edicts: &mut Vec<Edict>,
     level: &mut LevelLocals,
 ) -> bool {
     if let Some(idx) = edicts[self_idx].monsterinfo.checkattack_fn {
@@ -3890,42 +3889,42 @@ pub fn call_checkattack(
 }
 
 /// Call the monsterinfo.dodge_fn on an edict if set.
-pub fn call_dodge(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn call_dodge(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     if let Some(idx) = edicts[self_idx].monsterinfo.dodge_fn {
         dispatch_dodge(idx, self_idx, edicts, level);
     }
 }
 
 /// Call the monsterinfo.attack_fn on an edict if set.
-pub fn call_attack(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn call_attack(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     if let Some(idx) = edicts[self_idx].monsterinfo.attack_fn {
         dispatch_attack(idx, self_idx, edicts, level);
     }
 }
 
 /// Call the monsterinfo.melee_fn on an edict if set.
-pub fn call_melee(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn call_melee(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     if let Some(idx) = edicts[self_idx].monsterinfo.melee_fn {
         dispatch_melee(idx, self_idx, edicts, level);
     }
 }
 
 /// Call the monsterinfo.sight_fn on an edict if set.
-pub fn call_sight(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn call_sight(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     if let Some(idx) = edicts[self_idx].monsterinfo.sight_fn {
         dispatch_sight(idx, self_idx, edicts, level);
     }
 }
 
 /// Call the monsterinfo.idle_fn on an edict if set.
-pub fn call_idle(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn call_idle(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     if let Some(idx) = edicts[self_idx].monsterinfo.idle_fn {
         dispatch_idle(idx, self_idx, edicts, level);
     }
 }
 
 /// Call the monsterinfo.search_fn on an edict if set.
-pub fn call_search(self_idx: usize, edicts: &mut [Edict], level: &mut LevelLocals) {
+pub fn call_search(self_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
     if let Some(idx) = edicts[self_idx].monsterinfo.search_fn {
         dispatch_search(idx, self_idx, edicts, level);
     }

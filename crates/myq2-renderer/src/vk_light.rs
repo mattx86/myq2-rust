@@ -446,29 +446,66 @@ pub unsafe fn r_stain_node(st: &DStain, node: *mut MNode) {
 /// # Safety
 /// Accesses global renderer state and world model data.
 pub unsafe fn r_light_point(p: &Vec3, color: &mut Vec3) {
+    // Classic behaviour: trace straight down to the floor below the point.
+    let end = [p[0], p[1], p[2] - 2048.0];
+    r_light_point_dir(p, &end, color);
+}
+
+/// Trace straight down from `p` and return the world Z of the floor hit (the lightspot),
+/// or `None` if nothing was hit within 2048 units. Used to place entity blob shadows on
+/// the actual floor below them (the model's stored bounds are a fixed placeholder, so they
+/// can't be used for this).
+///
+/// # Safety
+/// Accesses global renderer state and world model data.
+pub unsafe fn r_ground_z(p: &Vec3) -> Option<f32> {
+    if r_worldmodel_lightdata().is_null() {
+        return None;
+    }
+    let end = [p[0], p[1], p[2] - 2048.0];
+    let mut ls = LIGHT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let r = recursive_light_point(&mut ls, r_worldmodel_nodes() as *const MNode, p, &end);
+    if r == -1 { None } else { Some(ls.lightspot[2]) }
+}
+
+/// Sample the lightmap along an arbitrary segment (start -> end), adding dynamic lights
+/// evaluated at `start`. Returns `true` if the trace hit a lit surface, `false` if it
+/// missed (left the world without crossing a lightmapped face).
+///
+/// This generalises [`r_light_point`], whose downward floor trace cannot see the vertical
+/// light gradient on the walls around a tall shaft. Tracing horizontally toward the walls
+/// instead lets a moving lift read the wall lighting at its CURRENT height, which varies
+/// continuously, so its relighting ramps smoothly instead of snapping when it finally
+/// clears one floor for another.
+///
+/// # Safety
+/// Accesses global renderer state and world model data.
+pub unsafe fn r_light_point_dir(start: &Vec3, end: &Vec3, color: &mut Vec3) -> bool {
     if r_worldmodel_lightdata().is_null() {
         color[0] = 1.0;
         color[1] = 1.0;
         color[2] = 1.0;
-        return;
+        return true;
     }
 
-    let end = [p[0], p[1], p[2] - 2048.0];
-
     let mut ls = LIGHT_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let r = recursive_light_point(&mut ls, r_worldmodel_nodes() as *const MNode, p, &end);
+    let r = recursive_light_point(&mut ls, r_worldmodel_nodes() as *const MNode, start, end);
+    let hit = r != -1;
 
-    if r == -1 {
+    if !hit {
         *color = vec3_origin;
     } else {
         *color = ls.pointcolor;
     }
     drop(ls);
 
-    // add dynamic lights
+    // add dynamic lights. Use the point being lit (start) for the distance rather than
+    // the global currententity — it is more correct (the light is evaluated at start) and
+    // avoids dereferencing currententity, which is not set for every caller (e.g. the
+    // modern brush-model relight path).
     for lnum in 0..rfs().r_newrefdef.num_dlights {
         let dl = &rfs().r_newrefdef.dlight(lnum as usize);
-        let dist = vector_subtract(&(*rfs().currententity).origin, &dl.origin);
+        let dist = vector_subtract(start, &dl.origin);
         let add = (dl.intensity - vector_length(&dist)) * (1.0 / 256.0);
         if add > 0.0 {
             *color = vector_ma(color, add, &dl.color);
@@ -476,6 +513,7 @@ pub unsafe fn r_light_point(p: &Vec3, color: &mut Vec3) {
     }
 
     *color = vector_scale(color, crate::vk_rmain::rcvars().vk_modulate.value);
+    hit
 }
 
 // ============================================================
@@ -623,7 +661,14 @@ pub unsafe fn r_set_cache_state(surf: &mut MSurface) {
 /// # Safety
 /// Accesses global renderer state, blocklights buffer, and surface data.
 pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
-    if (*surf.texinfo).flags & (SURF_SKY | SURF_TRANS33 | SURF_TRANS66 | SURF_WARP) != 0 {
+    // Warp/turb liquids (water/lava/slime) ARE lit now — including translucent water,
+    // which is commonly SURF_WARP | SURF_TRANS66. Only sky and NON-warp translucent
+    // surfaces (glass, force fields) are genuinely non-lit. Surfaces with no baked
+    // samples fall through to the "full bright if no light data" path below.
+    let ti_flags = (*surf.texinfo).flags;
+    let is_warp = ti_flags & SURF_WARP != 0;
+    let is_trans = ti_flags & (SURF_TRANS33 | SURF_TRANS66) != 0;
+    if (ti_flags & SURF_SKY != 0) || (is_trans && !is_warp) {
         vid_printf(ERR_DROP, "R_BuildLightMap called for non-lit surface");
         return;
     }
@@ -761,6 +806,57 @@ pub unsafe fn r_build_light_map(surf: &MSurface, dest: *mut u8, stride: i32) {
             && !surf.stains.is_null() && crate::vk_rmain::rcvars().r_stainmap.value != 0.0 {
                 r_add_stains(&mut ls, surf);
             }
+    }
+
+    // Liquids (water/lava/slime) read a blocky per-texel lightmap badly because the
+    // warped UVs smear the coarse light grid, so flatten the whole surface to one
+    // uniform light level. Rather than averaging dark and bright texels together
+    // (which yields a washed-out middle), classify each texel as dark or bright
+    // relative to the midpoint of this surface's luminance range, then commit the
+    // liquid to whichever group DOMINATES (its average). A liquid in a mostly-dark
+    // area therefore reads dark, and one in a mostly-bright area reads bright.
+    if (*surf.texinfo).flags & SURF_WARP != 0 && size > 0 {
+        let mut min_l = f32::MAX;
+        let mut max_l = f32::MIN;
+        for i in 0..size {
+            let l = ls.blocklights[i * 3] * 0.299
+                + ls.blocklights[i * 3 + 1] * 0.587
+                + ls.blocklights[i * 3 + 2] * 0.114;
+            if l < min_l { min_l = l; }
+            if l > max_l { max_l = l; }
+        }
+        let threshold = (min_l + max_l) * 0.5;
+
+        let mut dark_sum = [0.0f32; 3];
+        let mut dark_n = 0u32;
+        let mut bright_sum = [0.0f32; 3];
+        let mut bright_n = 0u32;
+        for i in 0..size {
+            let r = ls.blocklights[i * 3];
+            let g = ls.blocklights[i * 3 + 1];
+            let b = ls.blocklights[i * 3 + 2];
+            if r * 0.299 + g * 0.587 + b * 0.114 < threshold {
+                dark_sum[0] += r; dark_sum[1] += g; dark_sum[2] += b; dark_n += 1;
+            } else {
+                bright_sum[0] += r; bright_sum[1] += g; bright_sum[2] += b; bright_n += 1;
+            }
+        }
+
+        let avg = if dark_n >= bright_n && dark_n > 0 {
+            let n = dark_n as f32;
+            [dark_sum[0] / n, dark_sum[1] / n, dark_sum[2] / n]
+        } else if bright_n > 0 {
+            let n = bright_n as f32;
+            [bright_sum[0] / n, bright_sum[1] / n, bright_sum[2] / n]
+        } else {
+            [0.0, 0.0, 0.0]
+        };
+
+        for i in 0..size {
+            ls.blocklights[i * 3] = avg[0];
+            ls.blocklights[i * 3 + 1] = avg[1];
+            ls.blocklights[i * 3 + 2] = avg[2];
+        }
     }
 
     // put into texture format (store:)

@@ -440,7 +440,6 @@ pub fn cmd_invuse_f(ctx: &mut GameContext, ent_idx: usize) {
 
 /// Cycle to previous weapon.
 pub fn cmd_weap_prev_f(ctx: &mut GameContext, ent_idx: usize) {
-    eprintln!("cmd_weap_prev_f called for entity {}", ent_idx);
     let client_idx = match ctx.edicts[ent_idx].client {
         Some(c) => c,
         None => return,
@@ -481,7 +480,6 @@ pub fn cmd_weap_prev_f(ctx: &mut GameContext, ent_idx: usize) {
 
 /// Cycle to next weapon.
 pub fn cmd_weap_next_f(ctx: &mut GameContext, ent_idx: usize) {
-    eprintln!("cmd_weap_next_f called for entity {}", ent_idx);
     let client_idx = match ctx.edicts[ent_idx].client {
         Some(c) => c,
         None => return,

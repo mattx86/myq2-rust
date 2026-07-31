@@ -207,8 +207,6 @@ pub fn sv_run_think(ent_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLo
         return true;
     }
 
-    eprintln!("sv_run_think called for entity {} (think_fn={:?}, nextthink={:.3}, level.time={:.3})",
-              ent_idx, edicts[ent_idx].think_fn, thinktime, level.time);
     edicts[ent_idx].nextthink = 0.0;
     if edicts[ent_idx].think_fn.is_none() {
         gi_error("NULL ent->think");
@@ -619,8 +617,6 @@ fn sv_push(pusher_idx: usize, move_vec: &Vec3, amove: &Vec3, edicts: &mut Vec<Ed
 
 /// Bmodel objects don't interact with each other, but push all box objects.
 pub fn sv_physics_pusher(ent_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
-    eprintln!("sv_physics_pusher called for entity {} (classname={:?})",
-              ent_idx, edicts[ent_idx].classname);
     // if not a team captain, so movement will be handled elsewhere
     if edicts[ent_idx].flags.intersects(FL_TEAMSLAVE) {
         return;
@@ -942,8 +938,6 @@ pub fn sv_physics_step(ent_idx: usize, edicts: &mut Vec<Edict>, level: &mut Leve
 // ============================================================
 
 pub fn g_run_entity(ent_idx: usize, edicts: &mut Vec<Edict>, level: &mut LevelLocals) {
-    eprintln!("g_run_entity called for entity {} (classname={:?}, movetype={:?})",
-              ent_idx, edicts[ent_idx].classname, edicts[ent_idx].movetype);
     set_level_time(level.time);
     if let Some(idx) = edicts[ent_idx].prethink_fn {
         crate::dispatch::dispatch_think(idx, ent_idx, edicts, level);

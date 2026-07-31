@@ -154,6 +154,11 @@ pub struct MSurface {
     pub cached_light: [f32; MAXLIGHTMAPS], // values currently used in lightmap
     pub samples: *mut u8,                  // [numstyles*surfsize]
     pub stains: *mut u8,
+
+    /// For liquid (SURF_WARP) surfaces: a single flat light colour (0..1) shared by
+    /// every face of the same contiguous water body, so the body is lit uniformly
+    /// instead of per-BSP-face. `[-1, -1, -1]` means "not a lit liquid / no data".
+    pub water_body_light: [f32; 3],
 }
 
 #[repr(C)]

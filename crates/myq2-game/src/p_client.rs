@@ -1659,7 +1659,6 @@ pub fn client_think(ctx: &mut GameContext, ent_idx: usize, ucmd: &UserCmd) {
 
 /// Converted from: ClientBeginServerFrame
 pub fn client_begin_server_frame(ctx: &mut GameContext, ent_idx: usize) {
-    eprintln!("client_begin_server_frame called for entity {}", ent_idx);
     if ctx.level.intermissiontime != 0.0 {
         return;
     }

@@ -237,9 +237,27 @@ impl GameImport for ServerGameImport {
                 }
             }
 
-            // Note: We do NOT write modelindex back to GAME_CONTEXT here.
-            // The dispatch wrapper clone pattern would clobber it anyway.
-            // sync_edicts_to_server preserves ge.edicts modelindex via conditional copy.
+            // Propagate the inline brush model's bounds onto the GAME edict too.
+            // The static game shares this process's collision-model globals, but the
+            // game spawn code (sp_func_plat/door/button) reads ent.mins/maxs right
+            // after gi_setmodel to compute travel distance, spawn position and
+            // trigger volumes — and the game module must not derive them itself
+            // (it can be a cdylib with empty globals). This mirrors the dynamic-path
+            // game_ffi::gi_setmodel writing straight to the shared edict pointer, and
+            // original C PF_setmodel setting ent->mins/maxs on the shared edict.
+            // modelindex is intentionally NOT written here (the dispatch clone would
+            // clobber it; sync_edicts_to_server preserves the engine value instead).
+            if let Some(ref model) = inline_model {
+                with_game_ctx_ptr(|ptr| {
+                    // SAFETY: GAME_CTX_PTR is valid during game code execution
+                    // (single-threaded); setmodel is only called from game code.
+                    let game_ctx = unsafe { &mut *ptr };
+                    if let Some(game_ent) = game_ctx.edicts.get_mut(ent_idx as usize) {
+                        game_ent.mins = model.mins;
+                        game_ent.maxs = model.maxs;
+                    }
+                });
+            }
         });
 
         // For inline models, call linkentity to compute size, absbox, PVS clusters.
@@ -308,9 +326,18 @@ impl GameImport for ServerGameImport {
                 end[1] - ent_origin[1],
                 end[2] - ent_origin[2],
             ];
-            let entity_tr = myq2_common::cmodel::cm_box_trace(
+            let mut entity_tr = myq2_common::cmodel::cm_box_trace(
                 &local_start, &local_end, mins, maxs, headnode, contentmask,
             );
+            // cm_box_trace computes endpos from the (origin-subtracted) local
+            // start/end, so it is in the model's frame of reference. Mirror the
+            // original CM_TransformedBoxTrace (cmodel.c) by recomputing endpos
+            // from the ORIGINAL world start/end and the fraction. Without this,
+            // a hit on a moving bmodel (lift/door/train) returns an endpos offset
+            // by the entity's origin, teleporting whatever uses it (e.g. pmove).
+            for i in 0..3 {
+                entity_tr.endpos[i] = start[i] + entity_tr.fraction * (end[i] - start[i]);
+            }
             if entity_tr.allsolid || entity_tr.startsolid || entity_tr.fraction < tr.fraction {
                 let mut new_tr = entity_tr;
                 new_tr.ent_index = ent_idx;
@@ -493,37 +520,96 @@ impl GameImport for ServerGameImport {
                         ent.absmin[i] = ent.s.origin[i] + ent.mins[i] - 1.0;
                         ent.absmax[i] = ent.s.origin[i] + ent.maxs[i] + 1.0;
                     }
+
+                    // Encode solidity into s.solid for the client's prediction trace
+                    // (mirrors SV_LinkEdict). Without this the networked solid stays 0
+                    // and the client skips brush-model movers (cl_pm_trace), so the
+                    // player falls straight through trains/lifts/doors client-side.
+                    if ent.solid == crate::sv_game::Solid::Bbox
+                        && (ent.svflags & myq2_game::game::SVF_DEADMONSTER) == 0
+                    {
+                        // assume x/y are equal and symmetric; z is not symmetric
+                        let mut i = (ent.maxs[0] / 8.0) as i32;
+                        if i < 1 { i = 1; }
+                        if i > 31 { i = 31; }
+                        let mut j = ((-ent.mins[2]) / 8.0) as i32;
+                        if j < 1 { j = 1; }
+                        if j > 31 { j = 31; }
+                        let mut k = ((ent.maxs[2] + 32.0) / 8.0) as i32;
+                        if k < 1 { k = 1; }
+                        if k > 63 { k = 63; }
+                        ent.s.solid = (k << 10) | (j << 5) | i;
+                    } else if ent.solid == crate::sv_game::Solid::Bsp {
+                        ent.s.solid = 31; // a solid_bbox will never create this value
+                    } else {
+                        ent.s.solid = 0;
+                    }
                     // Copy origin to old_origin on first link
                     if ent.linkcount == 0 {
                         ent.s.old_origin = ent.s.origin;
                     }
                     ent.linkcount += 1;
 
-                    // Compute PVS cluster membership via the collision model
+                    // Compute PVS cluster + area membership via the collision model.
+                    //
+                    // CRITICAL: areanum must be computed from ALL touched leafs,
+                    // regardless of whether the cluster list overflows to a headnode.
+                    // The previous code only set areanum inside the non-overflow branch,
+                    // so a mover spanning more than MAX_ENT_CLUSTERS leafs (a tall lift)
+                    // ended up areanum=0 and was culled from every client's snapshot —
+                    // making it invisible AND un-predictable client-side. Mirrors the
+                    // original SV_LinkEdict (and sv_world::link_edict).
                     if ent.solid != crate::sv_game::Solid::Not || ent.s.modelindex != 0 {
+                        ent.areanum = 0;
+                        ent.areanum2 = 0;
+                        ent.num_clusters = 0;
+
                         let leafs = myq2_common::cmodel::cm_box_leafnums(&ent.absmin, &ent.absmax, 0);
+                        let clusters: Vec<i32> = leafs
+                            .iter()
+                            .map(|&l| myq2_common::cmodel::cm_leaf_cluster(l as usize))
+                            .collect();
 
-                        if leafs.len() > crate::sv_game::MAX_ENT_CLUSTERS {
+                        // set areas from every touched leaf (skip void area 0)
+                        for &leaf in &leafs {
+                            let area = myq2_common::cmodel::cm_leaf_area(leaf as usize);
+                            if area != 0 {
+                                // doors may legally straddle two areas, never more
+                                if ent.areanum != 0 && ent.areanum != area {
+                                    ent.areanum2 = area;
+                                } else {
+                                    ent.areanum = area;
+                                }
+                            }
+                        }
+
+                        // store unique visible clusters; fall back to a headnode if
+                        // there are more than MAX_ENT_CLUSTERS of them or we hit the cap
+                        let max_clusters = crate::sv_game::MAX_ENT_CLUSTERS;
+                        if leafs.len() >= 1024 {
                             ent.num_clusters = -1;
-                            ent.headnode = myq2_common::cmodel::cm_headnode_for_box(&ent.absmin, &ent.absmax);
+                            ent.headnode =
+                                myq2_common::cmodel::cm_headnode_for_box(&ent.absmin, &ent.absmax);
                         } else {
-                            ent.num_clusters = 0;
-                            for &leaf in &leafs {
-                                let cluster = myq2_common::cmodel::cm_leaf_cluster(leaf as usize);
-                                let area = myq2_common::cmodel::cm_leaf_area(leaf as usize);
-
-                                if area != 0 {
-                                    if ent.areanum != 0 && ent.areanum != area {
-                                        ent.areanum2 = area;
-                                    } else {
-                                        ent.areanum = area;
-                                    }
+                            for i in 0..clusters.len() {
+                                let cluster = clusters[i];
+                                if cluster == -1 {
+                                    continue; // not a visible leaf
                                 }
-
-                                if cluster != -1 && (ent.num_clusters as usize) < crate::sv_game::MAX_ENT_CLUSTERS {
-                                    ent.clusternums[ent.num_clusters as usize] = cluster;
-                                    ent.num_clusters += 1;
+                                if clusters[..i].contains(&cluster) {
+                                    continue; // duplicate
                                 }
+                                if ent.num_clusters as usize == max_clusters {
+                                    // too many clusters, go by headnode instead
+                                    ent.num_clusters = -1;
+                                    ent.headnode = myq2_common::cmodel::cm_headnode_for_box(
+                                        &ent.absmin,
+                                        &ent.absmax,
+                                    );
+                                    break;
+                                }
+                                ent.clusternums[ent.num_clusters as usize] = cluster;
+                                ent.num_clusters += 1;
                             }
                         }
                     }

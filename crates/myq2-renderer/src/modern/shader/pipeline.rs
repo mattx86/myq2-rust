@@ -57,6 +57,15 @@ const SHADOW_CUBE_VERT_SPV: &[u8] = spv!("shadow_cube.vert.spv");
 const SHADOW_CUBE_FRAG_SPV: &[u8] = spv!("shadow_cube.frag.spv");
 const WORLD_LIT_VERT_SPV: &[u8] = spv!("world_lit.vert.spv");
 const WORLD_LIT_FRAG_SPV: &[u8] = spv!("world_lit.frag.spv");
+// Projective dynamic shadows: caster reuses alias.vert; resolve is a fullscreen pass.
+pub(crate) const SHADOW_CASTER_FRAG_SPV: &[u8] = spv!("shadow_caster.frag.spv");
+pub(crate) const SHADOW_RESOLVE_VERT_SPV: &[u8] = spv!("shadow_resolve.vert.spv");
+pub(crate) const SHADOW_RESOLVE_FRAG_SPV: &[u8] = spv!("shadow_resolve.frag.spv");
+pub(crate) const VXGI_DEBUG_FRAG_SPV: &[u8] = spv!("vxgi_debug.frag.spv");
+pub(crate) const VXGI_GI_FRAG_SPV: &[u8] = spv!("vxgi_gi.frag.spv");
+pub(crate) const WATER_SHIMMER_FRAG_SPV: &[u8] = spv!("water_shimmer.frag.spv");
+pub(crate) const SHADOW_CASTER_VERT_SPV: &[u8] = spv!("alias.vert.spv");
+pub(crate) const SHADOW_BSP_VERT_SPV: &[u8] = spv!("shadow_bsp.vert.spv");
 
 // ============================================================================
 // Pipeline variant (blend/depth/cull state baked into pipeline)
@@ -127,6 +136,27 @@ pub struct PipelineManager {
     pipeline_layout: Option<vk::PipelineLayout>,
     /// Minimal pipeline layout for shadow passes (push constants only, no descriptor sets).
     shadow_pipeline_layout: Option<vk::PipelineLayout>,
+    /// Projective dynamic shadows — caster depth pass (alias.vert + shadow_caster.frag).
+    shadow_caster_pipeline: Option<vk::Pipeline>,
+    shadow_caster_layout: Option<vk::PipelineLayout>,
+    /// Projective dynamic shadows — fullscreen resolve pass.
+    shadow_resolve_pipeline: Option<vk::Pipeline>,
+    shadow_resolve_layout: Option<vk::PipelineLayout>,
+    vxgi_debug_pipeline: Option<vk::Pipeline>,
+    vxgi_debug_layout: Option<vk::PipelineLayout>,
+    vxgi_debug_set_layout: Option<vk::DescriptorSetLayout>,
+    vxgi_gi_pipeline: Option<vk::Pipeline>,
+    vxgi_gi_layout: Option<vk::PipelineLayout>,
+    vxgi_gi_set_layout: Option<vk::DescriptorSetLayout>,
+    /// Water ripple shimmer pass (caustic light on walls near water).
+    water_shimmer_pipeline: Option<vk::Pipeline>,
+    water_shimmer_layout: Option<vk::PipelineLayout>,
+    water_shimmer_set_layout: Option<vk::DescriptorSetLayout>,
+    /// Descriptor set layout for the resolve pass (binding0=scene depth, binding1=shadow map).
+    shadow_resolve_set_layout: Option<vk::DescriptorSetLayout>,
+    /// BSP/brush caster pipeline (movers) — shadow_bsp.vert + shadow_caster.frag.
+    shadow_bsp_pipeline: Option<vk::Pipeline>,
+    shadow_bsp_layout: Option<vk::PipelineLayout>,
     initialized: bool,
     color_format: vk::Format,
     depth_format: vk::Format,
@@ -152,6 +182,22 @@ impl PipelineManager {
             lightmap_set_layout: None,
             pipeline_layout: None,
             shadow_pipeline_layout: None,
+            shadow_caster_pipeline: None,
+            shadow_caster_layout: None,
+            shadow_resolve_pipeline: None,
+            shadow_resolve_layout: None,
+            shadow_resolve_set_layout: None,
+            vxgi_debug_pipeline: None,
+            vxgi_debug_layout: None,
+            vxgi_debug_set_layout: None,
+            vxgi_gi_pipeline: None,
+            vxgi_gi_layout: None,
+            vxgi_gi_set_layout: None,
+            water_shimmer_pipeline: None,
+            water_shimmer_layout: None,
+            water_shimmer_set_layout: None,
+            shadow_bsp_pipeline: None,
+            shadow_bsp_layout: None,
             initialized: false,
             color_format,
             depth_format,
@@ -247,8 +293,12 @@ impl PipelineManager {
                 };
                 let push_constant_ranges = [push_constant_range];
 
-                // Set 0 = per-frame/per-object uniforms, Set 1 = diffuse texture, Set 2 = lightmap array
-                let layouts = [desc_layout, ui_tex_layout, lightmap_layout];
+                // Set 0 = per-frame/per-object uniforms, Set 1 = diffuse texture, Set 2 = lightmap array.
+                // Set 3 = lightmap array AGAIN (world_lit dark-fill uses set 2 = shadow cubemap,
+                // set 3 = baked lightmap). Set 4 = VXGI irradiance volume (world.frag samples it as
+                // a 3D 'lightmap'). All are "1 combined image sampler"; pipelines that don't use a
+                // set simply don't bind it, which is allowed.
+                let layouts = [desc_layout, ui_tex_layout, lightmap_layout, lightmap_layout, lightmap_layout];
                 let layout_info = vk::PipelineLayoutCreateInfo::default()
                     .set_layouts(&layouts)
                     .push_constant_ranges(&push_constant_ranges);
@@ -919,6 +969,575 @@ impl PipelineManager {
         }).ok_or_else(|| "No Vulkan context".to_string())?
     }
 
+    pub fn shadow_caster_pipeline(&self) -> Option<(vk::Pipeline, vk::PipelineLayout)> {
+        match (self.shadow_caster_pipeline, self.shadow_caster_layout) {
+            (Some(p), Some(l)) => Some((p, l)),
+            _ => None,
+        }
+    }
+    pub fn shadow_resolve_pipeline(&self) -> Option<(vk::Pipeline, vk::PipelineLayout)> {
+        match (self.shadow_resolve_pipeline, self.shadow_resolve_layout) {
+            (Some(p), Some(l)) => Some((p, l)),
+            _ => None,
+        }
+    }
+    pub fn shadow_resolve_set_layout(&self) -> Option<vk::DescriptorSetLayout> {
+        self.shadow_resolve_set_layout
+    }
+    pub fn shadow_bsp_pipeline(&self) -> Option<(vk::Pipeline, vk::PipelineLayout)> {
+        match (self.shadow_bsp_pipeline, self.shadow_bsp_layout) {
+            (Some(p), Some(l)) => Some((p, l)),
+            _ => None,
+        }
+    }
+
+    /// BSP/brush caster pipeline for projective shadows (movers). Position-only BspVertex
+    /// (stride 60) + shadow_bsp.vert + shadow_caster.frag, into the RG caster render pass.
+    pub fn create_shadow_bsp_pipeline(&mut self, render_pass: vk::RenderPass) -> Result<(), String> {
+        if self.shadow_bsp_pipeline.is_some() {
+            return Ok(());
+        }
+        let layout = if let Some(l) = self.shadow_bsp_layout {
+            l
+        } else {
+            let l = gpu_device::with_device(|ctx| unsafe {
+                let push = vk::PushConstantRange {
+                    stage_flags: vk::ShaderStageFlags::VERTEX,
+                    offset: 0,
+                    size: 68, // mat4 MVP + float floor depth
+                };
+                let info = vk::PipelineLayoutCreateInfo::default()
+                    .push_constant_ranges(std::slice::from_ref(&push));
+                ctx.device.create_pipeline_layout(&info, None).ok()
+            }).flatten().ok_or("bsp shadow layout")?;
+            self.shadow_bsp_layout = Some(l);
+            l
+        };
+
+        gpu_device::with_device(|ctx| unsafe {
+            let vert = Self::create_shader_module(&ctx.device, SHADOW_BSP_VERT_SPV)
+                .map_err(|e| format!("bsp vert: {:?}", e))?;
+            let frag = Self::create_shader_module(&ctx.device, SHADOW_CASTER_FRAG_SPV)
+                .map_err(|e| format!("bsp frag: {:?}", e))?;
+            let name = std::ffi::CString::new("main").unwrap();
+            let stages = [
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::VERTEX).module(vert).name(&name),
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT).module(frag).name(&name),
+            ];
+            // BspVertex: position at offset 0, stride 60.
+            let binding = [vk::VertexInputBindingDescription::default()
+                .binding(0).stride(60).input_rate(vk::VertexInputRate::VERTEX)];
+            let attrs = [vk::VertexInputAttributeDescription::default()
+                .binding(0).location(0).format(vk::Format::R32G32B32_SFLOAT).offset(0)];
+            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+                .vertex_binding_descriptions(&binding).vertex_attribute_descriptions(&attrs);
+            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+            let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+            let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+                .viewport_count(1).scissor_count(1);
+            let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+                .polygon_mode(vk::PolygonMode::FILL).line_width(1.0)
+                .cull_mode(vk::CullModeFlags::NONE).front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+            let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(true).depth_write_enable(true)
+                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+            let blend_attach = vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G)
+                .blend_enable(false);
+            let blending = vk::PipelineColorBlendStateCreateInfo::default()
+                .attachments(std::slice::from_ref(&blend_attach));
+            let info = vk::GraphicsPipelineCreateInfo::default()
+                .stages(&stages).vertex_input_state(&vertex_input)
+                .input_assembly_state(&input_assembly).viewport_state(&viewport_state)
+                .rasterization_state(&rasterizer).multisample_state(&multisampling)
+                .depth_stencil_state(&depth_stencil).color_blend_state(&blending)
+                .dynamic_state(&dynamic_state).layout(layout).render_pass(render_pass).subpass(0);
+            let pipes = ctx.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+                .map_err(|e| format!("bsp pipeline: {:?}", e.1))?;
+            ctx.device.destroy_shader_module(vert, None);
+            ctx.device.destroy_shader_module(frag, None);
+            self.shadow_bsp_pipeline = Some(pipes[0]);
+            Ok::<(), String>(())
+        }).ok_or_else(|| "No Vulkan context".to_string())?
+    }
+
+    /// Caster depth pipeline for projective dynamic shadows: alias.vert (frame lerp) +
+    /// shadow_caster.frag, drawn with the light's view-projection as the MVP into the shared
+    /// shadow render pass (R32 colour = light-space depth + D32 depth test).
+    pub fn create_shadow_caster_pipeline(&mut self, render_pass: vk::RenderPass) -> Result<(), String> {
+        if self.shadow_caster_pipeline.is_some() {
+            return Ok(());
+        }
+        // Layout: 128-byte alias push constants (we push the same struct, MVP = light VP*model),
+        // no descriptor sets.
+        let layout = if let Some(l) = self.shadow_caster_layout {
+            l
+        } else {
+            let l = gpu_device::with_device(|ctx| unsafe {
+                let push = vk::PushConstantRange {
+                    stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    offset: 0,
+                    size: 128,
+                };
+                let info = vk::PipelineLayoutCreateInfo::default()
+                    .push_constant_ranges(std::slice::from_ref(&push));
+                ctx.device.create_pipeline_layout(&info, None).ok()
+            }).flatten().ok_or("shadow caster layout")?;
+            self.shadow_caster_layout = Some(l);
+            l
+        };
+
+        gpu_device::with_device(|ctx| unsafe {
+            let vert = Self::create_shader_module(&ctx.device, SHADOW_CASTER_VERT_SPV)
+                .map_err(|e| format!("caster vert: {:?}", e))?;
+            let frag = Self::create_shader_module(&ctx.device, SHADOW_CASTER_FRAG_SPV)
+                .map_err(|e| format!("caster frag: {:?}", e))?;
+            let name = std::ffi::CString::new("main").unwrap();
+            let stages = [
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::VERTEX).module(vert).name(&name),
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT).module(frag).name(&name),
+            ];
+            // AliasVertex: pos3 + oldpos3 + tex2 + normal_index(u8) = stride 36.
+            let binding = [vk::VertexInputBindingDescription::default()
+                .binding(0).stride(36).input_rate(vk::VertexInputRate::VERTEX)];
+            let attrs = [
+                vk::VertexInputAttributeDescription::default().binding(0).location(0)
+                    .format(vk::Format::R32G32B32_SFLOAT).offset(0),
+                vk::VertexInputAttributeDescription::default().binding(0).location(1)
+                    .format(vk::Format::R32G32B32_SFLOAT).offset(12),
+                vk::VertexInputAttributeDescription::default().binding(0).location(2)
+                    .format(vk::Format::R32G32_SFLOAT).offset(24),
+                vk::VertexInputAttributeDescription::default().binding(0).location(3)
+                    .format(vk::Format::R8_UINT).offset(32),
+            ];
+            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+                .vertex_binding_descriptions(&binding).vertex_attribute_descriptions(&attrs);
+            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+            let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+            let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+                .viewport_count(1).scissor_count(1);
+            let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+                .polygon_mode(vk::PolygonMode::FILL).line_width(1.0)
+                .cull_mode(vk::CullModeFlags::NONE).front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+            let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(true).depth_write_enable(true)
+                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+            let blend_attach = vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G)
+                .blend_enable(false);
+            let blending = vk::PipelineColorBlendStateCreateInfo::default()
+                .attachments(std::slice::from_ref(&blend_attach));
+            let info = vk::GraphicsPipelineCreateInfo::default()
+                .stages(&stages).vertex_input_state(&vertex_input)
+                .input_assembly_state(&input_assembly).viewport_state(&viewport_state)
+                .rasterization_state(&rasterizer).multisample_state(&multisampling)
+                .depth_stencil_state(&depth_stencil).color_blend_state(&blending)
+                .dynamic_state(&dynamic_state).layout(layout).render_pass(render_pass).subpass(0);
+            let pipes = ctx.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+                .map_err(|e| format!("caster pipeline: {:?}", e.1))?;
+            ctx.device.destroy_shader_module(vert, None);
+            ctx.device.destroy_shader_module(frag, None);
+            self.shadow_caster_pipeline = Some(pipes[0]);
+            Ok::<(), String>(())
+        }).ok_or_else(|| "No Vulkan context".to_string())?
+    }
+
+    /// Fullscreen resolve pipeline for projective dynamic shadows. Samples scene depth
+    /// (binding 0) and the caster shadow map (binding 1), and multiplicatively darkens the
+    /// scene colour where shadowed. `render_pass` must have one colour attachment in the
+    /// scene-colour format; depth is sampled, not attached.
+    pub fn create_shadow_resolve_pipeline(&mut self, render_pass: vk::RenderPass) -> Result<(), String> {
+        if self.shadow_resolve_pipeline.is_some() {
+            return Ok(());
+        }
+        let set_layout = if let Some(sl) = self.shadow_resolve_set_layout {
+            sl
+        } else {
+            let sl = gpu_device::with_device(|ctx| unsafe {
+                let bindings = [
+                    vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_count(1)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                    vk::DescriptorSetLayoutBinding::default().binding(1).descriptor_count(1)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                ];
+                let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+                ctx.device.create_descriptor_set_layout(&info, None).ok()
+            }).flatten().ok_or("resolve set layout")?;
+            self.shadow_resolve_set_layout = Some(sl);
+            sl
+        };
+        let layout = if let Some(l) = self.shadow_resolve_layout {
+            l
+        } else {
+            let sl = set_layout;
+            let l = gpu_device::with_device(|ctx| unsafe {
+                let push = vk::PushConstantRange {
+                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                    offset: 0,
+                    size: 112, // mat4(64) + 4 floats + vec3 cam_proj + cam_dim + near_skip
+                };
+                let info = vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(std::slice::from_ref(&sl))
+                    .push_constant_ranges(std::slice::from_ref(&push));
+                ctx.device.create_pipeline_layout(&info, None).ok()
+            }).flatten().ok_or("resolve layout")?;
+            self.shadow_resolve_layout = Some(l);
+            l
+        };
+
+        gpu_device::with_device(|ctx| unsafe {
+            let vert = Self::create_shader_module(&ctx.device, SHADOW_RESOLVE_VERT_SPV)
+                .map_err(|e| format!("resolve vert: {:?}", e))?;
+            let frag = Self::create_shader_module(&ctx.device, SHADOW_RESOLVE_FRAG_SPV)
+                .map_err(|e| format!("resolve frag: {:?}", e))?;
+            let name = std::ffi::CString::new("main").unwrap();
+            let stages = [
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::VERTEX).module(vert).name(&name),
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT).module(frag).name(&name),
+            ];
+            // No vertex buffer — fullscreen triangle generated from gl_VertexIndex.
+            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+            let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+            let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+                .viewport_count(1).scissor_count(1);
+            let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+                .polygon_mode(vk::PolygonMode::FILL).line_width(1.0)
+                .cull_mode(vk::CullModeFlags::NONE).front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+            let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(false).depth_write_enable(false);
+            // Multiplicative blend: result = src * dst (src = vec3(1-darkness)) → darken scene.
+            let blend_attach = vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(vk::ColorComponentFlags::RGBA)
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::DST_COLOR)
+                .dst_color_blend_factor(vk::BlendFactor::ZERO)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+                .alpha_blend_op(vk::BlendOp::ADD);
+            let blending = vk::PipelineColorBlendStateCreateInfo::default()
+                .attachments(std::slice::from_ref(&blend_attach));
+            let info = vk::GraphicsPipelineCreateInfo::default()
+                .stages(&stages).vertex_input_state(&vertex_input)
+                .input_assembly_state(&input_assembly).viewport_state(&viewport_state)
+                .rasterization_state(&rasterizer).multisample_state(&multisampling)
+                .depth_stencil_state(&depth_stencil).color_blend_state(&blending)
+                .dynamic_state(&dynamic_state).layout(layout).render_pass(render_pass).subpass(0);
+            let pipes = ctx.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+                .map_err(|e| format!("resolve pipeline: {:?}", e.1))?;
+            ctx.device.destroy_shader_module(vert, None);
+            ctx.device.destroy_shader_module(frag, None);
+            self.shadow_resolve_pipeline = Some(pipes[0]);
+            Ok::<(), String>(())
+        }).ok_or_else(|| "No Vulkan context".to_string())?
+    }
+
+    /// VXGI debug raymarch pipeline: fullscreen pass (dynamic rendering into the scene colour)
+    /// sampling the voxel grid (set 0, binding 0). Opaque write on hit, discard on miss.
+    pub fn create_vxgi_debug_pipeline(&mut self) -> Result<(), String> {
+        if self.vxgi_debug_pipeline.is_some() {
+            return Ok(());
+        }
+        let set_layout = if let Some(sl) = self.vxgi_debug_set_layout {
+            sl
+        } else {
+            let sl = gpu_device::with_device(|ctx| unsafe {
+                let b = [vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_count(1)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+                let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&b);
+                ctx.device.create_descriptor_set_layout(&info, None).ok()
+            }).flatten().ok_or("vxgi set layout")?;
+            self.vxgi_debug_set_layout = Some(sl);
+            sl
+        };
+        let layout = if let Some(l) = self.vxgi_debug_layout {
+            l
+        } else {
+            let sl = set_layout;
+            let l = gpu_device::with_device(|ctx| unsafe {
+                let push = vk::PushConstantRange {
+                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                    offset: 0,
+                    size: 96, // mat4 invVP(64) + cam(12+pad4) + gridMin(12) + extent(4)
+                };
+                let info = vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(std::slice::from_ref(&sl))
+                    .push_constant_ranges(std::slice::from_ref(&push));
+                ctx.device.create_pipeline_layout(&info, None).ok()
+            }).flatten().ok_or("vxgi layout")?;
+            self.vxgi_debug_layout = Some(l);
+            l
+        };
+
+        let color_fmt = self.scene_color_format;
+        gpu_device::with_device(|ctx| unsafe {
+            let vert = Self::create_shader_module(&ctx.device, SHADOW_RESOLVE_VERT_SPV)
+                .map_err(|e| format!("vxgi vert: {:?}", e))?;
+            let frag = Self::create_shader_module(&ctx.device, VXGI_DEBUG_FRAG_SPV)
+                .map_err(|e| format!("vxgi frag: {:?}", e))?;
+            let name = std::ffi::CString::new("main").unwrap();
+            let stages = [
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vert).name(&name),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(frag).name(&name),
+            ];
+            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+            let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+            let viewport_state = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+            let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+                .polygon_mode(vk::PolygonMode::FILL).line_width(1.0)
+                .cull_mode(vk::CullModeFlags::NONE).front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+            let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(false).depth_write_enable(false);
+            let blend_attach = vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(vk::ColorComponentFlags::RGBA).blend_enable(false);
+            let blending = vk::PipelineColorBlendStateCreateInfo::default()
+                .attachments(std::slice::from_ref(&blend_attach));
+            // Dynamic rendering: one colour attachment in the scene HDR format, no depth.
+            let color_formats = [color_fmt];
+            let mut rendering = vk::PipelineRenderingCreateInfo::default()
+                .color_attachment_formats(&color_formats);
+            let info = vk::GraphicsPipelineCreateInfo::default()
+                .stages(&stages).vertex_input_state(&vertex_input)
+                .input_assembly_state(&input_assembly).viewport_state(&viewport_state)
+                .rasterization_state(&rasterizer).multisample_state(&multisampling)
+                .depth_stencil_state(&depth_stencil).color_blend_state(&blending)
+                .dynamic_state(&dynamic_state).layout(layout)
+                .push_next(&mut rendering);
+            let pipes = ctx.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+                .map_err(|e| format!("vxgi pipeline: {:?}", e.1))?;
+            ctx.device.destroy_shader_module(vert, None);
+            ctx.device.destroy_shader_module(frag, None);
+            self.vxgi_debug_pipeline = Some(pipes[0]);
+            Ok::<(), String>(())
+        }).ok_or_else(|| "No Vulkan context".to_string())?
+    }
+
+    /// (pipeline, layout) for the VXGI debug pass.
+    pub fn vxgi_debug_pipeline(&self) -> Option<(vk::Pipeline, vk::PipelineLayout)> {
+        Some((self.vxgi_debug_pipeline?, self.vxgi_debug_layout?))
+    }
+
+    /// VXGI diffuse-GI pipeline: fullscreen, samples scene depth (set 0 b0) + radiance volume
+    /// (set 0 b1), cone-traces, and ADDS the bounced light to the scene (additive blend).
+    pub fn create_vxgi_gi_pipeline(&mut self) -> Result<(), String> {
+        if self.vxgi_gi_pipeline.is_some() {
+            return Ok(());
+        }
+        let set_layout = if let Some(sl) = self.vxgi_gi_set_layout {
+            sl
+        } else {
+            let sl = gpu_device::with_device(|ctx| unsafe {
+                let b = [
+                    vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_count(1)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                    vk::DescriptorSetLayoutBinding::default().binding(1).descriptor_count(1)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                    vk::DescriptorSetLayoutBinding::default().binding(2).descriptor_count(1)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                    vk::DescriptorSetLayoutBinding::default().binding(3).descriptor_count(1)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                ];
+                let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&b);
+                ctx.device.create_descriptor_set_layout(&info, None).ok()
+            }).flatten().ok_or("vxgi gi set layout")?;
+            self.vxgi_gi_set_layout = Some(sl);
+            sl
+        };
+        let layout = if let Some(l) = self.vxgi_gi_layout {
+            l
+        } else {
+            let sl = set_layout;
+            let l = gpu_device::with_device(|ctx| unsafe {
+                let push = vk::PushConstantRange {
+                    stage_flags: vk::ShaderStageFlags::FRAGMENT, offset: 0, size: 112,
+                };
+                let info = vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(std::slice::from_ref(&sl)).push_constant_ranges(std::slice::from_ref(&push));
+                ctx.device.create_pipeline_layout(&info, None).ok()
+            }).flatten().ok_or("vxgi gi layout")?;
+            self.vxgi_gi_layout = Some(l);
+            l
+        };
+
+        let color_fmt = self.scene_color_format;
+        gpu_device::with_device(|ctx| unsafe {
+            let vert = Self::create_shader_module(&ctx.device, SHADOW_RESOLVE_VERT_SPV).map_err(|e| format!("gi vert: {:?}", e))?;
+            let frag = Self::create_shader_module(&ctx.device, VXGI_GI_FRAG_SPV).map_err(|e| format!("gi frag: {:?}", e))?;
+            let name = std::ffi::CString::new("main").unwrap();
+            let stages = [
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vert).name(&name),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(frag).name(&name),
+            ];
+            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+            let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+            let viewport_state = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+            let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+                .polygon_mode(vk::PolygonMode::FILL).line_width(1.0)
+                .cull_mode(vk::CullModeFlags::NONE).front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+            let multisampling = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(false).depth_write_enable(false);
+            // Multiplicative: result = scene × (1 + irradiance·strength). src×DST_COLOR + dst×ONE
+            // = dst×(src+1). The GI shader outputs irradiance, so this brightens the per-texel
+            // surface in place and KEEPS texture detail (vs. a flat additive average colour).
+            let blend_attach = vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(vk::ColorComponentFlags::RGBA).blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::DST_COLOR).dst_color_blend_factor(vk::BlendFactor::ONE).color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE).dst_alpha_blend_factor(vk::BlendFactor::ZERO).alpha_blend_op(vk::BlendOp::ADD);
+            let blending = vk::PipelineColorBlendStateCreateInfo::default().attachments(std::slice::from_ref(&blend_attach));
+            let color_formats = [color_fmt];
+            let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&color_formats);
+            let info = vk::GraphicsPipelineCreateInfo::default()
+                .stages(&stages).vertex_input_state(&vertex_input).input_assembly_state(&input_assembly)
+                .viewport_state(&viewport_state).rasterization_state(&rasterizer).multisample_state(&multisampling)
+                .depth_stencil_state(&depth_stencil).color_blend_state(&blending).dynamic_state(&dynamic_state)
+                .layout(layout).push_next(&mut rendering);
+            let pipes = ctx.device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+                .map_err(|e| format!("gi pipeline: {:?}", e.1))?;
+            ctx.device.destroy_shader_module(vert, None);
+            ctx.device.destroy_shader_module(frag, None);
+            self.vxgi_gi_pipeline = Some(pipes[0]);
+            Ok::<(), String>(())
+        }).ok_or_else(|| "No Vulkan context".to_string())?
+    }
+
+    /// (pipeline, layout) for the VXGI GI pass.
+    pub fn vxgi_gi_pipeline(&self) -> Option<(vk::Pipeline, vk::PipelineLayout)> {
+        Some((self.vxgi_gi_pipeline?, self.vxgi_gi_layout?))
+    }
+
+    /// Descriptor set layout (set 0) for the VXGI GI pass (depth + radiance).
+    pub fn vxgi_gi_set_layout(&self) -> Option<vk::DescriptorSetLayout> {
+        self.vxgi_gi_set_layout
+    }
+
+    /// Descriptor set layout (set 0) for the VXGI debug voxel sampler.
+    pub fn vxgi_debug_set_layout(&self) -> Option<vk::DescriptorSetLayout> {
+        self.vxgi_debug_set_layout
+    }
+
+    /// Water ripple shimmer pipeline: fullscreen, samples scene depth (set 0 b0) + the VXGI
+    /// irradiance volume (set 0 b1), and ADDS animated caustic ripple light around the active
+    /// water plane (additive blend into the scene HDR target).
+    pub fn create_water_shimmer_pipeline(&mut self) -> Result<(), String> {
+        if self.water_shimmer_pipeline.is_some() {
+            return Ok(());
+        }
+        let set_layout = if let Some(sl) = self.water_shimmer_set_layout {
+            sl
+        } else {
+            let sl = gpu_device::with_device(|ctx| unsafe {
+                let b = [
+                    vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_count(1)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                    vk::DescriptorSetLayoutBinding::default().binding(1).descriptor_count(1)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                ];
+                let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&b);
+                ctx.device.create_descriptor_set_layout(&info, None).ok()
+            }).flatten().ok_or("shimmer set layout")?;
+            self.water_shimmer_set_layout = Some(sl);
+            sl
+        };
+        let layout = if let Some(l) = self.water_shimmer_layout {
+            l
+        } else {
+            let sl = set_layout;
+            let l = gpu_device::with_device(|ctx| unsafe {
+                let push = vk::PushConstantRange {
+                    stage_flags: vk::ShaderStageFlags::FRAGMENT, offset: 0, size: 96,
+                };
+                let info = vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(std::slice::from_ref(&sl)).push_constant_ranges(std::slice::from_ref(&push));
+                ctx.device.create_pipeline_layout(&info, None).ok()
+            }).flatten().ok_or("shimmer layout")?;
+            self.water_shimmer_layout = Some(l);
+            l
+        };
+
+        let color_fmt = self.scene_color_format;
+        gpu_device::with_device(|ctx| unsafe {
+            let vert = Self::create_shader_module(&ctx.device, SHADOW_RESOLVE_VERT_SPV).map_err(|e| format!("shimmer vert: {:?}", e))?;
+            let frag = Self::create_shader_module(&ctx.device, WATER_SHIMMER_FRAG_SPV).map_err(|e| format!("shimmer frag: {:?}", e))?;
+            let name = std::ffi::CString::new("main").unwrap();
+            let stages = [
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vert).name(&name),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(frag).name(&name),
+            ];
+            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+            let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+            let viewport_state = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+            let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+                .polygon_mode(vk::PolygonMode::FILL).line_width(1.0)
+                .cull_mode(vk::CullModeFlags::NONE).front_face(vk::FrontFace::COUNTER_CLOCKWISE);
+            let multisampling = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(false).depth_write_enable(false);
+            // Pure additive: shimmer light adds on top of the shaded scene.
+            let blend_attach = vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(vk::ColorComponentFlags::RGBA).blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::ONE).dst_color_blend_factor(vk::BlendFactor::ONE).color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ZERO).dst_alpha_blend_factor(vk::BlendFactor::ONE).alpha_blend_op(vk::BlendOp::ADD);
+            let blending = vk::PipelineColorBlendStateCreateInfo::default().attachments(std::slice::from_ref(&blend_attach));
+            let color_formats = [color_fmt];
+            let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&color_formats);
+            let info = vk::GraphicsPipelineCreateInfo::default()
+                .stages(&stages).vertex_input_state(&vertex_input).input_assembly_state(&input_assembly)
+                .viewport_state(&viewport_state).rasterization_state(&rasterizer).multisample_state(&multisampling)
+                .depth_stencil_state(&depth_stencil).color_blend_state(&blending).dynamic_state(&dynamic_state)
+                .layout(layout).push_next(&mut rendering);
+            let pipes = ctx.device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+                .map_err(|e| format!("shimmer pipeline: {:?}", e.1))?;
+            ctx.device.destroy_shader_module(vert, None);
+            ctx.device.destroy_shader_module(frag, None);
+            self.water_shimmer_pipeline = Some(pipes[0]);
+            Ok::<(), String>(())
+        }).ok_or_else(|| "No Vulkan context".to_string())?
+    }
+
+    /// (pipeline, layout) for the water shimmer pass.
+    pub fn water_shimmer_pipeline(&self) -> Option<(vk::Pipeline, vk::PipelineLayout)> {
+        Some((self.water_shimmer_pipeline?, self.water_shimmer_layout?))
+    }
+
+    /// Descriptor set layout (set 0) for the water shimmer pass (depth + irradiance).
+    pub fn water_shimmer_set_layout(&self) -> Option<vk::DescriptorSetLayout> {
+        self.water_shimmer_set_layout
+    }
+
     /// Get a pipeline for rendering.
     pub fn get(
         &self,
@@ -996,6 +1615,22 @@ impl Default for PipelineManager {
             lightmap_set_layout: None,
             pipeline_layout: None,
             shadow_pipeline_layout: None,
+            shadow_caster_pipeline: None,
+            shadow_caster_layout: None,
+            shadow_resolve_pipeline: None,
+            shadow_resolve_layout: None,
+            shadow_resolve_set_layout: None,
+            vxgi_debug_pipeline: None,
+            vxgi_debug_layout: None,
+            vxgi_debug_set_layout: None,
+            vxgi_gi_pipeline: None,
+            vxgi_gi_layout: None,
+            vxgi_gi_set_layout: None,
+            water_shimmer_pipeline: None,
+            water_shimmer_layout: None,
+            water_shimmer_set_layout: None,
+            shadow_bsp_pipeline: None,
+            shadow_bsp_layout: None,
             initialized: false,
             color_format: vk::Format::R8G8B8A8_UNORM,
             depth_format: vk::Format::D32_SFLOAT,

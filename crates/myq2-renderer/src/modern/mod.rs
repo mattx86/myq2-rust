@@ -15,6 +15,8 @@ pub mod shader;
 pub mod geometry;
 pub mod texture;
 pub mod framebuffer;
+pub mod shadow_project;
+pub mod vxgi;
 mod render_path;
 
 pub use render_path::ModernRenderPath;

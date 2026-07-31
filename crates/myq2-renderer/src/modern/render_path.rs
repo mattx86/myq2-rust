@@ -22,6 +22,17 @@ struct BrushModelDraw {
     first_surface: usize,
     /// Number of surfaces for this brush model.
     num_surfaces: usize,
+    /// Dynamic relight block pushed at offset 92..128:
+    /// [use_dyn, c0, c1, c2, c3, min.x, min.y, invSize.x, invSize.y].
+    /// c0..c3 are the world light at the 4 footprint corners, packed RGB-in-a-float;
+    /// min/invSize are the authored footprint XY bounds for in-shader bilinear interp.
+    /// use_dyn=1.0 only for movers that have LEFT their authored position; static inline
+    /// models keep use_dyn=0 and their baked lightmap.
+    dyn_block: [f32; 9],
+    /// Model matrix (model->world) and world-space centre, for casting the mover's shadow
+    /// into the directional shadow map (moved movers only).
+    model_matrix: [[f32; 4]; 4],
+    center: [f32; 3],
 }
 
 /// Push constants for alias model rendering (128 bytes total).
@@ -189,6 +200,16 @@ pub struct ModernRenderPath {
     scene_rendered: bool,
     /// Queued brush model draws for the current frame.
     brush_models: Vec<BrushModelDraw>,
+    /// Per-mover smoothed dynamic light (keyed by model pointer), eased toward the
+    /// freshly sampled value each frame so a mover's brightness ramps smoothly instead
+    /// of snapping when it crosses a lighting boundary. See draw_brush_model().
+    /// One smoothed light per footprint corner ([(min,min),(max,min),(min,max),(max,max)]).
+    mover_light: std::collections::HashMap<usize, [[f32; 3]; 4]>,
+    /// Viewer position at the last D3-light reselection — limits how often the active
+    /// (nearest-N) light set is recomputed, so the shadow cubemaps aren't rebuilt per frame.
+    last_light_select_pos: [f32; 3],
+    /// Sorted static-light indices currently active, to detect when the set actually changes.
+    last_selected_lights: Vec<usize>,
     /// Queued sprite draws for the current frame.
     sprite_draws: Vec<SpriteDrawData>,
     /// Sprite VBO (temporary, uploaded each frame).
@@ -231,6 +252,42 @@ pub struct ModernRenderPath {
     shadow_descriptor_pool: Option<vk::DescriptorPool>,
     /// Sampler for shadow cubemap sampling.
     shadow_sampler: Option<vk::Sampler>,
+    /// Projective dynamic-shadow resources (directional shadow map + resolve pass).
+    projective_shadow: super::shadow_project::ProjectiveShadow,
+    /// VXGI debug raymarch: descriptor pool + set for the voxel grid sampler.
+    vxgi_debug_pool: Option<vk::DescriptorPool>,
+    vxgi_debug_set: Option<vk::DescriptorSet>,
+    /// VXGI GI pass: descriptor pool + set (depth + radiance + albedo + dlight UBO).
+    vxgi_gi_pool: Option<vk::DescriptorPool>,
+    vxgi_gi_set: Option<vk::DescriptorSet>,
+    /// Host-visible UBO holding the frame's dynamic lights for GI bounce.
+    vxgi_gi_dlight_buf: Option<vk::Buffer>,
+    vxgi_gi_dlight_mem: Option<vk::DeviceMemory>,
+    /// Descriptor (set 4) binding the VXGI irradiance volume into the world shader.
+    vxgi_world_irr_pool: Option<vk::DescriptorPool>,
+    vxgi_world_irr_set: Option<vk::DescriptorSet>,
+    /// This frame's irradiance params for the world push: (grid_min, extent, gi_scale).
+    frame_irr_params: Option<([f32; 3], f32, f32)>,
+    /// The irradiance view the descriptor currently points at (recreate the set when it changes,
+    /// e.g. on map reload — updating an in-flight descriptor in place is ignored by the driver).
+    vxgi_irr_view: Option<vk::ImageView>,
+    /// View origin captured this frame (focus point for the directional shadow map).
+    frame_vieworg: [f32; 3],
+    /// Planar water reflection: half-res mirrored world+sky render target.
+    refl_target: Option<super::framebuffer::RenderTarget>,
+    /// Descriptor (set 3 of the water pipeline) binding the reflection texture.
+    refl_desc_pool: Option<vk::DescriptorPool>,
+    refl_desc_set: Option<vk::DescriptorSet>,
+    /// The reflection view the descriptor points at (recreate the set when it changes).
+    refl_desc_view: Option<vk::ImageView>,
+    /// Sky model matrix (translate to camera + sky rotation), flat column-major. Stored so the
+    /// mirrored reflection pass can rebuild the sky MVP with the mirrored view-projection.
+    sky_model_flat: [f32; 16],
+    /// This frame's active water plane z (reflection plane), if any — drives the shimmer pass.
+    frame_refl_plane: Option<f32>,
+    /// Water shimmer pass: descriptor pool + set (scene depth + irradiance volume).
+    shimmer_pool: Option<vk::DescriptorPool>,
+    shimmer_set: Option<vk::DescriptorSet>,
 }
 
 impl ModernRenderPath {
@@ -278,6 +335,9 @@ impl ModernRenderPath {
             pipelines: None,
             scene_rendered: false,
             brush_models: Vec::new(),
+            mover_light: std::collections::HashMap::new(),
+            last_light_select_pos: [f32::MAX, f32::MAX, f32::MAX],
+            last_selected_lights: Vec::new(),
             sprite_draws: Vec::new(),
             sprite_vbo: VertexBuffer::new(),
             sprite_ibo: IndexBuffer::new(),
@@ -299,6 +359,31 @@ impl ModernRenderPath {
             shadow_render_pass: None,
             shadow_descriptor_pool: None,
             shadow_sampler: None,
+            projective_shadow: super::shadow_project::ProjectiveShadow::default(),
+            vxgi_debug_pool: None,
+            vxgi_debug_set: None,
+            vxgi_gi_pool: None,
+            vxgi_gi_set: None,
+            vxgi_gi_dlight_buf: None,
+            vxgi_gi_dlight_mem: None,
+            vxgi_world_irr_pool: None,
+            vxgi_world_irr_set: None,
+            frame_irr_params: None,
+            vxgi_irr_view: None,
+            frame_vieworg: [0.0, 0.0, 0.0],
+            refl_target: None,
+            refl_desc_pool: None,
+            refl_desc_set: None,
+            refl_desc_view: None,
+            sky_model_flat: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            frame_refl_plane: None,
+            shimmer_pool: None,
+            shimmer_set: None,
         }
     }
 
@@ -581,6 +666,7 @@ impl ModernRenderPath {
         _ambient: f32,
         _extrude: f32,
         spec_power: f32,
+        view_origin: [f32; 3],
     ) {
         use crate::vk_rsurf::STATIC_LIGHTS;
 
@@ -597,14 +683,63 @@ impl ModernRenderPath {
             self.d3_lights = Vec::new();
             return;
         }
-        let (limit, per_light_intensity): (usize, f32) = (max_lights, 0.07);
+        // HARD safety cap: each active light costs a full-screen cubemap (~1.75 MB), a
+        // 6-face build pass, and a whole-scene additive pass every frame. Past a few dozen
+        // this exhausts GPU memory / framebuffers / the per-frame budget and crashes (device
+        // lost). Until the lit pass is scissored/clustered, clamp regardless of the cvar.
+        const SAFE_MAX_LIGHTS: usize = 32;
+        let limit = max_lights.min(SAFE_MAX_LIGHTS);
+        // Per-light brightness scales DOWN with the count. The lit pass now dark-fill modulates
+        // by (1 - baked luma), so this only brightens already-dark surfaces near a fixture —
+        // lit surfaces are protected from the warm-tint problem, so we can run hotter than the
+        // old flat-base D3 value (0.07).
+        let per_light_intensity: f32 = (4.0 / limit as f32).clamp(0.06, 0.35);
 
-        let new_lights: Vec<GpuLightD3> = static_lights.iter().take(limit).map(|sl| {
-            // Q2 light intensity is typically 100–600.  Use a generous radius so the
-            // smooth quadratic falloff spans multiple BSP faces — this continuous
-            // analytical gradient hides lightmap seams at face boundaries.
-            // 3× the old radius gives one typical room width (300–500 units) of coverage.
-            let radius = (sl.intensity * 1.5).clamp(128.0, 800.0);
+        // There can be far more lights in a level (entity lights + every emissive surface +
+        // sky) than we can give a shadow cubemap. Pick the ones NEAREST the viewer so the
+        // player's local lights (their room's ceiling lights, the nearby sky) are the active
+        // set — selecting by global brightness instead lets distant sky lights monopolize
+        // every slot and leaves rooms unlit. Reselect only after the viewer has moved a good
+        // way, because each active light costs a 6-face scene render to rebuild its cubemap.
+        let d2 = |a: &[f32; 3], b: &[f32; 3]| {
+            let (x, y, z) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+            x * x + y * y + z * z
+        };
+        // Reselect rarely: each reselection rebuilds every active cubemap (a hard hitch)
+        // and changes which lights are active (a visible lighting "pop"). A large threshold
+        // keeps the set stable while the player explores a region.
+        let must_select = self.d3_lights.is_empty()
+            || self.shadow_cubemaps.is_empty()
+            || d2(&view_origin, &self.last_light_select_pos) > 768.0 * 768.0;
+        if !must_select {
+            return; // keep the current active set and its cubemaps
+        }
+        self.last_light_select_pos = view_origin;
+
+        // Nearest `limit` lights to the viewer.
+        let mut order: Vec<usize> = (0..static_lights.len()).collect();
+        order.sort_by(|&a, &b| {
+            d2(&static_lights[a].origin, &view_origin)
+                .partial_cmp(&d2(&static_lights[b].origin, &view_origin))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        order.truncate(limit);
+
+        // If the same lights are still nearest, there is nothing to rebuild.
+        let mut selected_sorted = order.clone();
+        selected_sorted.sort_unstable();
+        if selected_sorted == self.last_selected_lights && !self.shadow_cubemaps.is_empty() {
+            return;
+        }
+        self.last_selected_lights = selected_sorted;
+
+        self.d3_lights = order.iter().map(|&i| {
+            let sl = &static_lights[i];
+            // LOCAL radius. A large radius (the old intensity*1.5 → 450-600u) made every one of
+            // the nearest-N lights overlap the whole room, so the additive pass lit every
+            // surface at once and washed the scene to an over-bright near-white ("red screen").
+            // Keep it tight so a fixture only fills the dark surfaces immediately around it.
+            let radius = (sl.intensity * 0.5).clamp(96.0, 220.0);
             GpuLightD3 {
                 pos: sl.origin,
                 radius,
@@ -614,19 +749,12 @@ impl ModernRenderPath {
                 spec_pow: spec_power,
             }
         }).collect();
+        drop(static_lights);
 
-        // Rebuild shadow maps when light count changes (level load / cvar change) OR when
-        // cubemaps are missing — the first build attempt may silently skip if BSP geometry
-        // is not yet uploaded, so we retry each frame until counts match.
-        let needs_rebuild = new_lights.len() != self.d3_lights.len()
-            || self.shadow_cubemaps.len() != new_lights.len();
-        self.d3_lights = new_lights;
-        if needs_rebuild {
-            let bsp_vbo = self.bsp_geometry.vertex_buffer().vk_buffer().unwrap_or(vk::Buffer::null());
-            let bsp_ibo = self.bsp_geometry.index_buffer().vk_buffer().unwrap_or(vk::Buffer::null());
-            let bsp_index_count = self.bsp_geometry.index_count();
-            self.build_shadow_maps(bsp_vbo, bsp_ibo, bsp_index_count);
-        }
+        let bsp_vbo = self.bsp_geometry.vertex_buffer().vk_buffer().unwrap_or(vk::Buffer::null());
+        let bsp_ibo = self.bsp_geometry.index_buffer().vk_buffer().unwrap_or(vk::Buffer::null());
+        let bsp_index_count = self.bsp_geometry.index_count();
+        self.build_shadow_maps(bsp_vbo, bsp_ibo, bsp_index_count);
     }
 
     /// Accept dynamic lights for the current frame (used by dlight rendering).
@@ -890,6 +1018,449 @@ impl ModernRenderPath {
         });
     }
 
+    /// Lazily create the projective-shadow resources (shadow-map images/views/framebuffer on
+    /// the shared shadow render pass, the resolve render pass, sampler, descriptor pool/set,
+    /// and the two pipelines). Returns false (and casts no shadows) if anything fails.
+    fn ensure_projective_shadow_resources(&mut self) -> bool {
+        use super::shadow_project as sp;
+        if self.projective_shadow.framebuffer.is_none() {
+            let created = gpu_device::with_device(|ctx| unsafe {
+                let alloc = |img: vk::Image| -> Option<vk::DeviceMemory> {
+                    let r = ctx.device.get_image_memory_requirements(img);
+                    let t = Self::find_memory_type(ctx, r.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+                    let ai = vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_index(t);
+                    ctx.device.allocate_memory(&ai, None).ok()
+                };
+                // Caster render pass: RG32 colour (R=caster depth, G=floor depth) + D32 depth.
+                let cca = vk::AttachmentDescription::default()
+                    .format(vk::Format::R32G32_SFLOAT).samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE).stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+                let cda = vk::AttachmentDescription::default()
+                    .format(vk::Format::D32_SFLOAT).samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE).stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                let ccar = vk::AttachmentReference::default().attachment(0).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+                let cdar = vk::AttachmentReference::default().attachment(1).layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                let ccar_refs = [ccar];
+                let csub = vk::SubpassDescription::default()
+                    .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                    .color_attachments(&ccar_refs).depth_stencil_attachment(&cdar);
+                let catt = [cca, cda];
+                let caster_rp = ctx.device.create_render_pass(&vk::RenderPassCreateInfo::default()
+                    .attachments(&catt).subpasses(std::slice::from_ref(&csub)), None).ok()?;
+
+                // RG32 colour (R = caster light-space depth, G = floor light-space depth).
+                let ci = vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D).format(vk::Format::R32G32_SFLOAT)
+                    .extent(vk::Extent3D { width: sp::SHADOW_SIZE, height: sp::SHADOW_SIZE, depth: 1 })
+                    .mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+                    .initial_layout(vk::ImageLayout::UNDEFINED);
+                let color = ctx.device.create_image(&ci, None).ok()?;
+                let color_mem = alloc(color)?;
+                ctx.device.bind_image_memory(color, color_mem, 0).ok()?;
+                let di = vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D).format(vk::Format::D32_SFLOAT)
+                    .extent(vk::Extent3D { width: sp::SHADOW_SIZE, height: sp::SHADOW_SIZE, depth: 1 })
+                    .mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                    .initial_layout(vk::ImageLayout::UNDEFINED);
+                let depth = ctx.device.create_image(&di, None).ok()?;
+                let depth_mem = alloc(depth)?;
+                ctx.device.bind_image_memory(depth, depth_mem, 0).ok()?;
+                let cv = ctx.device.create_image_view(&vk::ImageViewCreateInfo::default()
+                    .image(color).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::R32G32_SFLOAT)
+                    .subresource_range(vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1)), None).ok()?;
+                let dv = ctx.device.create_image_view(&vk::ImageViewCreateInfo::default()
+                    .image(depth).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::D32_SFLOAT)
+                    .subresource_range(vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::DEPTH).level_count(1).layer_count(1)), None).ok()?;
+                let attaches = [cv, dv];
+                let fb = ctx.device.create_framebuffer(&vk::FramebufferCreateInfo::default()
+                    .render_pass(caster_rp).attachments(&attaches)
+                    .width(sp::SHADOW_SIZE).height(sp::SHADOW_SIZE).layers(1), None).ok()?;
+                // Resolve render pass: one colour attachment = scene colour, LOAD/STORE, stays in
+                // COLOR_ATTACHMENT_OPTIMAL (the composite later transitions it to SHADER_READ).
+                let ca = vk::AttachmentDescription::default()
+                    .format(vk::Format::R16G16B16A16_SFLOAT).samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::LOAD).store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE).stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+                let car = vk::AttachmentReference::default().attachment(0).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+                let car_refs = [car];
+                let sub = vk::SubpassDescription::default()
+                    .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&car_refs);
+                let dep = vk::SubpassDependency::default()
+                    .src_subpass(vk::SUBPASS_EXTERNAL).dst_subpass(0)
+                    .src_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
+                    .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(vk::AccessFlags::SHADER_READ)
+                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+                let resolve_rp = ctx.device.create_render_pass(&vk::RenderPassCreateInfo::default()
+                    .attachments(std::slice::from_ref(&ca)).subpasses(std::slice::from_ref(&sub))
+                    .dependencies(std::slice::from_ref(&dep)), None).ok()?;
+                let samp = ctx.device.create_sampler(&vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST)
+                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE), None).ok()?;
+                let ps = &mut self.projective_shadow;
+                ps.color_image = Some(color); ps.color_mem = Some(color_mem); ps.color_view = Some(cv);
+                ps.depth_image = Some(depth); ps.depth_mem = Some(depth_mem); ps.depth_view = Some(dv);
+                ps.framebuffer = Some(fb); ps.resolve_rp = Some(resolve_rp); ps.sampler = Some(samp);
+                ps.caster_rp = Some(caster_rp);
+                Some(())
+            }).flatten().is_some();
+            if !created { return false; }
+        }
+
+        let resolve_rp = self.projective_shadow.resolve_rp.unwrap();
+        let caster_rp = self.projective_shadow.caster_rp.unwrap();
+        match self.pipelines.as_mut() {
+            Some(pm) => {
+                if pm.create_shadow_caster_pipeline(caster_rp).is_err() { return false; }
+                if pm.create_shadow_bsp_pipeline(caster_rp).is_err() { return false; }
+                if pm.create_shadow_resolve_pipeline(resolve_rp).is_err() { return false; }
+            }
+            None => return false,
+        }
+
+        if self.projective_shadow.resolve_set.is_none() {
+            let set_layout = match self.pipelines.as_ref().and_then(|pm| pm.shadow_resolve_set_layout()) {
+                Some(sl) => sl, None => return false,
+            };
+            let ok = gpu_device::with_device(|ctx| unsafe {
+                let sizes = [vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(2)];
+                let pool = ctx.device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(1).pool_sizes(&sizes), None).ok()?;
+                let layouts = [set_layout];
+                let set = ctx.device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(pool).set_layouts(&layouts)).ok()?[0];
+                let ps = &mut self.projective_shadow;
+                ps.resolve_pool = Some(pool); ps.resolve_set = Some(set);
+                Some(())
+            }).flatten().is_some();
+            if !ok { return false; }
+        }
+        true
+    }
+
+    /// Render projective dynamic shadows: depth-render all casters from the light into the
+    /// shadow map, then a fullscreen resolve that darkens the scene where shadowed. Called
+    /// right after the scene's dynamic-rendering pass ends (scene colour in COLOR_ATTACHMENT,
+    /// depth in DEPTH_ATTACHMENT). Defensive: any missing resource just skips shadows.
+    fn render_projective_shadows(&mut self, cmd: vk::CommandBuffer, view_origin: [f32; 3], view_proj_flat: [f32; 16]) {
+        use super::shadow_project as sp;
+        if crate::vk_rmain::rcvars().vk_shadows.value == 0.0 { return; }
+        if !self.ensure_projective_shadow_resources() { return; }
+
+        // Scene colour/depth from the scene FBO.
+        let (scene_color_view, scene_depth_view, scene_depth_image) =
+            match self.post_processor.as_ref().map(|pp| pp.scene_fbo()) {
+                Some(fbo) => match (fbo.color_view(), fbo.depth_view(), fbo.depth_image()) {
+                    (Some(cv), Some(dv), Some(di)) => (cv, dv, di),
+                    _ => return,
+                },
+                None => return,
+            };
+
+        // (Re)create the resolve framebuffer if the scene colour view changed (resize).
+        if self.projective_shadow.resolve_fb_view != Some(scene_color_view) {
+            let resolve_rp = self.projective_shadow.resolve_rp.unwrap();
+            let (w, h) = (self.width, self.height);
+            let old = self.projective_shadow.resolve_fb;
+            let newfb = gpu_device::with_device(|ctx| unsafe {
+                if let Some(o) = old { ctx.device.destroy_framebuffer(o, None); }
+                let at = [scene_color_view];
+                ctx.device.create_framebuffer(&vk::FramebufferCreateInfo::default()
+                    .render_pass(resolve_rp).attachments(&at).width(w).height(h).layers(1), None).ok()
+            }).flatten();
+            self.projective_shadow.resolve_fb = newfb;
+            self.projective_shadow.resolve_fb_view = Some(scene_color_view);
+        }
+        let resolve_fb = match self.projective_shadow.resolve_fb { Some(f) => f, None => return };
+
+        // (Re)create a DEPTH-aspect-only view of the scene depth for sampling (the scene's
+        // own view is a combined depth+stencil view and can't be sampled).
+        if self.projective_shadow.depth_sample_src != Some(scene_depth_image) {
+            let old = self.projective_shadow.depth_sample_view;
+            let newv = gpu_device::with_device(|ctx| unsafe {
+                if let Some(o) = old { ctx.device.destroy_image_view(o, None); }
+                ctx.device.create_image_view(&vk::ImageViewCreateInfo::default()
+                    .image(scene_depth_image).view_type(vk::ImageViewType::TYPE_2D)
+                    .format(vk::Format::D32_SFLOAT_S8_UINT)
+                    .subresource_range(vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::DEPTH).level_count(1).layer_count(1)), None).ok()
+            }).flatten();
+            self.projective_shadow.depth_sample_view = newv;
+            self.projective_shadow.depth_sample_src = Some(scene_depth_image);
+        }
+        let depth_sample_view = match self.projective_shadow.depth_sample_view { Some(v) => v, None => return };
+        let _ = scene_depth_view; // superseded by the depth-aspect-only view above
+
+        // Light matrices. combined = light_vp * inv(view_proj) maps screen NDC -> light clip.
+        let light_vp = sp::light_view_proj(view_origin, sp::DEFAULT_LIGHT_DIR, sp::COVERAGE, sp::LIGHT_HEIGHT);
+        let inv_vp = sp::invert(&view_proj_flat);
+        let combined = sp::mul(&light_vp, &inv_vp);
+
+        // Gather alias casters as (push constants with light-space MVP, vbo, ibo, idx, frame off).
+        let mut casters: Vec<(AliasPushConstants, vk::Buffer, vk::Buffer, u32, u64)> = Vec::new();
+        for batch in self.alias_instanced.batches() {
+            let mb = match self.alias_models.get(batch.model_id()) { Some(b) => b, None => continue };
+            let (vbo, ibo) = match (mb.vertex_buffer().vk_buffer(), mb.index_buffer().vk_buffer()) {
+                (Some(v), Some(i)) => (v, i), _ => continue,
+            };
+            let index_count = mb.index_count();
+            for inst in batch.instances() {
+                // Skip weapon-view and translucent casters (match the blob-shadow gate).
+                if inst.flags & (myq2_common::q_shared::RF_WEAPONMODEL | myq2_common::q_shared::RF_TRANSLUCENT) as u32 != 0 {
+                    continue;
+                }
+                // The local player's body (RF_VIEWERMODEL) carries the full view pitch/roll in
+                // its model matrix; casting the shadow with it makes the self-shadow tilt into
+                // the floor when looking up/down or crouching. A standing body is upright —
+                // cast with a yaw-only rebuild of the matrix so the shadow stays flat on the
+                // ground (and still drapes down/across walls via the per-pixel resolve).
+                let model_flat = if inst.flags & myq2_common::q_shared::RF_VIEWERMODEL as u32 != 0 {
+                    let m = &inst.model_matrix;
+                    let yaw_deg = m[0][1].atan2(m[0][0]).to_degrees();
+                    mat4_to_flat(&build_entity_matrix(
+                        &[m[3][0], m[3][1], m[3][2]],
+                        &[0.0, yaw_deg, 0.0],
+                    ))
+                } else {
+                    mat4_to_flat(&inst.model_matrix)
+                };
+                let mvp = ModernRenderPath::mat4_multiply(&light_vp, &model_flat);
+                let frontlerp = 1.0 - inst.backlerp;
+                let frame = inst.frame.min(mb.frame_count().saturating_sub(1));
+                let frame_offset = mb.frame_offset(frame) as u64;
+                // Floor below this caster, in light-NDC depth: trace straight down from the
+                // caster's origin (model translation) to the world floor, project that point
+                // into the light. The shader bounds the caster's shadow to this depth so it
+                // lands on the surface it sits above and can't bleed through onto things below.
+                let origin = [inst.model_matrix[3][0], inst.model_matrix[3][1], inst.model_matrix[3][2]];
+                // SAFETY: r_ground_z accesses vk_local statics, main thread only.
+                let floor_depth = unsafe {
+                    match crate::vk_light::r_ground_z(&origin) {
+                        Some(fz) => {
+                            let p = [origin[0], origin[1], fz, 1.0];
+                            let mut c = [0.0f32; 4];
+                            for i in 0..4 {
+                                c[i] = light_vp[i] * p[0] + light_vp[4 + i] * p[1]
+                                    + light_vp[8 + i] * p[2] + light_vp[12 + i] * p[3];
+                            }
+                            if c[3].abs() > 1e-6 { (c[2] / c[3]).clamp(0.0, 1.0) } else { 1.0 }
+                        }
+                        None => 1.0, // no floor found ⇒ unbounded (far)
+                    }
+                };
+                let pc = AliasPushConstants {
+                    mvp,
+                    shade_light: [0.0, 0.0, 0.0],
+                    alpha: floor_depth, // passed to shadow_caster.frag as the floor depth (G)
+                    move_vec: [0.0, 0.0, 0.0],
+                    backlerp: inst.backlerp,
+                    front_v: [frontlerp, frontlerp, frontlerp],
+                    shell_scale: 0.0,
+                    back_v: [inst.backlerp, inst.backlerp, inst.backlerp],
+                    is_shell: 0,
+                };
+                casters.push((pc, vbo, ibo, index_count, frame_offset));
+            }
+        }
+
+        // Gather MOVED brush models (lifts/doors) as BSP shadow casters: light-space MVP,
+        // floor depth (so the shadow lands on the surface below), and their surface index
+        // ranges in the BSP buffers. Static brush models are skipped (their shadows are baked).
+        let mut movers: Vec<([f32; 16], f32, Vec<(u32, u32)>)> = Vec::new();
+        for bm in &self.brush_models {
+            if bm.dyn_block[0] <= 0.5 { continue; }
+            let model_flat = mat4_to_flat(&bm.model_matrix);
+            let light_mvp = ModernRenderPath::mat4_multiply(&light_vp, &model_flat);
+            // SAFETY: r_ground_z accesses vk_local statics, main thread only.
+            let floor_depth = unsafe {
+                match crate::vk_light::r_ground_z(&bm.center) {
+                    Some(fz) => {
+                        let p = [bm.center[0], bm.center[1], fz, 1.0];
+                        let mut c = [0.0f32; 4];
+                        for i in 0..4 {
+                            c[i] = light_vp[i] * p[0] + light_vp[4 + i] * p[1]
+                                + light_vp[8 + i] * p[2] + light_vp[12 + i] * p[3];
+                        }
+                        if c[3].abs() > 1e-6 { (c[2] / c[3]).clamp(0.0, 1.0) } else { 1.0 }
+                    }
+                    None => 1.0,
+                }
+            };
+            let ranges: Vec<(u32, u32)> = self.bsp_geometry
+                .draw_info_for_range(bm.first_surface, bm.num_surfaces)
+                .iter().map(|s| (s.first_index, s.index_count)).collect();
+            if !ranges.is_empty() { movers.push((light_mvp, floor_depth, ranges)); }
+        }
+        let bsp_vbo = self.bsp_geometry.vertex_buffer().vk_buffer();
+        let bsp_ibo = self.bsp_geometry.index_buffer().vk_buffer();
+        let bsp_pipe = self.pipelines.as_ref().and_then(|pm| pm.shadow_bsp_pipeline());
+
+        let shadow_rp = self.projective_shadow.caster_rp.unwrap();
+        let ps_fb = self.projective_shadow.framebuffer.unwrap();
+        let shadow_color = self.projective_shadow.color_image.unwrap();
+        let shadow_color_view = self.projective_shadow.color_view.unwrap();
+        let resolve_rp = self.projective_shadow.resolve_rp.unwrap();
+        let sampler = self.projective_shadow.sampler.unwrap();
+        let resolve_set = self.projective_shadow.resolve_set.unwrap();
+        let (caster_pipe, caster_layout) =
+            match self.pipelines.as_ref().and_then(|pm| pm.shadow_caster_pipeline()) { Some(p) => p, None => return };
+        let (resolve_pipe, resolve_layout) =
+            match self.pipelines.as_ref().and_then(|pm| pm.shadow_resolve_pipeline()) { Some(p) => p, None => return };
+        let (sw, sh) = (self.width, self.height);
+        if casters.is_empty() && movers.is_empty() { return; }
+
+        gpu_device::with_device(|ctx| unsafe {
+            // ---- Caster depth pass into the shadow map ----
+            // Clear R (caster depth) and G (floor depth) to 1.0 (far) so empty texels cast
+            // nothing (a receiver is never "behind" a depth of 1.0).
+            let clears = [
+                vk::ClearValue { color: vk::ClearColorValue { float32: [1.0, 1.0, 0.0, 0.0] } },
+                vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } },
+            ];
+            let area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D { width: sp::SHADOW_SIZE, height: sp::SHADOW_SIZE } };
+            ctx.device.cmd_begin_render_pass(cmd, &vk::RenderPassBeginInfo::default()
+                .render_pass(shadow_rp).framebuffer(ps_fb).render_area(area).clear_values(&clears),
+                vk::SubpassContents::INLINE);
+            let vp = vk::Viewport { x: 0.0, y: 0.0, width: sp::SHADOW_SIZE as f32, height: sp::SHADOW_SIZE as f32, min_depth: 0.0, max_depth: 1.0 };
+            ctx.device.cmd_set_viewport(cmd, 0, &[vp]);
+            ctx.device.cmd_set_scissor(cmd, 0, &[area]);
+            ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, caster_pipe);
+            for (pc, vbo, ibo, index_count, frame_offset) in &casters {
+                let bytes = std::slice::from_raw_parts(
+                    pc as *const AliasPushConstants as *const u8, std::mem::size_of::<AliasPushConstants>());
+                ctx.device.cmd_push_constants(cmd, caster_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, bytes);
+                ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[*vbo], &[*frame_offset]);
+                ctx.device.cmd_bind_index_buffer(cmd, *ibo, 0, vk::IndexType::UINT32);
+                ctx.device.cmd_draw_indexed(cmd, *index_count, 1, 0, 0, 0);
+            }
+            // ---- Mover (brush) casters into the same shadow map ----
+            if let (Some((bsp_pipe, bsp_layout)), Some(bvbo), Some(bibo)) = (bsp_pipe, bsp_vbo, bsp_ibo) {
+                if !movers.is_empty() {
+                    ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, bsp_pipe);
+                    ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bvbo], &[0]);
+                    ctx.device.cmd_bind_index_buffer(cmd, bibo, 0, vk::IndexType::UINT32);
+                    #[repr(C)]
+                    struct BspPush { mvp: [f32; 16], floor: f32 }
+                    for (mvp, floor, ranges) in &movers {
+                        let bp = BspPush { mvp: *mvp, floor: *floor };
+                        let bytes = std::slice::from_raw_parts(&bp as *const BspPush as *const u8, 68);
+                        ctx.device.cmd_push_constants(cmd, bsp_layout, vk::ShaderStageFlags::VERTEX, 0, bytes);
+                        for (first_index, index_count) in ranges {
+                            ctx.device.cmd_draw_indexed(cmd, *index_count, 1, *first_index, 0, 0);
+                        }
+                    }
+                }
+            }
+            ctx.device.cmd_end_render_pass(cmd);
+
+            // ---- Barriers: shadow colour + scene depth -> SHADER_READ for sampling ----
+            let b_shadow = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(shadow_color)
+                .subresource_range(vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1));
+            let b_depth = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(scene_depth_image)
+                .subresource_range(vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL)
+                    .level_count(1).layer_count(1));
+            ctx.device.cmd_pipeline_barrier(cmd,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(),
+                &[], &[], &[b_shadow, b_depth]);
+
+            // ---- Bind resolve inputs (scene depth = binding 0, shadow map = binding 1) ----
+            let depth_info = vk::DescriptorImageInfo::default().image_view(depth_sample_view)
+                .sampler(sampler).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            let shadow_info = vk::DescriptorImageInfo::default().image_view(shadow_color_view)
+                .sampler(sampler).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            let writes = [
+                vk::WriteDescriptorSet::default().dst_set(resolve_set).dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(std::slice::from_ref(&depth_info)),
+                vk::WriteDescriptorSet::default().dst_set(resolve_set).dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(std::slice::from_ref(&shadow_info)),
+            ];
+            ctx.device.update_descriptor_sets(&writes, &[]);
+
+            // ---- Resolve pass: darken the scene colour where shadowed ----
+            let sarea = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: sw, height: sh } };
+            ctx.device.cmd_begin_render_pass(cmd, &vk::RenderPassBeginInfo::default()
+                .render_pass(resolve_rp).framebuffer(resolve_fb).render_area(sarea),
+                vk::SubpassContents::INLINE);
+            let vp2 = vk::Viewport { x: 0.0, y: 0.0, width: sw as f32, height: sh as f32, min_depth: 0.0, max_depth: 1.0 };
+            ctx.device.cmd_set_viewport(cmd, 0, &[vp2]);
+            ctx.device.cmd_set_scissor(cmd, 0, &[sarea]);
+            ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, resolve_pipe);
+            ctx.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, resolve_layout, 0, &[resolve_set], &[]);
+            // Camera position in light NDC, for the "you're in a caster's shadow" view dim.
+            let cam_proj = {
+                let v = [view_origin[0], view_origin[1], view_origin[2], 1.0];
+                let mut c = [0.0f32; 4];
+                for i in 0..4 {
+                    c[i] = light_vp[i] * v[0] + light_vp[4 + i] * v[1]
+                        + light_vp[8 + i] * v[2] + light_vp[12 + i] * v[3];
+                }
+                let w = if c[3].abs() > 1e-6 { c[3] } else { 1.0 };
+                [c[0] / w, c[1] / w, c[2] / w]
+            };
+            #[repr(C)]
+            struct ResolvePush {
+                m: [f32; 16], bias: f32, darkness: f32, cam_min_gap: f32, floor_band: f32,
+                cam_proj: [f32; 3], cam_dim: f32, near_skip: f32,
+            }
+            // cam_min_gap (light-space): an occluder must be at least ~70 world units above the
+            // camera to dim the view, so the player's own body at the eye is ignored. The light
+            // ortho maps [near,far]→[0,1], so 1 NDC-z ≈ (far-near) world units.
+            let ortho_range = 2.0 * sp::LIGHT_HEIGHT + 2.0 * sp::COVERAGE - 1.0;
+            let cam_min_gap = 70.0 / ortho_range;
+            // floor_band is a soft fade (light-space depth) just below the floor so the shadow
+            // doesn't hard-cut where it meets the surface below the caster.
+            let rp = ResolvePush {
+                // floor_band: wide enough that a step/ledge just below the caster's floor gets a
+                // faded shadow instead of a hard cut at the surface seam (0.002 cut sharply).
+                m: combined, bias: 0.0015, darkness: 0.5, cam_min_gap, floor_band: 0.02,
+                cam_proj, cam_dim: 0.4,
+                // Skip shadows on pixels nearer than ~0.9 depth (the held view weapon, which
+                // sits closer to the eye than the floor your shadow falls on).
+                near_skip: 0.9,
+            };
+            let pbytes = std::slice::from_raw_parts(&rp as *const ResolvePush as *const u8, 100);
+            ctx.device.cmd_push_constants(cmd, resolve_layout, vk::ShaderStageFlags::FRAGMENT, 0, pbytes);
+            ctx.device.cmd_draw(cmd, 3, 1, 0, 0);
+            ctx.device.cmd_end_render_pass(cmd);
+        });
+    }
+
     /// Create or recreate the shadow descriptor pool sized for `light_count` lights.
     fn create_shadow_descriptor_pool(&mut self, light_count: usize) {
         // Destroy existing pool
@@ -971,8 +1542,7 @@ impl ModernRenderPath {
         // geometry hasn't been uploaded yet; building now would produce all-1.0
         // shadow maps that are never re-built, causing permanent full-brights).
         if self.d3_lights.is_empty() || bsp_vbo == vk::Buffer::null() || bsp_index_count == 0 {
-            eprintln!("[SHADOW] Deferring shadow map build: lights={} vbo_null={} index_count={}",
-                self.d3_lights.len(), bsp_vbo == vk::Buffer::null(), bsp_index_count);
+            // BSP geometry not uploaded yet — retry on a later frame (silently).
             return;
         }
 
@@ -984,27 +1554,22 @@ impl ModernRenderPath {
         let render_pass = match self.shadow_render_pass {
             Some(rp) => rp,
             None => {
-                eprintln!("[SHADOW] No shadow render pass — skipping shadow map build");
                 return;
             }
         };
 
         // Create the shadow cubemap pipeline if not yet done
         if let Some(pm) = self.pipelines.as_mut() {
-            if let Err(e) = pm.create_shadow_pipeline(render_pass) {
-                eprintln!("[SHADOW] Failed to create shadow pipeline: {}", e);
+            if pm.create_shadow_pipeline(render_pass).is_err() {
                 return;
             }
             // Also ensure the lit additive pipeline exists
-            if let Err(e) = pm.create_pipeline(ShaderType::WorldLitAdditive, PipelineVariant::LitAdditive) {
-                eprintln!("[SHADOW] Failed to create lit additive pipeline: {}", e);
-            }
+            let _ = pm.create_pipeline(ShaderType::WorldLitAdditive, PipelineVariant::LitAdditive);
         }
 
         let shadow_sampler = match self.shadow_sampler {
             Some(s) => s,
             None => {
-                eprintln!("[SHADOW] No shadow sampler — skipping shadow map build");
                 return;
             }
         };
@@ -1013,7 +1578,6 @@ impl ModernRenderPath {
         let ds_layout = match self.pipelines.as_ref().and_then(|pm| pm.lightmap_set_layout()) {
             Some(l) => l,
             None => {
-                eprintln!("[SHADOW] No descriptor set layout for set=2 — skipping shadow maps");
                 return;
             }
         };
@@ -1028,7 +1592,6 @@ impl ModernRenderPath {
         let desc_pool = match self.shadow_descriptor_pool {
             Some(p) => p,
             None => {
-                eprintln!("[SHADOW] No shadow descriptor pool — skipping shadow maps");
                 return;
             }
         };
@@ -1044,13 +1607,9 @@ impl ModernRenderPath {
         let (shadow_pip, shadow_pip_layout) = match shadow_pipeline {
             Some(pair) => pair,
             None => {
-                eprintln!("[SHADOW] Shadow cube pipeline not found — skipping shadow maps");
                 return;
             }
         };
-
-        eprintln!("[SHADOW] Building {} shadow cubemaps at {}x{} with {} BSP indices...",
-            light_count, SHADOW_RES, SHADOW_RES, bsp_index_count);
 
         for light in &lights {
             let light_pos = light.pos;
@@ -1431,8 +1990,6 @@ impl ModernRenderPath {
                 self.shadow_cubemaps.push(sc);
             }
         }
-
-        eprintln!("[SHADOW] Built {} shadow cubemaps", self.shadow_cubemaps.len());
     }
 
     /// Draw all D3 lights with their shadow cubemaps onto the given command buffer.
@@ -1454,7 +2011,7 @@ impl ModernRenderPath {
         cmd: vk::CommandBuffer,
         bsp_vbo: vk::Buffer,
         bsp_ibo: vk::Buffer,
-        visible_batches: &[(u32, u32, Option<vk::DescriptorSet>)],
+        visible_batches: &[(u32, u32, Option<vk::DescriptorSet>, bool)],
         mvp: [f32; 16],
         view_origin: [f32; 3],
     ) {
@@ -1470,6 +2027,19 @@ impl ModernRenderPath {
             Some(pair) => pair,
             None => return,
         };
+
+        // Dark-fill needs the baked lightmap at set 3. If it isn't ready, skip the whole pass
+        // rather than sample an unbound set.
+        let lightmap_ds = match self.lightmap_descriptor_set() {
+            Some(ds) => ds,
+            None => return,
+        };
+        // Set 3 (lightmap) is constant for every light/batch; bind it once up front. Sets 1
+        // (diffuse) and 2 (shadow cubemap) are rebound per batch/light below.
+        ctx.device.cmd_bind_descriptor_sets(
+            cmd, vk::PipelineBindPoint::GRAPHICS,
+            lit_pip_layout, 3, &[lightmap_ds], &[],
+        );
 
         for (light_idx, light) in self.d3_lights.iter().enumerate() {
             // Shadow cubemap is required: the shader always samples set=2.
@@ -1491,7 +2061,7 @@ impl ModernRenderPath {
             ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo], &[0]);
             ctx.device.cmd_bind_index_buffer(cmd, bsp_ibo, 0, vk::IndexType::UINT32);
 
-            for &(first_index, index_count, diffuse_ds) in visible_batches {
+            for &(first_index, index_count, diffuse_ds, _is_light) in visible_batches {
                 if let Some(ds) = diffuse_ds {
                     ctx.device.cmd_bind_descriptor_sets(
                         cmd, vk::PipelineBindPoint::GRAPHICS,
@@ -1506,7 +2076,9 @@ impl ModernRenderPath {
                     light_color: light.color,
                     light_intensity: light.intensity,
                     spec_power: light.spec_pow,
-                    shadow_bias: 0.005,
+                    // Larger bias to stop cubemap self-shadowing acne (the "red lines"
+                    // along surfaces lit at grazing angles).
+                    shadow_bias: 0.04,
                     _pad1: 0.0,
                     _pad2: 0.0,
                     view_origin,
@@ -1552,6 +2124,25 @@ impl ModernRenderPath {
                 unsafe { ctx.device.destroy_render_pass(rp, None); }
             });
         }
+
+        // Projective dynamic-shadow resources.
+        let ps = std::mem::take(&mut self.projective_shadow);
+        gpu_device::with_device(|ctx| unsafe {
+            // SAFETY: all handles are valid (or None) and not in use at shutdown.
+            if let Some(x) = ps.framebuffer { ctx.device.destroy_framebuffer(x, None); }
+            if let Some(x) = ps.resolve_fb { ctx.device.destroy_framebuffer(x, None); }
+            if let Some(x) = ps.color_view { ctx.device.destroy_image_view(x, None); }
+            if let Some(x) = ps.depth_view { ctx.device.destroy_image_view(x, None); }
+            if let Some(x) = ps.depth_sample_view { ctx.device.destroy_image_view(x, None); }
+            if let Some(x) = ps.color_image { ctx.device.destroy_image(x, None); }
+            if let Some(x) = ps.depth_image { ctx.device.destroy_image(x, None); }
+            if let Some(x) = ps.color_mem { ctx.device.free_memory(x, None); }
+            if let Some(x) = ps.depth_mem { ctx.device.free_memory(x, None); }
+            if let Some(x) = ps.resolve_rp { ctx.device.destroy_render_pass(x, None); }
+            if let Some(x) = ps.caster_rp { ctx.device.destroy_render_pass(x, None); }
+            if let Some(x) = ps.resolve_pool { ctx.device.destroy_descriptor_pool(x, None); }
+            if let Some(x) = ps.sampler { ctx.device.destroy_sampler(x, None); }
+        });
     }
 }
 
@@ -2060,6 +2651,12 @@ impl RenderPath for ModernRenderPath {
                 if let Err(e) = pm.create_pipeline(ShaderType::Water, PipelineVariant::AlphaBlend) {
                     eprintln!("Failed to create Water/AlphaBlend pipeline: {}", e);
                 }
+                // Opaque (depth-writing) water: Q2 water is solid and writes depth. Without depth
+                // write, deferred passes (VXGI GI) sample the floor BEHIND the water and paint its
+                // light onto the surface, making solid water look see-through.
+                if let Err(e) = pm.create_pipeline(ShaderType::Water, PipelineVariant::Opaque) {
+                    eprintln!("Failed to create Water/Opaque pipeline: {}", e);
+                }
                 self.pipelines = Some(pm);
             }
             Err(e) => {
@@ -2216,6 +2813,7 @@ impl RenderPath for ModernRenderPath {
         // Far plane computed from SKYBOX_SIZE to match original MyQ2 (gl_rmain.c):
         //   boxsize = SKYBOX_SIZE - 252*ceil(SKYBOX_SIZE/2300) → 4096
         //   farz = next_power_of_2(boxsize) * 2 → 8192
+        self.frame_vieworg = params.vieworg;
         let view = Self::compute_view_matrix(&params.vieworg, &params.viewangles);
         let proj = Self::compute_projection_matrix(params.fov_x, params.fov_y, 4.0, 8192.0);
         let view_proj = Self::mat4_multiply(&proj, &view);
@@ -2424,11 +3022,127 @@ impl RenderPath for ModernRenderPath {
         // Compute model-view-projection for this entity
         let mvp = mat4_multiply(&self.frame_uniforms.view_projection, &model_matrix);
 
+        // Only MOVERS that have left their authored position get dynamically relit;
+        // static inline models (func_wall/detail, resting movers) keep use_dyn=0 and
+        // their baked lightmap. Sampling light at a static model's centre can miss and
+        // black it out, so we gate strictly on movement.
+        let moved = entity.origin[0].abs() > 1.0
+            || entity.origin[1].abs() > 1.0
+            || entity.origin[2].abs() > 1.0;
+        let dyn_block = if moved {
+            let cz = entity.origin[2] + (model.mins[2] + model.maxs[2]) * 0.5;
+            let (minx, maxx) = (model.mins[0], model.maxs[0]);
+            let (miny, maxy) = (model.mins[1], model.maxs[1]);
+            let (ox, oy) = (entity.origin[0], entity.origin[1]);
+
+            // Sample the world AREA light at a world point. A downward floor trace can't see
+            // a shaft's vertical light gradient (every sample below the mover shares the same
+            // floor), so trace HORIZONTALLY toward the surrounding walls, which DO carry the
+            // gradient — reading the wall light at the mover's current height varies
+            // continuously as it travels. Fall back to the floor trace if no wall is in range.
+            let sample = |x: f32, y: f32, z: f32| -> [f32; 3] {
+                let p = [x, y, z];
+                const REACH: f32 = 1024.0;
+                let dirs = [
+                    [x + REACH, y, z], [x - REACH, y, z],
+                    [x, y + REACH, z], [x, y - REACH, z],
+                ];
+                let mut sum = [0.0_f32; 3];
+                let mut hits = 0u32;
+                for end in &dirs {
+                    let mut l = [1.0_f32; 3];
+                    // SAFETY: r_light_point_dir accesses vk_local statics, main thread only.
+                    let hit = unsafe { crate::vk_light::r_light_point_dir(&p, end, &mut l) };
+                    if hit { sum[0] += l[0]; sum[1] += l[1]; sum[2] += l[2]; hits += 1; }
+                }
+                if hits > 0 {
+                    let n = hits as f32;
+                    [sum[0] / n, sum[1] / n, sum[2] / n]
+                } else {
+                    let mut l = [1.0_f32; 3];
+                    // SAFETY: as above.
+                    unsafe { crate::vk_light::r_light_point(&p, &mut l); }
+                    l
+                }
+            };
+
+            // Sample at the 4 footprint corners (inset 15% so the trace sits over the deck,
+            // not on the very edge / inside a wall). Order matches the shader: (min,min),
+            // (max,min),(min,max),(max,max). Each corner samples a different part of the
+            // surrounding light, so the area's light/shadow gradient falls across the lift.
+            let inset = 0.15_f32;
+            let lx0 = minx + (maxx - minx) * inset;
+            let lx1 = maxx - (maxx - minx) * inset;
+            let ly0 = miny + (maxy - miny) * inset;
+            let ly1 = maxy - (maxy - miny) * inset;
+            // Desaturate the sampled room light toward its own luminance. Quake light textures
+            // and r_light_point_dir return strongly warm/red values near many fixtures, and
+            // mixing that raw into the mover's lightmap (0.6) tinted the whole lift red. Keep
+            // the brightness gradient (so the lift still lights/darkens as it travels) but pull
+            // most of the hue out so it reads as neutral-lit metal, not a red deck.
+            let desat = |c: [f32; 3]| -> [f32; 3] {
+                let luma = c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114;
+                const KEEP: f32 = 0.25; // fraction of original hue retained
+                [
+                    luma + (c[0] - luma) * KEEP,
+                    luma + (c[1] - luma) * KEEP,
+                    luma + (c[2] - luma) * KEEP,
+                ]
+            };
+            let targets = [
+                desat(sample(lx0 + ox, ly0 + oy, cz)),
+                desat(sample(lx1 + ox, ly0 + oy, cz)),
+                desat(sample(lx0 + ox, ly1 + oy, cz)),
+                desat(sample(lx1 + ox, ly1 + oy, cz)),
+            ];
+
+            // Per-corner temporal smoothing (fixed alpha — the refdef time fed to the
+            // renderer does not advance reliably per render frame, so a time-based ease
+            // freezes; see git history).
+            let key = entity.model as usize;
+            let prev = self.mover_light.get(&key).copied().unwrap_or(targets);
+            let a = 0.12_f32; // ~8-frame ease toward target
+            let mut smoothed = [[0.0_f32; 3]; 4];
+            for c in 0..4 {
+                for i in 0..3 {
+                    smoothed[c][i] = prev[c][i] + (targets[c][i] - prev[c][i]) * a;
+                }
+            }
+            self.mover_light.insert(key, smoothed);
+
+            // Pack each corner's RGB into one float (0..1 -> 0..255 per channel; all such
+            // integers are exact in f32). The shader unpacks and bilinearly interpolates.
+            let pack = |c: [f32; 3]| -> f32 {
+                let r = (c[0].clamp(0.0, 1.0) * 255.0).round();
+                let g = (c[1].clamp(0.0, 1.0) * 255.0).round();
+                let b = (c[2].clamp(0.0, 1.0) * 255.0).round();
+                r + g * 256.0 + b * 65536.0
+            };
+            // Bounds in AUTHORED space (v_FragPos = a_Position, not offset by origin).
+            let inv_w = if (maxx - minx).abs() > 1e-3 { 1.0 / (maxx - minx) } else { 0.0 };
+            let inv_h = if (maxy - miny).abs() > 1e-3 { 1.0 / (maxy - miny) } else { 0.0 };
+            [
+                1.0,
+                pack(smoothed[0]), pack(smoothed[1]), pack(smoothed[2]), pack(smoothed[3]),
+                minx, miny, inv_w, inv_h,
+            ]
+        } else {
+            [0.0; 9]
+        };
+
         // Queue brush model for drawing in flush_3d_scene()
+        let center = [
+            entity.origin[0] + (model.mins[0] + model.maxs[0]) * 0.5,
+            entity.origin[1] + (model.mins[1] + model.maxs[1]) * 0.5,
+            entity.origin[2] + (model.mins[2] + model.maxs[2]) * 0.5,
+        ];
         self.brush_models.push(BrushModelDraw {
             mvp: mat4_to_flat(&mvp),
             first_surface: model.firstmodelsurface as usize,
             num_surfaces: model.nummodelsurfaces as usize,
+            dyn_block,
+            model_matrix,
+            center,
         });
         self.scene_rendered = true;
     }
@@ -2443,6 +3157,42 @@ impl RenderPath for ModernRenderPath {
 
         // Build model matrix from entity origin + angles
         let model_matrix = build_entity_matrix(&entity.origin, &entity.angles);
+
+        // Blob-shadow ground plane = the entity's feet in world Z, so the shadow lands on
+        // whatever surface it stands on (including a moving lift deck). +1 bias so it sits
+        // just above the surface and doesn't z-fight.
+        // SAFETY: model pointer valid for frame duration, main thread only.
+        // Trace down to the floor below the entity for the shadow plane (the model's stored
+        // bounds are a fixed [-32..32] placeholder, useless for this). +1 bias so the shadow
+        // sits just above the floor. NaN ⇒ no floor found ⇒ no shadow cast.
+        // SAFETY: r_ground_z accesses vk_local statics, main thread only.
+        let shadow_ground_z = unsafe {
+            crate::vk_light::r_ground_z(&entity.origin).map(|z| z + 1.0).unwrap_or(f32::NAN)
+        };
+
+        // Shadow shear: lean the shadow away from the nearest light. Find the closest static
+        // light, take the horizontal direction toward it; the matrix shears points by their
+        // height so the shadow falls on the far side. Scaled modestly so it stays grounded.
+        let shadow_skew = {
+            let lights = crate::vk_rsurf::STATIC_LIGHTS.lock().unwrap_or_else(|e| e.into_inner());
+            let mut best_d2 = f32::MAX;
+            let mut dir = [0.0_f32, 0.0];
+            for l in lights.iter() {
+                let dx = l.origin[0] - entity.origin[0];
+                let dy = l.origin[1] - entity.origin[1];
+                let dz = l.origin[2] - entity.origin[2];
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 < best_d2 && d2 > 1.0 {
+                    best_d2 = d2;
+                    let hlen = (dx * dx + dy * dy).sqrt();
+                    if hlen > 1.0 {
+                        dir = [dx / hlen, dy / hlen];
+                    }
+                }
+            }
+            const SKEW: f32 = 0.4;
+            [dir[0] * SKEW, dir[1] * SKEW]
+        };
 
         // Compute shade lighting for this entity position
         let mut shade_light = [1.0_f32; 3];
@@ -2490,6 +3240,8 @@ impl RenderPath for ModernRenderPath {
             old_frame: entity.oldframe as u32,
             backlerp: entity.backlerp,
             flags: entity.flags as u32,
+            shadow_ground_z,
+            shadow_skew,
         };
 
         // Queue instance — actual draw commands will be issued when
@@ -2591,8 +3343,10 @@ impl RenderPath for ModernRenderPath {
     }
 
     fn render_dlights(&mut self) {
-        // Only render flashblend-style lights when the cvar is enabled
-        if crate::vk_rmain::rcvars().vk_flashblend.value == 0.0 {
+        let flashblend = crate::vk_rmain::rcvars().vk_flashblend.value != 0.0;
+        let light_bloom = crate::vk_rmain::rcvars().r_light_bloom.value != 0.0;
+        // Nothing to draw unless classic flashblend OR the new bloom-glow path is on.
+        if !flashblend && !light_bloom {
             return;
         }
 
@@ -2605,7 +3359,20 @@ impl RenderPath for ModernRenderPath {
         let vright = self.frame_uniforms.view_right;
         let vup = self.frame_uniforms.view_up;
         let vp_flat = mat4_to_flat(vp);
+        let vorg = self.frame_uniforms.view_origin;
 
+        // The disc is additive (blend = src,ONE) with a bright center fading to black at the
+        // rim. In classic flashblend the center is dim (0.2). With r_light_bloom we push the
+        // center HDR-bright (>1.0) so the composite bloom pass blooms the source itself.
+        const GLOW_CORE: f32 = 1.6;
+        let center_scale = if light_bloom { GLOW_CORE } else { 0.2 };
+
+        // Gather every disc to draw first (origin, rim radius, base color), then emit geometry.
+        let mut discs: Vec<([f32; 3], f32, [f32; 3])> = Vec::new();
+
+        // --- Dynamic lights only (rockets, explosions, muzzle flashes, item glows) ---
+        // Static map lights are NOT orbed: their emissive textures already bloom, and floating
+        // orbs at ceiling-light / sky-emitter positions read as weird balls in the air.
         // r_newrefdef is valid for frame duration, main thread only
         let num_dlights = crate::vk_local::rfs().r_newrefdef.num_dlights;
         for i in 0..num_dlights as usize {
@@ -2615,52 +3382,50 @@ impl RenderPath for ModernRenderPath {
             if rad < 1.0 {
                 continue;
             }
+            discs.push((dl.origin, rad, dl.color));
+        }
+        let _ = vorg;
 
+        // --- Emit fan geometry (1 center + 17 rim verts, 16 tris) per disc ---
+        for (origin, rad, color) in &discs {
+            let (rad, origin, color) = (*rad, *origin, *color);
             let base_vtx = self.dlight_vertices.len() as u32;
 
-            // Center vertex: bright color (matches original GL vertex color)
-            let center_color = [
-                dl.color[0] * 0.2,
-                dl.color[1] * 0.2,
-                dl.color[2] * 0.2,
-            ];
-            // Center vertex: offset slightly toward camera
+            // Center: bright, offset slightly toward the camera so it isn't z-clipped by the
+            // surface it sits on.
             self.dlight_vertices.push([
-                dl.origin[0] - vpn[0] * rad,
-                dl.origin[1] - vpn[1] * rad,
-                dl.origin[2] - vpn[2] * rad,
-                center_color[0], center_color[1], center_color[2],
+                origin[0] - vpn[0] * rad,
+                origin[1] - vpn[1] * rad,
+                origin[2] - vpn[2] * rad,
+                color[0] * center_scale, color[1] * center_scale, color[2] * center_scale,
             ]);
 
-            // 17 edge vertices (closed fan: vertex 17 == vertex 1)
-            // Edge vertices are black — rasterizer interpolates smoothly from center
+            // 17 rim verts (closed fan), black — rasterizer interpolates center→rim.
             for j in (0..=16).rev() {
                 let a = (j as f32) / 16.0 * std::f32::consts::TAU;
                 let (sin_a, cos_a) = a.sin_cos();
                 self.dlight_vertices.push([
-                    dl.origin[0] + vright[0] * cos_a * rad + vup[0] * sin_a * rad,
-                    dl.origin[1] + vright[1] * cos_a * rad + vup[1] * sin_a * rad,
-                    dl.origin[2] + vright[2] * cos_a * rad + vup[2] * sin_a * rad,
-                    0.0, 0.0, 0.0, // black at edges
+                    origin[0] + vright[0] * cos_a * rad + vup[0] * sin_a * rad,
+                    origin[1] + vright[1] * cos_a * rad + vup[1] * sin_a * rad,
+                    origin[2] + vright[2] * cos_a * rad + vup[2] * sin_a * rad,
+                    0.0, 0.0, 0.0,
                 ]);
             }
 
-            // 16 triangles (triangle list from fan)
             for j in 0..16u32 {
-                self.dlight_indices.push(base_vtx);         // center
-                self.dlight_indices.push(base_vtx + 1 + j); // edge j
-                self.dlight_indices.push(base_vtx + 2 + j); // edge j+1
+                self.dlight_indices.push(base_vtx);
+                self.dlight_indices.push(base_vtx + 1 + j);
+                self.dlight_indices.push(base_vtx + 2 + j);
             }
 
             self.dlight_draws.push(DlightPushConstants {
                 mvp: vp_flat,
-                light_origin: dl.origin,
+                light_origin: origin,
                 light_radius: rad,
-                light_color: dl.color,
+                light_color: color,
                 _pad: 0.0,
             });
         }
-
     }
 
     fn draw_sky(&mut self) {
@@ -2692,6 +3457,8 @@ impl RenderPath for ModernRenderPath {
         );
         let sky_mvp = mat4_multiply(&self.frame_uniforms.view_projection, &sky_model);
         self.sky_mvp = mat4_to_flat(&sky_mvp);
+        // Kept for the mirrored water-reflection pass (rebuilds sky MVP with the mirrored VP).
+        self.sky_model_flat = mat4_to_flat(&sky_model);
 
         for i in 0..6 {
             let mut s_min = skymins[0][i];
@@ -3440,6 +4207,9 @@ impl ModernRenderPath {
         // that are set during begin_frame().
         self.render_dlights();
 
+        // Prepare the VXGI irradiance volume descriptor (set 4) + grid params for the world pass.
+        self.prepare_world_irradiance();
+
         let cmd = match self.current_command_buffer {
             Some(cmd) => cmd,
             None => return,
@@ -3472,11 +4242,11 @@ impl ModernRenderPath {
         // Pre-gather BSP batch data and descriptor sets
         let bsp_vbo = self.bsp_geometry.vertex_buffer().vk_buffer();
         let bsp_ibo = self.bsp_geometry.index_buffer().vk_buffer();
-        let bsp_batches: Vec<(u32, u32, Option<vk::DescriptorSet>)> = self.bsp_geometry.batches().iter()
+        let bsp_batches: Vec<(u32, u32, Option<vk::DescriptorSet>, bool)> = self.bsp_geometry.batches().iter()
             .map(|b| {
                 let ds = super::texture::ensure_descriptor_set(b.texture_id as i32)
                     .or_else(|| super::texture::ensure_descriptor_set(0));
-                (b.first_index, b.index_count, ds)
+                (b.first_index, b.index_count, ds, b.is_light)
             })
             .collect();
         let has_bsp = bsp_vbo.is_some() && bsp_ibo.is_some() && !bsp_batches.is_empty();
@@ -3518,7 +4288,7 @@ impl ModernRenderPath {
         let mvp = vp_flat;
 
         // Pre-gather brush model draw data (surface ranges with per-surface descriptors)
-        let brush_model_draws: Vec<([f32; 16], Vec<(u32, u32, Option<vk::DescriptorSet>)>)> =
+        let brush_model_draws: Vec<([f32; 16], [f32; 9], Vec<(u32, u32, Option<vk::DescriptorSet>)>)> =
             self.brush_models.iter().map(|bm| {
                 let surfaces: Vec<_> = self.bsp_geometry
                     .draw_info_for_range(bm.first_surface, bm.num_surfaces)
@@ -3529,7 +4299,7 @@ impl ModernRenderPath {
                         (surf.first_index, surf.index_count, ds)
                     })
                     .collect();
-                (bm.mvp, surfaces)
+                (bm.mvp, bm.dyn_block, surfaces)
             })
             .collect();
 
@@ -3540,12 +4310,22 @@ impl ModernRenderPath {
             ibo: vk::Buffer,
             index_count: u32,
             skin_ds: Option<vk::DescriptorSet>,
-            instances: Vec<(AliasPushConstants, u64)>, // (push_constants, frame_offset)
+            // (push_constants, frame_offset, depth_hack) — depth_hack = RF_DEPTHHACK view
+            // weapon, drawn in a compressed depth range.
+            instances: Vec<(AliasPushConstants, u64, bool)>,
+            // Blob-shadow pass: same posed geometry flattened onto the entity's ground
+            // plane, drawn black + translucent on the alpha-blend pipeline.
+            shadow_instances: Vec<(AliasPushConstants, u64)>,
         }
 
         let alias_pipeline_data = self.pipelines.as_ref()
             .and_then(|pm| pm.get(ShaderType::Alias, PipelineVariant::Opaque))
             .map(|p| (p.pipeline, p.layout));
+        // Blob-shadow pass reuses the alias vertex shader on the alpha-blend pipeline.
+        let alias_shadow_pipeline_data = self.pipelines.as_ref()
+            .and_then(|pm| pm.get(ShaderType::Alias, PipelineVariant::AlphaBlend))
+            .map(|p| (p.pipeline, p.layout));
+        let cast_shadows = crate::vk_rmain::rcvars().vk_shadows.value != 0.0;
 
         let mut alias_draw_entries: Vec<AliasDrawEntry> = Vec::new();
         let alias_registered_count = self.alias_models.model_count();
@@ -3589,8 +4369,15 @@ impl ModernRenderPath {
 
                 let index_count = model_buffers.index_count();
                 let mut instances = Vec::new();
+                let mut shadow_instances = Vec::new();
 
                 for instance in batch.instances() {
+                    // RF_VIEWERMODEL = the player's own body: a shadow-only caster (it's still
+                    // rendered into the shadow map by render_projective_shadows). Don't draw it
+                    // in the first-person view.
+                    if instance.flags & myq2_common::q_shared::RF_VIEWERMODEL as u32 != 0 {
+                        continue;
+                    }
                     let model_flat = mat4_to_flat(&instance.model_matrix);
                     let inst_mvp = ModernRenderPath::mat4_multiply(&vp_flat, &model_flat);
                     let frontlerp = 1.0 - instance.backlerp;
@@ -3610,7 +4397,43 @@ impl ModernRenderPath {
                         back_v: [instance.backlerp, instance.backlerp, instance.backlerp],
                         is_shell: if is_shell { 1 } else { 0 },
                     };
-                    instances.push((pc, frame_offset));
+                    // RF_DEPTHHACK (view weapon): draw in a compressed depth range so the gun
+                    // never intersects the near plane or pokes into world geometry — the
+                    // original's glDepthRange(0, 0.3). Applied via the dynamic viewport.
+                    let depth_hack =
+                        instance.flags & myq2_common::q_shared::RF_DEPTHHACK as u32 != 0;
+                    instances.push((pc, frame_offset, depth_hack));
+
+                    // Blob shadow: project the SAME posed geometry onto the entity's ground
+                    // plane (a world-space z-flatten baked into the MVP), drawn black and
+                    // translucent. Skip weapon-view and already-translucent models, matching
+                    // classic Q2. Gated by the vk_shadows cvar.
+                    // Blob shadows retired in favour of the projective shadow system
+                    // (render_projective_shadows), which conforms to geometry / climbs walls.
+                    let casts_shadow = false
+                        && cast_shadows
+                        && instance.shadow_ground_z.is_finite()
+                        && (instance.flags
+                            & (myq2_common::q_shared::RF_WEAPONMODEL
+                                | myq2_common::q_shared::RF_TRANSLUCENT) as u32)
+                            == 0;
+                    if casts_shadow {
+                        let f = shadow_flatten_matrix(instance.shadow_skew, instance.shadow_ground_z);
+                        let shadow_world = ModernRenderPath::mat4_multiply(&f, &model_flat);
+                        let shadow_mvp = ModernRenderPath::mat4_multiply(&vp_flat, &shadow_world);
+                        let shadow_pc = AliasPushConstants {
+                            mvp: shadow_mvp,
+                            shade_light: [0.0, 0.0, 0.0], // black silhouette
+                            alpha: 0.5,                   // shadow darkness
+                            move_vec: [0.0, 0.0, 0.0],
+                            backlerp: instance.backlerp,
+                            front_v: [frontlerp, frontlerp, frontlerp],
+                            shell_scale: 0.0,
+                            back_v: [instance.backlerp, instance.backlerp, instance.backlerp],
+                            is_shell: 0,
+                        };
+                        shadow_instances.push((shadow_pc, frame_offset));
+                    }
                 }
 
                 if !instances.is_empty() {
@@ -3620,6 +4443,7 @@ impl ModernRenderPath {
                         index_count,
                         skin_ds,
                         instances,
+                        shadow_instances,
                     });
                 }
             }
@@ -3630,25 +4454,60 @@ impl ModernRenderPath {
             .and_then(|pm| pm.get(ShaderType::World, PipelineVariant::AlphaBlend))
             .map(|p| (p.pipeline, p.layout));
 
-        let alpha_surface_draws: Vec<(u32, u32, f32, Option<vk::DescriptorSet>)> =
-            self.bsp_geometry.alpha_surfaces().iter().map(|surf| {
-                let alpha = if surf.flags & super::geometry::SURF_TRANS33 != 0 {
-                    0.33_f32
-                } else {
-                    0.66
-                };
-                let ds = super::texture::ensure_descriptor_set(surf.texture_id as i32)
-                    .or_else(|| super::texture::ensure_descriptor_set(0));
-                (surf.first_index, surf.index_count, alpha, ds)
-            })
-            .collect();
+        let alpha_surface_draws: Vec<(u32, u32, f32, Option<vk::DescriptorSet>)> = {
+            let vo = self.frame_uniforms.view_origin;
+            let mut draws: Vec<(f32, u32, u32, f32, Option<vk::DescriptorSet>)> =
+                self.bsp_geometry.alpha_surfaces().iter().map(|surf| {
+                    let alpha = if surf.flags & super::geometry::SURF_TRANS33 != 0 {
+                        0.33_f32
+                    } else {
+                        0.66
+                    };
+                    let ds = super::texture::ensure_descriptor_set(surf.texture_id as i32)
+                        .or_else(|| super::texture::ensure_descriptor_set(0));
+                    let c = surf.centroid;
+                    let d2 = (c[0] - vo[0]).powi(2) + (c[1] - vo[1]).powi(2) + (c[2] - vo[2]).powi(2);
+                    (d2, surf.first_index, surf.index_count, alpha, ds)
+                })
+                .collect();
+            // Back-to-front so overlapping translucent surfaces composite correctly (they were
+            // drawn in texture order, which layers near glass under far glass at random).
+            draws.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            draws.into_iter().map(|(_, fi, ic, a, ds)| (fi, ic, a, ds)).collect()
+        };
 
         // Pre-gather turb (water/lava/slime) surface data
+        // Opaque/depth-writing water (see pipeline creation note) so it reads as solid and the
+        // GI pass samples the water surface, not the floor behind it.
         let water_pipeline_data = self.pipelines.as_ref()
+            .and_then(|pm| pm.get(ShaderType::Water, PipelineVariant::Opaque))
+            .map(|p| (p.pipeline, p.layout));
+        // TRANS-flagged water draws late with real alpha blending (see the translucent-water
+        // block after sky/entities); the Opaque pipeline handles untagged liquids (lava etc.).
+        let water_ab_pipeline_data = self.pipelines.as_ref()
             .and_then(|pm| pm.get(ShaderType::Water, PipelineVariant::AlphaBlend))
             .map(|p| (p.pipeline, p.layout));
 
-        let turb_surface_draws: Vec<(u32, u32, f32, Option<vk::DescriptorSet>)> =
+        // Planar reflection plane: pick the dominant horizontal water plane (largest summed
+        // index count across surfaces at the same height). Surfaces on other heights simply
+        // don't reflect this frame. Bucket by 4-unit-rounded z so co-planar faces group.
+        let refl_enabled = crate::vk_rmain::rcvars().r_water_reflect.fresh_value() != 0.0;
+        let refl_plane_z: Option<f32> = if refl_enabled {
+            let mut planes: std::collections::HashMap<i32, (u32, f32)> = std::collections::HashMap::new();
+            for surf in self.bsp_geometry.turb_surfaces() {
+                if !surf.is_horizontal {
+                    continue;
+                }
+                let key = (surf.plane_z / 4.0).round() as i32;
+                let e = planes.entry(key).or_insert((0, surf.plane_z));
+                e.0 += surf.index_count;
+            }
+            planes.values().max_by_key(|(count, _)| *count).map(|&(_, z)| z)
+        } else {
+            None
+        };
+
+        let turb_surface_draws: Vec<(u32, u32, f32, [f32; 3], Option<vk::DescriptorSet>, bool)> =
             self.bsp_geometry.turb_surfaces().iter().map(|surf| {
                 // Turb surfaces with TRANS flags get appropriate alpha, otherwise opaque
                 let alpha = if surf.flags & super::geometry::SURF_TRANS33 != 0 {
@@ -3660,11 +4519,67 @@ impl ModernRenderPath {
                 };
                 let ds = super::texture::ensure_descriptor_set(surf.texture_id as i32)
                     .or_else(|| super::texture::ensure_descriptor_set(0));
-                (surf.first_index, surf.index_count, alpha, ds)
+                // Reflect only translucent water sitting on the chosen plane (not lava/slime,
+                // whose opaque alpha=1.0 look would be wrong with a mirror on top).
+                let on_plane = alpha < 1.0
+                    && surf.is_horizontal
+                    && refl_plane_z.map(|pz| (surf.plane_z - pz).abs() < 4.0).unwrap_or(false);
+                (surf.first_index, surf.index_count, alpha, surf.flat_light, ds, on_plane)
             })
             .collect();
         let has_turb = !turb_surface_draws.is_empty() && water_pipeline_data.is_some() && has_bsp;
         let water_time = self.frame_uniforms.time;
+        // Reflection pass runs only when a plane was picked AND some visible water sits on it.
+        let refl_plane_z = refl_plane_z
+            .filter(|_| turb_surface_draws.iter().any(|&(.., on_plane)| on_plane));
+        self.frame_refl_plane = refl_plane_z; // shimmer pass reads this after the scene
+        if refl_plane_z.is_some() {
+            self.prepare_water_reflection(scene_width, scene_height);
+        }
+        // Everything the mirrored pass needs, gathered before the device closure:
+        // (color image, color view, depth view, w, h, mirrored VP, mirrored sky MVP).
+        let refl_data: Option<(vk::Image, vk::Image, vk::ImageView, vk::ImageView, u32, u32, [f32; 16], [f32; 16], f32, f32)> =
+            refl_plane_z.and_then(|pz| {
+                if !has_bsp || self.refl_desc_set.is_none() {
+                    return None;
+                }
+                let t = self.refl_target.as_ref()?;
+                let (img, d_img, cv, dv) = (t.color_image()?, t.depth_image()?, t.color_view()?, t.depth_view()?);
+                // Reflect about the plane z = pz (column-major flat): z' = 2·pz − z.
+                let mirror: [f32; 16] = [
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, -1.0, 0.0,
+                    0.0, 0.0, 2.0 * pz, 1.0,
+                ];
+                let refl_vp = Self::mat4_multiply(&vp_flat, &mirror);
+                let refl_sky_mvp = Self::mat4_multiply(&refl_vp, &self.sky_model_flat);
+                // Which side of the plane the camera is on decides which half of the world the
+                // mirror shows: above → the room above the water; below (swimming) → the
+                // submerged world reflecting off the surface's underside.
+                let side = if self.frame_uniforms.view_origin[2] >= pz { 1.0_f32 } else { -1.0 };
+                Some((img, d_img, cv, dv, t.width(), t.height(), refl_vp, refl_sky_mvp, pz, side))
+            });
+        // DIAGNOSTIC (temporary): which reflection gate fails. Logged every ~5s.
+        if refl_enabled {
+            static RF: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if RF.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 300 == 0 {
+                let turbs = self.bsp_geometry.turb_surfaces();
+                let horiz = turbs.iter().filter(|s| s.is_horizontal).count();
+                let on_plane_ct = turb_surface_draws.iter().filter(|&&(.., op)| op).count();
+                eprintln!(
+                    "[refl] turb={} horiz={} trans={} plane={:?} target={} set={} data={}",
+                    turbs.len(),
+                    horiz,
+                    turb_surface_draws.iter().filter(|&&(_, _, a, ..)| a < 1.0).count(),
+                    refl_plane_z,
+                    self.refl_target.is_some(),
+                    self.refl_desc_set.is_some(),
+                    refl_data.is_some(),
+                );
+                let _ = on_plane_ct;
+            }
+        }
 
         // Pre-gather sprite draw data
         let sprite_pipeline_data = alpha_blend_pipeline_data; // Sprites use World/AlphaBlend
@@ -3795,6 +4710,225 @@ impl ModernRenderPath {
             // SAFETY: Vulkan context valid, called from main thread only, within
             // active command buffer recording started in begin_frame().
             unsafe {
+                // === Planar water reflection: mirrored world+sky into the half-res target ===
+                // Rendered BEFORE the main scene so the water pass can sample the result. Uses
+                // the ordinary world/sky pipelines (they cull NONE, so the mirrored winding is
+                // fine) with MVP = VP × mirror(z = plane). world.frag discards geometry below
+                // the plane via the u_DynInvSize clip push (see shader comment).
+                if let Some((r_img, r_d_img, r_cv, r_dv, r_w, r_h, refl_vp, refl_sky_mvp, plane_z, refl_side)) = refl_data {
+                    // Both attachments start UNDEFINED (contents are cleared, and last frame's
+                    // colour was left in SHADER_READ). Depth also transitions from UNDEFINED
+                    // every frame — RenderTarget does no initial layout transition of its own.
+                    let barriers = [
+                        vk::ImageMemoryBarrier::default()
+                            .old_layout(vk::ImageLayout::UNDEFINED)
+                            .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .image(r_img)
+                            .subresource_range(vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            })
+                            .src_access_mask(vk::AccessFlags::empty())
+                            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE),
+                        vk::ImageMemoryBarrier::default()
+                            .old_layout(vk::ImageLayout::UNDEFINED)
+                            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .image(r_d_img)
+                            .subresource_range(vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            })
+                            .src_access_mask(vk::AccessFlags::empty())
+                            .dst_access_mask(
+                                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                            ),
+                    ];
+                    ctx.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                            | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                        vk::DependencyFlags::empty(),
+                        &[], &[], &barriers,
+                    );
+
+                    let r_color_att = vk::RenderingAttachmentInfo::default()
+                        .image_view(r_cv)
+                        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .load_op(vk::AttachmentLoadOp::CLEAR)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .clear_value(vk::ClearValue {
+                            color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] },
+                        });
+                    let r_depth_att = vk::RenderingAttachmentInfo::default()
+                        .image_view(r_dv)
+                        .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                        .load_op(vk::AttachmentLoadOp::CLEAR)
+                        .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                        .clear_value(vk::ClearValue {
+                            depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 },
+                        });
+                    let r_extent = vk::Extent2D { width: r_w, height: r_h };
+                    let r_info = vk::RenderingInfo::default()
+                        .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: r_extent })
+                        .layer_count(1)
+                        .color_attachments(std::slice::from_ref(&r_color_att))
+                        .depth_attachment(&r_depth_att);
+                    ctx.device.cmd_begin_rendering(cmd, &r_info);
+
+                    // Same negative-height viewport convention as the main pass, so the mirrored
+                    // render maps to the same normalized screen positions the water shader samples.
+                    let r_viewport = vk::Viewport {
+                        x: 0.0,
+                        y: r_extent.height as f32,
+                        width: r_extent.width as f32,
+                        height: -(r_extent.height as f32),
+                        min_depth: 0.0,
+                        max_depth: 1.0,
+                    };
+                    ctx.device.cmd_set_viewport(cmd, 0, &[r_viewport]);
+                    ctx.device.cmd_set_scissor(cmd, 0, &[vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: r_extent,
+                    }]);
+
+                    if has_bsp {
+                        let bsp_vbo_handle = bsp_vbo.unwrap();
+                        let bsp_ibo_handle = bsp_ibo.unwrap();
+                        ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, world_pipeline);
+                        ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo_handle], &[0]);
+                        ctx.device.cmd_bind_index_buffer(cmd, bsp_ibo_handle, 0, vk::IndexType::UINT32);
+
+                        let mvp_bytes: &[u8] = std::slice::from_raw_parts(refl_vp.as_ptr() as *const u8, 64);
+                        ctx.device.cmd_push_constants(
+                            cmd, world_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0, mvp_bytes,
+                        );
+                        // alpha=1, overbright, then tail 72..96: scroll, gamma, contrast, lift,
+                        // lm_scale=1.0 (classic full baked — no GI sampling in the mirror),
+                        // use_dyn=0. Emit=1 at 96 (no HDR boost in the reflection).
+                        let r_ob = crate::vk_rmain::rcvars().r_overbrightbits.value.max(1.0);
+                        let head: [f32; 2] = [1.0, r_ob];
+                        ctx.device.cmd_push_constants(
+                            cmd, world_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            64, std::slice::from_raw_parts(head.as_ptr() as *const u8, 8),
+                        );
+                        let tail: [f32; 7] = [
+                            0.0,
+                            crate::vk_rmain::rcvars().r_lightmap_gamma.value,
+                            crate::vk_rmain::rcvars().r_lightmap_contrast.value,
+                            crate::vk_rmain::rcvars().r_shadowlift.value,
+                            1.0, // lm_scale: full baked, GI branch off
+                            0.0, // use_dyn
+                            1.0, // emit
+                        ];
+                        ctx.device.cmd_push_constants(
+                            cmd, world_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            72, std::slice::from_raw_parts(tail.as_ptr() as *const u8, 28),
+                        );
+                        // Clip: keep only geometry on the camera's side of the plane (+1 = above,
+                        // −1 = below for an underwater camera) — the other half's mirror image
+                        // would wrongly occlude the reflections.
+                        let clip: [f32; 2] = [refl_side, plane_z];
+                        ctx.device.cmd_push_constants(
+                            cmd, world_layout,
+                            vk::ShaderStageFlags::FRAGMENT,
+                            120, std::slice::from_raw_parts(clip.as_ptr() as *const u8, 8),
+                        );
+                        if let Some(lm_ds) = lightmap_ds {
+                            ctx.device.cmd_bind_descriptor_sets(
+                                cmd, vk::PipelineBindPoint::GRAPHICS, world_layout, 2, &[lm_ds], &[],
+                            );
+                        }
+                        if let Some(irr_set) = self.vxgi_world_irr_set {
+                            ctx.device.cmd_bind_descriptor_sets(
+                                cmd, vk::PipelineBindPoint::GRAPHICS, world_layout, 4, &[irr_set], &[],
+                            );
+                        }
+                        for &(first_index, index_count, ds, _is_light) in &bsp_batches {
+                            if let Some(ds) = ds {
+                                ctx.device.cmd_bind_descriptor_sets(
+                                    cmd, vk::PipelineBindPoint::GRAPHICS, world_layout, 1, &[ds], &[],
+                                );
+                            }
+                            ctx.device.cmd_draw_indexed(cmd, index_count, 1, first_index, 0, 0);
+                        }
+                    }
+
+                    // Mirrored sky so open-air water reflects the skybox. Skipped underwater —
+                    // the submerged world has no sky; unlit areas stay the dark clear colour,
+                    // which reads correctly as murky depth in the internal reflection.
+                    if has_sky && refl_side > 0.0 {
+                        let (sky_pipeline, sky_layout) = sky_pipeline_data.unwrap();
+                        ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, sky_pipeline);
+                        let sm_bytes: &[u8] = std::slice::from_raw_parts(refl_sky_mvp.as_ptr() as *const u8, 64);
+                        ctx.device.cmd_push_constants(
+                            cmd, sky_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0, sm_bytes,
+                        );
+                        let sky_head: [f32; 2] = [1.0, 1.0]; // alpha, overbright
+                        ctx.device.cmd_push_constants(
+                            cmd, sky_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            64, std::slice::from_raw_parts(sky_head.as_ptr() as *const u8, 8),
+                        );
+                        if let (Some(s_vbo), Some(s_ibo)) = (self.sky_vbo.vk_buffer(), self.sky_ibo.vk_buffer()) {
+                            ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[s_vbo], &[0]);
+                            ctx.device.cmd_bind_index_buffer(cmd, s_ibo, 0, vk::IndexType::UINT32);
+                            for &(_, first_idx, count, ds) in &sky_draws {
+                                if let Some(ds) = ds {
+                                    ctx.device.cmd_bind_descriptor_sets(
+                                        cmd, vk::PipelineBindPoint::GRAPHICS, sky_layout, 1, &[ds], &[],
+                                    );
+                                }
+                                ctx.device.cmd_draw_indexed(cmd, count, 1, first_idx, 0, 0);
+                            }
+                        }
+                    }
+
+                    ctx.device.cmd_end_rendering(cmd);
+
+                    // Reflection colour → sampleable for the water pass in the main scene.
+                    let to_read = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(r_img)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                    ctx.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[], &[], &[to_read],
+                    );
+                }
+
                 // Transition scene_fbo color: UNDEFINED → COLOR_ATTACHMENT_OPTIMAL
                 let color_barrier = vk::ImageMemoryBarrier::default()
                     .old_layout(vk::ImageLayout::UNDEFINED)
@@ -3913,23 +5047,38 @@ impl ModernRenderPath {
                         // D3 mode: clamp to 0.99 so ambient=1.0 doesn't accidentally
                         // flip to the classic lightmap branch (which requires >= 1.0).
                         crate::vk_rmain::rcvars().r_d3_ambient.fresh_value().clamp(0.0, 0.99)
+                    } else if crate::vk_rmain::rcvars().r_vxgi.fresh_value() != 0.0 {
+                        // r_vxgi_bake dims the baked lightmap so VXGI can drive the lighting. Only
+                        // when VXGI is on (its irradiance volume / set 4 must be bound to sample).
+                        crate::vk_rmain::rcvars().r_vxgi_bake.fresh_value().clamp(0.0, 1.0)
                     } else {
                         1.0_f32
                     };
-                    let world_tail: [f32; 5] = [
+                    let world_tail: [f32; 6] = [
                         0.0,  // u_UvScroll
                         crate::vk_rmain::rcvars().r_lightmap_gamma.value,
                         crate::vk_rmain::rcvars().r_lightmap_contrast.value,
                         crate::vk_rmain::rcvars().r_shadowlift.value,
                         lm_scale,
+                        0.0,  // u_UseDynLight = 0 for the static world
                     ];
                     let tail_bytes: &[u8] = std::slice::from_raw_parts(
-                        world_tail.as_ptr() as *const u8, 20,
+                        world_tail.as_ptr() as *const u8, 24,
                     );
                     ctx.device.cmd_push_constants(
                         cmd, world_layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                         72, tail_bytes,
+                    );
+                    // Clear the reflection-clip slot (offset 120): the mirrored pass earlier in
+                    // this command buffer left (1, planeZ) there, which would discard every main-
+                    // view fragment below the water plane. Push-constant state persists across
+                    // pipeline binds, so this must be explicit.
+                    let clip_off: [f32; 2] = [0.0, 0.0];
+                    ctx.device.cmd_push_constants(
+                        cmd, world_layout,
+                        vk::ShaderStageFlags::FRAGMENT,
+                        120, std::slice::from_raw_parts(clip_off.as_ptr() as *const u8, 8),
                     );
 
                     ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo_handle], &[0]);
@@ -3943,19 +5092,46 @@ impl ModernRenderPath {
                         );
                     }
 
-                    for &(first_index, index_count, ds) in &bsp_batches {
+                    // VXGI: bind the irradiance volume at set 4 and push grid params into the
+                    // (static) dyn-block slots at offset 100, so world.frag can add real-time GI
+                    // to the dimmed baked lightmap when r_vxgi_bake < 1.
+                    if let Some(irr_set) = self.vxgi_world_irr_set {
+                        ctx.device.cmd_bind_descriptor_sets(
+                            cmd, vk::PipelineBindPoint::GRAPHICS, world_layout, 4, &[irr_set], &[],
+                        );
+                    }
+                    if let Some((gmin, extent, giscale)) = self.frame_irr_params {
+                        let params = [gmin[0], gmin[1], gmin[2], extent, giscale];
+                        let pbytes = std::slice::from_raw_parts(params.as_ptr() as *const u8, 20);
+                        ctx.device.cmd_push_constants(
+                            cmd, world_layout, vk::ShaderStageFlags::FRAGMENT, 100, pbytes,
+                        );
+                    }
+                    for &(first_index, index_count, ds, is_light) in &bsp_batches {
                         if let Some(ds) = ds {
                             ctx.device.cmd_bind_descriptor_sets(
                                 cmd, vk::PipelineBindPoint::GRAPHICS,
                                 world_layout, 1, &[ds], &[],
                             );
                         }
+                        // Emit multiplier at offset 96 (reused u_DynC0 when not relighting):
+                        // light textures glow (well past the bloom threshold -> HDR -> bloom),
+                        // everything else stays 1.0.
+                        let emit: f32 = if is_light { 6.0 } else { 1.0 };
+                        let emit_bytes: &[u8] = std::slice::from_raw_parts(
+                            &emit as *const f32 as *const u8, 4,
+                        );
+                        ctx.device.cmd_push_constants(
+                            cmd, world_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            96, emit_bytes,
+                        );
                         ctx.device.cmd_draw_indexed(cmd, index_count, 1, first_index, 0, 0);
                     }
 
                     // === Brush Models (opaque) ===
                     // World pipeline + BSP VBO/IBO still bound, alpha=1.0 still set
-                    for (bm_mvp, bm_surfaces) in &brush_model_draws {
+                    for (bm_mvp, bm_dyn, bm_surfaces) in &brush_model_draws {
                         // Push brush model's per-entity MVP
                         let bm_mvp_bytes: &[u8] = std::slice::from_raw_parts(
                             bm_mvp.as_ptr() as *const u8, 64,
@@ -3965,6 +5141,31 @@ impl ModernRenderPath {
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                             0, bm_mvp_bytes,
                         );
+                        // Dynamic relight block (9 floats) at offset 92..128:
+                        // [use_dyn, c0,c1,c2,c3, min.x,min.y, invSize.x,invSize.y].
+                        let bm_dyn_bytes: &[u8] = std::slice::from_raw_parts(
+                            bm_dyn.as_ptr() as *const u8, 36,
+                        );
+                        ctx.device.cmd_push_constants(
+                            cmd, world_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            92, bm_dyn_bytes,
+                        );
+                        // A RESTING mover (use_dyn=0) takes the GI branch like the world, but the
+                        // bm_dyn block just zeroed the GI grid params at offset 100..119 (they share
+                        // those bytes with the mover's packed-corner relight). Restore the real grid
+                        // params so a resting mover samples the irradiance volume correctly instead
+                        // of grid_min=0/extent=0 (which makes uvw blow up). A MOVING mover keeps its
+                        // packed colours here and uses the use_dyn=1 relight path, so skip it then.
+                        if bm_dyn[0] < 0.5 {
+                            if let Some((gmin, extent, giscale)) = self.frame_irr_params {
+                                let params = [gmin[0], gmin[1], gmin[2], extent, giscale];
+                                let pbytes = std::slice::from_raw_parts(params.as_ptr() as *const u8, 20);
+                                ctx.device.cmd_push_constants(
+                                    cmd, world_layout, vk::ShaderStageFlags::FRAGMENT, 100, pbytes,
+                                );
+                            }
+                        }
 
                         for &(first_index, index_count, ds) in bm_surfaces {
                             if let Some(ds) = ds {
@@ -3976,6 +5177,27 @@ impl ModernRenderPath {
                             ctx.device.cmd_draw_indexed(cmd, index_count, 1, first_index, 0, 0);
                         }
                     }
+
+                    // Moving movers clobbered the GI grid params at offset 100..119 with their packed
+                    // relight colours, and those colours CHANGE as the platform travels. Any later
+                    // GI-sampling pass on the world layout (alpha surfaces, sprites) would read a
+                    // moving platform's colours as grid coordinates → the sampled voxel shifts every
+                    // frame → surfaces flicker in sync with the platform. Restore the real params.
+                    if let Some((gmin, extent, giscale)) = self.frame_irr_params {
+                        let params = [gmin[0], gmin[1], gmin[2], extent, giscale];
+                        let pbytes = std::slice::from_raw_parts(params.as_ptr() as *const u8, 20);
+                        ctx.device.cmd_push_constants(
+                            cmd, world_layout, vk::ShaderStageFlags::FRAGMENT, 100, pbytes,
+                        );
+                    }
+                    // Movers also overwrote the reflection-clip slot (120..127, their footprint
+                    // inv-size) — re-zero it so later world-shader passes can't accidentally clip.
+                    let clip_off2: [f32; 2] = [0.0, 0.0];
+                    ctx.device.cmd_push_constants(
+                        cmd, world_layout,
+                        vk::ShaderStageFlags::FRAGMENT,
+                        120, std::slice::from_raw_parts(clip_off2.as_ptr() as *const u8, 8),
+                    );
                 }
 
                 // === Detail Texture Overlay (multiplicative second pass) ===
@@ -4003,6 +5225,19 @@ impl ModernRenderPath {
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                         64, alpha_bytes,
                     );
+                    // The detail overlay re-draws the world with the world shader; force
+                    // u_UseDynLight=0 (offset 92) so a mover's relight flag can't leak in, and
+                    // the emit multiplier (offset 96) to 1.0 so a light batch's emit can't
+                    // leak in and multiply the detail pass.
+                    let zero_emit: [f32; 2] = [0.0, 1.0];
+                    let zero_bytes: &[u8] = std::slice::from_raw_parts(
+                        zero_emit.as_ptr() as *const u8, 8,
+                    );
+                    ctx.device.cmd_push_constants(
+                        cmd, detail_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        92, zero_bytes,
+                    );
 
                     // Bind detail texture at set 1
                     ctx.device.cmd_bind_descriptor_sets(
@@ -4017,7 +5252,7 @@ impl ModernRenderPath {
                     ctx.device.cmd_bind_index_buffer(cmd, bsp_ibo_handle, 0, vk::IndexType::UINT32);
 
                     // Redraw all world surfaces with detail texture (multiplicative blend)
-                    for &(first_index, index_count, _) in &bsp_batches {
+                    for &(first_index, index_count, _, _) in &bsp_batches {
                         ctx.device.cmd_draw_indexed(cmd, index_count, 1, first_index, 0, 0);
                     }
                 }
@@ -4066,7 +5301,66 @@ impl ModernRenderPath {
                         72, scroll_bytes,
                     );
 
-                    for &(first_index, index_count, alpha, ds) in &turb_surface_draws {
+                    // Bind the lightmap array (set 2) so liquids are lit like the world,
+                    // and push the same lightmap-processing params the world pass uses
+                    // (offsets 76..96) so the math matches exactly.
+                    if let Some(lm_ds) = lightmap_ds {
+                        ctx.device.cmd_bind_descriptor_sets(
+                            cmd, vk::PipelineBindPoint::GRAPHICS,
+                            water_layout, 2, &[lm_ds], &[],
+                        );
+                    }
+                    let w_overbright = crate::vk_rmain::rcvars().r_overbrightbits.value.max(1.0);
+                    let w_max_d3 = crate::vk_rmain::rcvars().r_d3_maxlights.fresh_value() as i32;
+                    let w_lm_scale = if w_max_d3 > 0 {
+                        crate::vk_rmain::rcvars().r_d3_ambient.fresh_value().clamp(0.0, 0.99)
+                    } else {
+                        1.0_f32
+                    };
+                    let water_lm_params: [f32; 5] = [
+                        w_overbright,
+                        crate::vk_rmain::rcvars().r_lightmap_gamma.value,
+                        crate::vk_rmain::rcvars().r_lightmap_contrast.value,
+                        crate::vk_rmain::rcvars().r_shadowlift.value,
+                        w_lm_scale,
+                    ];
+                    let water_lm_bytes: &[u8] = std::slice::from_raw_parts(
+                        water_lm_params.as_ptr() as *const u8, 20,
+                    );
+                    ctx.device.cmd_push_constants(
+                        cmd, water_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        76, water_lm_bytes,
+                    );
+
+                    // Planar reflection: bind the mirrored render at set 3 and push the camera
+                    // position (Fresnel). Per-surface strength (offset 108) gates which water
+                    // actually reflects — only surfaces on the chosen plane, and only when the
+                    // mirrored pass actually ran this frame.
+                    let refl_ran = refl_data.is_some();
+                    if refl_ran {
+                        if let Some(refl_set) = self.refl_desc_set {
+                            ctx.device.cmd_bind_descriptor_sets(
+                                cmd, vk::PipelineBindPoint::GRAPHICS,
+                                water_layout, 3, &[refl_set], &[],
+                            );
+                        }
+                        let cam = self.frame_uniforms.view_origin;
+                        ctx.device.cmd_push_constants(
+                            cmd, water_layout,
+                            vk::ShaderStageFlags::FRAGMENT,
+                            112, std::slice::from_raw_parts(cam.as_ptr() as *const u8, 12),
+                        );
+                    }
+                    let refl_strength =
+                        crate::vk_rmain::rcvars().r_water_reflect_strength.fresh_value().max(0.0);
+
+                    for &(first_index, index_count, alpha, flat_light, ds, on_plane) in &turb_surface_draws {
+                        // TRANS-flagged water is drawn later (translucent-water block after
+                        // sky/entities) with real blending; this pass keeps only opaque turb.
+                        if alpha < 1.0 {
+                            continue;
+                        }
                         // Push per-surface alpha at offset 64
                         let alpha_bytes: &[u8] = std::slice::from_raw_parts(
                             &alpha as *const f32 as *const u8, 4,
@@ -4075,6 +5369,25 @@ impl ModernRenderPath {
                             cmd, water_layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                             64, alpha_bytes,
+                        );
+
+                        // Push the body flat light (offset 96..108). [-1,-1,-1] = none,
+                        // so the shader falls back to its per-pixel lightmap.
+                        let fl_bytes: &[u8] = std::slice::from_raw_parts(
+                            flat_light.as_ptr() as *const u8, 12,
+                        );
+                        ctx.device.cmd_push_constants(
+                            cmd, water_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            96, fl_bytes,
+                        );
+
+                        // Reflection strength at offset 108: 0 disables sampling entirely.
+                        let strength: f32 = if refl_ran && on_plane { refl_strength } else { 0.0 };
+                        ctx.device.cmd_push_constants(
+                            cmd, water_layout,
+                            vk::ShaderStageFlags::FRAGMENT,
+                            108, std::slice::from_raw_parts(&strength as *const f32 as *const u8, 4),
                         );
 
                         if let Some(ds) = ds {
@@ -4092,6 +5405,24 @@ impl ModernRenderPath {
                     if !alias_draw_entries.is_empty() {
                         ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, a_pipeline);
 
+                        // RF_DEPTHHACK (view weapon): draw those instances in a compressed depth
+                        // range (max_depth 0.3) via the dynamic viewport — the original's
+                        // glDepthRange(0, 0.3) — so the gun sits at the true view origin without
+                        // clipping the near plane or poking into walls.
+                        let mut vp_depth_hacked = false;
+                        let set_alias_viewport = |hack: bool| {
+                            let vp = vk::Viewport {
+                                x: 0.0,
+                                y: scene_extent.height as f32,
+                                width: scene_extent.width as f32,
+                                height: -(scene_extent.height as f32),
+                                min_depth: 0.0,
+                                max_depth: if hack { 0.3 } else { 1.0 },
+                            };
+                            // SAFETY: recording command buffer, viewport is a dynamic state.
+                            unsafe { ctx.device.cmd_set_viewport(cmd, 0, &[vp]) };
+                        };
+
                         for entry in &alias_draw_entries {
                             // Bind skin texture (same for all instances of this model)
                             if let Some(ds) = entry.skin_ds {
@@ -4101,7 +5432,11 @@ impl ModernRenderPath {
                                 );
                             }
 
-                            for (pc, frame_offset) in &entry.instances {
+                            for (pc, frame_offset, depth_hack) in &entry.instances {
+                                if *depth_hack != vp_depth_hacked {
+                                    set_alias_viewport(*depth_hack);
+                                    vp_depth_hacked = *depth_hack;
+                                }
                                 // Push alias constants (128 bytes)
                                 let pc_bytes: &[u8] = std::slice::from_raw_parts(
                                     pc as *const AliasPushConstants as *const u8,
@@ -4126,6 +5461,59 @@ impl ModernRenderPath {
                                 );
                             }
                         }
+                        // Restore the full depth range for every subsequent pass.
+                        if vp_depth_hacked {
+                            set_alias_viewport(false);
+                        }
+                    }
+                }
+
+                // TEMP DIAGNOSTIC: how many alias models and shadow instances are submitted.
+                {
+                    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 30 {
+                        let models = alias_draw_entries.len();
+                        let normal: usize = alias_draw_entries.iter().map(|e| e.instances.len()).sum();
+                        let shadows: usize = alias_draw_entries.iter().map(|e| e.shadow_instances.len()).sum();
+                        let gz = alias_draw_entries.iter().flat_map(|e| e.shadow_instances.first())
+                            .map(|(pc, _)| pc.mvp[14]).next().unwrap_or(0.0);
+                        eprintln!("[shadow] cast_on={} alias_models={} normal_inst={} shadow_inst={} pipeline={} sample_mvp14={:.2}",
+                            cast_shadows, models, normal, shadows, alias_shadow_pipeline_data.is_some(), gz);
+                    }
+                }
+
+                // === Alias Blob Shadows ===
+                // Same posed geometry flattened onto each entity's ground plane, drawn black
+                // and translucent on the alpha-blend pipeline. Lands on whatever surface the
+                // entity stands on (including a moving lift deck). Drawn after the models so
+                // it blends over the floor/deck below them.
+                if let Some((s_pipeline, s_layout)) = alias_shadow_pipeline_data {
+                    if alias_draw_entries.iter().any(|e| !e.shadow_instances.is_empty()) {
+                        ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, s_pipeline);
+                        for entry in &alias_draw_entries {
+                            if entry.shadow_instances.is_empty() { continue; }
+                            // Bind the skin — alias.frag samples its alpha (rgb is * black).
+                            if let Some(ds) = entry.skin_ds {
+                                ctx.device.cmd_bind_descriptor_sets(
+                                    cmd, vk::PipelineBindPoint::GRAPHICS,
+                                    s_layout, 1, &[ds], &[],
+                                );
+                            }
+                            for (pc, frame_offset) in &entry.shadow_instances {
+                                let pc_bytes: &[u8] = std::slice::from_raw_parts(
+                                    pc as *const AliasPushConstants as *const u8,
+                                    std::mem::size_of::<AliasPushConstants>(),
+                                );
+                                ctx.device.cmd_push_constants(
+                                    cmd, s_layout,
+                                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                    0, pc_bytes,
+                                );
+                                ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[entry.vbo], &[*frame_offset]);
+                                ctx.device.cmd_bind_index_buffer(cmd, entry.ibo, 0, vk::IndexType::UINT32);
+                                ctx.device.cmd_draw_indexed(cmd, entry.index_count, 1, 0, 0, 0);
+                            }
+                        }
                     }
                 }
 
@@ -4146,6 +5534,26 @@ impl ModernRenderPath {
                             cmd, sp_layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                             0, mvp_bytes,
+                        );
+                        // Sprites use the world shader; force u_UseDynLight=0 (offset 92) and
+                        // emit=1.0 (offset 96) so a mover's relight flag or a light batch's
+                        // emit can't bleed in.
+                        let zero_emit: [f32; 2] = [0.0, 1.0];
+                        let zero_bytes: &[u8] = std::slice::from_raw_parts(
+                            zero_emit.as_ptr() as *const u8, 8,
+                        );
+                        ctx.device.cmd_push_constants(
+                            cmd, sp_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            92, zero_bytes,
+                        );
+                        // Zero the reflection-clip slot (120..127): the water pass just wrote its
+                        // camera Z there (world shader reads it as u_DynInvSize.x), which would
+                        // make the clip gate discard sprite fragments below z≈0.
+                        let sp_clip_off: [f32; 2] = [0.0, 0.0];
+                        ctx.device.cmd_push_constants(
+                            cmd, sp_layout, vk::ShaderStageFlags::FRAGMENT,
+                            120, std::slice::from_raw_parts(sp_clip_off.as_ptr() as *const u8, 8),
                         );
 
                         let mut idx_offset = 0u32;
@@ -4252,7 +5660,9 @@ impl ModernRenderPath {
                     }
                 }
 
-                // === D3 Per-Pixel Lit Pass (additive, only when r_d3_maxlights > 0) ===
+                // === Per-pixel additive lit pass: surface-light dark-fill (r_surf_emit) and/or
+                // the abandoned D3 flat-base mode (r_d3_maxlights). Runs whenever lights were
+                // selected this frame. ===
                 if has_bsp && !self.d3_lights.is_empty() {
                     let bsp_vbo_handle = bsp_vbo.unwrap();
                     let bsp_ibo_handle = bsp_ibo.unwrap();
@@ -4264,6 +5674,101 @@ impl ModernRenderPath {
                             bsp_vbo_handle, bsp_ibo_handle,
                             &bsp_batches, mvp, vo,
                         );
+                    }
+                }
+
+                // === Translucent Water (blended) ===
+                // TRANS-flagged water draws HERE — after world, entities and sky, with real
+                // alpha blending (the original Q2 alpha-chain order) — so it reads as
+                // transparent: you see the pool bottom through it, with the reflection
+                // Fresnel-blended on top. The earlier Opaque water pass now only draws
+                // untagged liquids (lava, deliberately solid water).
+                if has_turb && turb_surface_draws.iter().any(|&(_, _, a, ..)| a < 1.0) {
+                    if let Some((tw_pipeline, tw_layout)) = water_ab_pipeline_data {
+                        ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, tw_pipeline);
+                        let bsp_vbo_handle = bsp_vbo.unwrap();
+                        let bsp_ibo_handle = bsp_ibo.unwrap();
+                        ctx.device.cmd_bind_vertex_buffers(cmd, 0, &[bsp_vbo_handle], &[0]);
+                        ctx.device.cmd_bind_index_buffer(cmd, bsp_ibo_handle, 0, vk::IndexType::UINT32);
+
+                        let mvp_bytes: &[u8] = std::slice::from_raw_parts(mvp.as_ptr() as *const u8, 64);
+                        ctx.device.cmd_push_constants(
+                            cmd, tw_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0, mvp_bytes,
+                        );
+                        // time(68), scroll(72), then the lm params (76..96) — water shader layout.
+                        let head: [f32; 2] = [water_time, 0.0];
+                        ctx.device.cmd_push_constants(
+                            cmd, tw_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            68, std::slice::from_raw_parts(head.as_ptr() as *const u8, 8),
+                        );
+                        let tw_overbright = crate::vk_rmain::rcvars().r_overbrightbits.value.max(1.0);
+                        let tw_lm_params: [f32; 5] = [
+                            tw_overbright,
+                            crate::vk_rmain::rcvars().r_lightmap_gamma.value,
+                            crate::vk_rmain::rcvars().r_lightmap_contrast.value,
+                            crate::vk_rmain::rcvars().r_shadowlift.value,
+                            1.0,
+                        ];
+                        ctx.device.cmd_push_constants(
+                            cmd, tw_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            76, std::slice::from_raw_parts(tw_lm_params.as_ptr() as *const u8, 20),
+                        );
+                        if let Some(lm_ds) = lightmap_ds {
+                            ctx.device.cmd_bind_descriptor_sets(
+                                cmd, vk::PipelineBindPoint::GRAPHICS, tw_layout, 2, &[lm_ds], &[],
+                            );
+                        }
+                        let refl_ran = refl_data.is_some();
+                        if refl_ran {
+                            if let Some(refl_set) = self.refl_desc_set {
+                                ctx.device.cmd_bind_descriptor_sets(
+                                    cmd, vk::PipelineBindPoint::GRAPHICS, tw_layout, 3, &[refl_set], &[],
+                                );
+                            }
+                            let cam = self.frame_uniforms.view_origin;
+                            ctx.device.cmd_push_constants(
+                                cmd, tw_layout,
+                                vk::ShaderStageFlags::FRAGMENT,
+                                112, std::slice::from_raw_parts(cam.as_ptr() as *const u8, 12),
+                            );
+                        }
+                        let refl_strength =
+                            crate::vk_rmain::rcvars().r_water_reflect_strength.fresh_value().max(0.0);
+
+                        for &(first_index, index_count, alpha, flat_light, ds, on_plane) in &turb_surface_draws {
+                            if alpha >= 1.0 {
+                                continue; // opaque turb already drawn
+                            }
+                            // Slightly more transparent than the raw TRANS flag (user pref).
+                            let a = alpha * 0.85;
+                            ctx.device.cmd_push_constants(
+                                cmd, tw_layout,
+                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                64, std::slice::from_raw_parts(&a as *const f32 as *const u8, 4),
+                            );
+                            let fl_bytes: &[u8] = std::slice::from_raw_parts(flat_light.as_ptr() as *const u8, 12);
+                            ctx.device.cmd_push_constants(
+                                cmd, tw_layout,
+                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                96, fl_bytes,
+                            );
+                            let strength: f32 = if refl_ran && on_plane { refl_strength } else { 0.0 };
+                            ctx.device.cmd_push_constants(
+                                cmd, tw_layout,
+                                vk::ShaderStageFlags::FRAGMENT,
+                                108, std::slice::from_raw_parts(&strength as *const f32 as *const u8, 4),
+                            );
+                            if let Some(ds) = ds {
+                                ctx.device.cmd_bind_descriptor_sets(
+                                    cmd, vk::PipelineBindPoint::GRAPHICS, tw_layout, 1, &[ds], &[],
+                                );
+                            }
+                            ctx.device.cmd_draw_indexed(cmd, index_count, 1, first_index, 0, 0);
+                        }
                     }
                 }
 
@@ -4297,6 +5802,51 @@ impl ModernRenderPath {
                             cmd, ab_layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                             68, overbright_bytes,
+                        );
+                        // Alpha surfaces use the world shader, so push its FULL parameter block.
+                        // The water pass ran just before this one with a DIFFERENT push layout
+                        // (its overbright sits where the world shader reads gamma, etc.), so any
+                        // slot not re-pushed here reads water values one slot off — that lit
+                        // translucent surfaces with garbage (washed-out glass). Tail 72..96:
+                        // scroll, gamma, contrast, lift, lm_scale (same as opaque world so alpha
+                        // surfaces get the same VXGI treatment), use_dyn=0.
+                        let ab_max_d3 = crate::vk_rmain::rcvars().r_d3_maxlights.fresh_value() as i32;
+                        let ab_lm_scale = if ab_max_d3 > 0 {
+                            crate::vk_rmain::rcvars().r_d3_ambient.fresh_value().clamp(0.0, 0.99)
+                        } else if crate::vk_rmain::rcvars().r_vxgi.fresh_value() != 0.0 {
+                            crate::vk_rmain::rcvars().r_vxgi_bake.fresh_value().clamp(0.0, 1.0)
+                        } else {
+                            1.0_f32
+                        };
+                        let ab_tail: [f32; 7] = [
+                            0.0, // u_UvScroll
+                            crate::vk_rmain::rcvars().r_lightmap_gamma.value,
+                            crate::vk_rmain::rcvars().r_lightmap_contrast.value,
+                            crate::vk_rmain::rcvars().r_shadowlift.value,
+                            ab_lm_scale,
+                            0.0, // u_UseDynLight
+                            1.0, // emit
+                        ];
+                        ctx.device.cmd_push_constants(
+                            cmd, ab_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            72, std::slice::from_raw_parts(ab_tail.as_ptr() as *const u8, 28),
+                        );
+                        // The water pass also clobbered the GI grid slots (100..119, its flat
+                        // light/reflection params live there) and the reflection-clip slot
+                        // (120..127, its camera Z — which is >0.5 on most maps and would make
+                        // the clip gate DISCARD alpha fragments). Restore both.
+                        if let Some((gmin, extent, giscale)) = self.frame_irr_params {
+                            let params = [gmin[0], gmin[1], gmin[2], extent, giscale];
+                            ctx.device.cmd_push_constants(
+                                cmd, ab_layout, vk::ShaderStageFlags::FRAGMENT,
+                                100, std::slice::from_raw_parts(params.as_ptr() as *const u8, 20),
+                            );
+                        }
+                        let ab_clip_off: [f32; 2] = [0.0, 0.0];
+                        ctx.device.cmd_push_constants(
+                            cmd, ab_layout, vk::ShaderStageFlags::FRAGMENT,
+                            120, std::slice::from_raw_parts(ab_clip_off.as_ptr() as *const u8, 8),
                         );
 
                         // Bind lightmap texture array at set 2 for alpha surfaces
@@ -4361,6 +5911,474 @@ impl ModernRenderPath {
                 ctx.device.cmd_end_rendering(cmd);
             }
         });
+
+        // Projective dynamic shadows: cast all dynamic casters into the directional shadow
+        // map and darken the scene where occluded. Runs on the same command buffer now that
+        // the scene's dynamic-rendering pass has ended (scene colour in COLOR_ATTACHMENT,
+        // depth in DEPTH_ATTACHMENT), before the composite reads the scene colour.
+        if let Some(cmd) = self.current_command_buffer {
+            let vieworg = self.frame_vieworg;
+            self.render_projective_shadows(cmd, vieworg, vp_flat);
+        }
+
+        // VXGI Phase 4: diffuse cone-traced GI. Runs after the projective shadow pass so the
+        // scene depth is already in SHADER_READ with a sampleable depth-aspect view.
+        if crate::vk_rmain::rcvars().r_vxgi_gi.fresh_value() != 0.0
+            && crate::vk_rmain::rcvars().r_vxgi_debug.fresh_value() == 0.0 {
+            if let Some(cmd) = self.current_command_buffer {
+                let vieworg = self.frame_vieworg;
+                self.render_vxgi_gi(cmd, vieworg, vp_flat);
+            }
+        }
+
+        // Water ripple shimmer: animated caustic light thrown by the active water plane onto
+        // nearby walls/floors. Same depth-view dependency as the GI pass above.
+        if let Some(pz) = self.frame_refl_plane {
+            if crate::vk_rmain::rcvars().r_water_shimmer.fresh_value() > 0.0 {
+                if let Some(cmd) = self.current_command_buffer {
+                    self.render_water_shimmer(cmd, vp_flat, pz);
+                }
+            }
+        }
+
+        // VXGI Phase 1 debug: raymarch the voxel grid over the scene (r_vxgi_debug). Use
+        // fresh_value() — .value is a registration-time snapshot, so a runtime `r_vxgi_debug 1`
+        // would otherwise never be seen.
+        if crate::vk_rmain::rcvars().r_vxgi_debug.fresh_value() != 0.0 {
+            if let Some(cmd) = self.current_command_buffer {
+                let vieworg = self.frame_vieworg;
+                self.render_vxgi_debug(cmd, vieworg, vp_flat);
+            }
+        }
+    }
+
+    /// Raymarch the static voxel grid and draw it over the scene colour (debug view).
+    fn render_vxgi_debug(&mut self, cmd: vk::CommandBuffer, view_origin: [f32; 3], view_proj_flat: [f32; 16]) {
+        use super::shadow_project as sp;
+        // Grid params (skip if not voxelized yet).
+        let grid = match super::vxgi::with_voxel_grid(|vg| {
+            (vg.view, vg.sampler, vg.rad_view, vg.rad_sampler, vg.grid_min, vg.extent)
+        }) {
+            Some(g) => g,
+            None => return,
+        };
+        let (a_view, a_samp, r_view, r_samp, grid_min, extent) = grid;
+        // Mode from the cvar: 1 = albedo/normal volume, 2 = radiance (emitters).
+        let mode = crate::vk_rmain::rcvars().r_vxgi_debug.fresh_value();
+        let (vox_view, vox_sampler) = if mode > 1.5 { (r_view, r_samp) } else { (a_view, a_samp) };
+
+        let (pipe, layout) = match self.pipelines.as_ref().and_then(|pm| pm.vxgi_debug_pipeline()) {
+            Some(p) => p,
+            None => {
+                if let Some(pm) = self.pipelines.as_mut() {
+                    let _ = pm.create_vxgi_debug_pipeline();
+                }
+                match self.pipelines.as_ref().and_then(|pm| pm.vxgi_debug_pipeline()) {
+                    Some(p) => p,
+                    None => return,
+                }
+            }
+        };
+        let set_layout = match self.pipelines.as_ref().and_then(|pm| pm.vxgi_debug_set_layout()) {
+            Some(l) => l,
+            None => return,
+        };
+
+        // Scene colour view (render target).
+        let scene_color_view = match self.post_processor.as_ref().and_then(|pp| pp.scene_fbo().color_view()) {
+            Some(v) => v,
+            None => return,
+        };
+        let (sw, sh) = (self.width, self.height);
+        let inv_vp = sp::invert(&view_proj_flat);
+
+        gpu_device::with_device(|ctx| unsafe {
+            // Lazily create the descriptor pool + set, then (re)point it at the current grid.
+            if self.vxgi_debug_set.is_none() {
+                let sizes = [vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1)];
+                let pool = match ctx.device.create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None) {
+                    Ok(p) => p, Err(_) => return,
+                };
+                let layouts = [set_layout];
+                let set = match ctx.device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) {
+                    Ok(s) => s[0], Err(_) => { ctx.device.destroy_descriptor_pool(pool, None); return; }
+                };
+                self.vxgi_debug_pool = Some(pool);
+                self.vxgi_debug_set = Some(set);
+            }
+            let set = self.vxgi_debug_set.unwrap();
+            let info = vk::DescriptorImageInfo::default().image_view(vox_view)
+                .sampler(vox_sampler).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            let write = vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&info));
+            ctx.device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
+
+            // Fullscreen pass into the scene colour (LOAD: keep the rendered scene; the shader
+            // discards on a miss so only voxels overwrite it).
+            let att = vk::RenderingAttachmentInfo::default()
+                .image_view(scene_color_view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::STORE);
+            let area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: sw, height: sh } };
+            let atts = [att];
+            let ri = vk::RenderingInfo::default().render_area(area).layer_count(1).color_attachments(&atts);
+            ctx.device.cmd_begin_rendering(cmd, &ri);
+            let vp = vk::Viewport { x: 0.0, y: 0.0, width: sw as f32, height: sh as f32, min_depth: 0.0, max_depth: 1.0 };
+            ctx.device.cmd_set_viewport(cmd, 0, &[vp]);
+            ctx.device.cmd_set_scissor(cmd, 0, &[area]);
+            ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
+            ctx.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, layout, 0, &[set], &[]);
+            #[repr(C)]
+            struct Push { inv_vp: [f32; 16], cam: [f32; 3], mode: f32, grid_min: [f32; 3], extent: f32 }
+            let push = Push { inv_vp, cam: view_origin, mode, grid_min, extent };
+            let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, 96);
+            ctx.device.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
+            ctx.device.cmd_draw(cmd, 3, 1, 0, 0);
+            ctx.device.cmd_end_rendering(cmd);
+        });
+    }
+
+    /// Prepare the VXGI irradiance descriptor (set 4) + this frame's grid params for the world
+    /// shader, so the world pass can bind the irradiance volume and push the grid params. Called
+    /// before the 3D scene is recorded. No-op if there is no voxel grid.
+    fn prepare_world_irradiance(&mut self) {
+        self.frame_irr_params = None;
+        let grid = super::vxgi::with_voxel_grid(|vg| (vg.rad_view, vg.rad_sampler, vg.grid_min, vg.extent));
+        let (view, samp, gmin, extent) = match grid { Some(g) => g, None => return };
+        let set_layout = match self.pipelines.as_ref().and_then(|pm| pm.lightmap_set_layout()) { Some(l) => l, None => return };
+        gpu_device::with_device(|ctx| unsafe {
+            // Make a FRESH set and write it exactly ONCE, only when the view changes (first build /
+            // map reload). No every-frame re-write and no destroy of the in-flight old set — both
+            // are update-/free-after-bind, which the driver ignores and leaves the descriptor
+            // reading zero. The old pool is leaked (tiny, a few per session); correctness first.
+            if self.vxgi_irr_view != Some(view) {
+                let sizes = [vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1)];
+                let pool = match ctx.device.create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes)
+                        .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET), None) { Ok(p) => p, Err(_) => return };
+                let layouts = [set_layout];
+                let set = match ctx.device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) {
+                    Ok(s) => s[0], Err(_) => { ctx.device.destroy_descriptor_pool(pool, None); return; }
+                };
+                let info = vk::DescriptorImageInfo::default().image_view(view).sampler(samp)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                let write = vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0).dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(std::slice::from_ref(&info));
+                ctx.device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
+                self.vxgi_world_irr_pool = Some(pool);
+                self.vxgi_world_irr_set = Some(set);
+                self.vxgi_irr_view = Some(view);
+            }
+        });
+        let strength = crate::vk_rmain::rcvars().r_vxgi_strength.fresh_value().max(0.0);
+        self.frame_irr_params = Some((gmin, extent, strength * super::vxgi::IRRADIANCE_HDR_SCALE));
+    }
+
+    /// Ensure the half-res planar-reflection target and its water-pipeline set-3 descriptor
+    /// exist (recreated on scene resize / view change). Runs its own `with_device` scopes, so
+    /// it must be called OUTSIDE the frame's main `with_device` closure (re-entrancy deadlock).
+    fn prepare_water_reflection(&mut self, scene_w: u32, scene_h: u32) {
+        let rw = (scene_w / 2).max(1);
+        let rh = (scene_h / 2).max(1);
+        let recreate = match self.refl_target.as_ref() {
+            Some(t) => t.width() != rw || t.height() != rh,
+            None => true,
+        };
+        if recreate {
+            if let Some(mut old) = self.refl_target.take() {
+                // Resize is driven by swapchain recreation, which has already waited for idle.
+                old.destroy();
+            }
+            self.refl_target = Some(super::framebuffer::RenderTarget::new(rw, rh, true));
+        }
+        let (view, sampler) = match self
+            .refl_target
+            .as_ref()
+            .and_then(|t| t.color_view().zip(t.sampler()))
+        {
+            Some(vs) => vs,
+            None => return,
+        };
+        if self.refl_desc_view == Some(view) {
+            return; // descriptor already points at the current view
+        }
+        let set_layout = match self.pipelines.as_ref().and_then(|pm| pm.lightmap_set_layout()) {
+            Some(l) => l,
+            None => return,
+        };
+        gpu_device::with_device(|ctx| unsafe {
+            // SAFETY: device valid, main thread. Same write-once pattern as the VXGI irradiance
+            // set: a FRESH set written before first use — updating an in-flight set is ignored
+            // by the driver. The old pool is leaked (tiny, resize-rare); correctness first.
+            let sizes = [vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)];
+            let pool = match ctx.device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(1)
+                    .pool_sizes(&sizes)
+                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET),
+                None,
+            ) {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            let layouts = [set_layout];
+            let set = match ctx.device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(pool)
+                    .set_layouts(&layouts),
+            ) {
+                Ok(s) => s[0],
+                Err(_) => {
+                    ctx.device.destroy_descriptor_pool(pool, None);
+                    return;
+                }
+            };
+            let info = vk::DescriptorImageInfo::default()
+                .image_view(view)
+                .sampler(sampler)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&info));
+            ctx.device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
+            self.refl_desc_pool = Some(pool);
+            self.refl_desc_set = Some(set);
+            self.refl_desc_view = Some(view);
+        });
+    }
+
+    /// Diffuse cone-traced GI: gather bounced light from the radiance volume and add it to the
+    /// scene. Reuses the projective-shadow pass's sampleable depth-aspect view (already in
+    /// SHADER_READ), so it must run after that pass.
+    fn render_vxgi_gi(&mut self, cmd: vk::CommandBuffer, view_origin: [f32; 3], view_proj_flat: [f32; 16]) {
+        use super::shadow_project as sp;
+        let grid = match super::vxgi::with_voxel_grid(|vg| {
+            (vg.rad_view, vg.rad_sampler, vg.view, vg.sampler, vg.grid_min, vg.extent, vg.res)
+        }) {
+            Some(g) => g,
+            None => return,
+        };
+        let (rad_view, rad_samp, alb_view, alb_samp, grid_min, extent, res) = grid;
+        // Depth-aspect view + sampler from the projective shadow pass (valid this frame because
+        // the player body is always a caster). If absent, skip GI this frame.
+        let depth_view = match self.projective_shadow.depth_sample_view { Some(v) => v, None => return };
+        let depth_samp = match self.projective_shadow.sampler { Some(s) => s, None => return };
+
+        let (pipe, layout) = match self.pipelines.as_ref().and_then(|pm| pm.vxgi_gi_pipeline()) {
+            Some(p) => p,
+            None => {
+                if let Some(pm) = self.pipelines.as_mut() { let _ = pm.create_vxgi_gi_pipeline(); }
+                match self.pipelines.as_ref().and_then(|pm| pm.vxgi_gi_pipeline()) { Some(p) => p, None => return }
+            }
+        };
+        let set_layout = match self.pipelines.as_ref().and_then(|pm| pm.vxgi_gi_set_layout()) { Some(l) => l, None => return };
+        let scene_color_view = match self.post_processor.as_ref().and_then(|pp| pp.scene_fbo().color_view()) { Some(v) => v, None => return };
+        let (sw, sh) = (self.width, self.height);
+        let inv_vp = sp::invert(&view_proj_flat);
+        let strength = crate::vk_rmain::rcvars().r_vxgi_strength.fresh_value().max(0.0);
+        let voxel_size = extent / res as f32;
+
+        // Build this frame's dynamic lights for the GI UBO (std140: int + 32×(vec4 pos_radius,
+        // vec4 color) = 1040 bytes). radius scales with intensity (bounce reach).
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct GiDLight { pos_radius: [f32; 4], color: [f32; 4] }
+        #[repr(C)]
+        struct GiDLightUbo { num: i32, _pad: [i32; 3], lights: [GiDLight; 32] }
+        let mut ubo = GiDLightUbo { num: 0, _pad: [0; 3], lights: [GiDLight { pos_radius: [0.0; 4], color: [0.0; 4] }; 32] };
+        let nd = (crate::vk_local::rfs().r_newrefdef.num_dlights).min(32) as usize;
+        for i in 0..nd {
+            // SAFETY: dlight index in bounds; r_newrefdef valid for the frame, main thread.
+            let d = unsafe { crate::vk_local::rfs().r_newrefdef.dlight(i) };
+            ubo.lights[i].pos_radius = [d.origin[0], d.origin[1], d.origin[2], (d.intensity * 0.6).max(32.0)];
+            ubo.lights[i].color = [d.color[0], d.color[1], d.color[2], 0.0];
+            ubo.num += 1;
+        }
+        let ubo_size = std::mem::size_of::<GiDLightUbo>() as vk::DeviceSize;
+
+        gpu_device::with_device(|ctx| unsafe {
+            if self.vxgi_gi_set.is_none() {
+                let sizes = [
+                    vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(3),
+                    vk::DescriptorPoolSize::default().ty(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1),
+                ];
+                let pool = match ctx.device.create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None) { Ok(p) => p, Err(_) => return };
+                let layouts = [set_layout];
+                let set = match ctx.device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) {
+                    Ok(s) => s[0], Err(_) => { ctx.device.destroy_descriptor_pool(pool, None); return; }
+                };
+                self.vxgi_gi_pool = Some(pool);
+                self.vxgi_gi_set = Some(set);
+
+                // Host-visible UBO for the dlights (created once, written each frame).
+                let bi = vk::BufferCreateInfo::default().size(ubo_size)
+                    .usage(vk::BufferUsageFlags::UNIFORM_BUFFER).sharing_mode(vk::SharingMode::EXCLUSIVE);
+                if let Ok(buf) = ctx.device.create_buffer(&bi, None) {
+                    let reqs = ctx.device.get_buffer_memory_requirements(buf);
+                    let mp = ctx.instance.get_physical_device_memory_properties(ctx.physical_device);
+                    if let Some(mt) = (0..mp.memory_type_count).find(|&i| (reqs.memory_type_bits & (1 << i)) != 0
+                        && mp.memory_types[i as usize].property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)) {
+                        if let Ok(mem) = ctx.device.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(reqs.size).memory_type_index(mt), None) {
+                            let _ = ctx.device.bind_buffer_memory(buf, mem, 0);
+                            self.vxgi_gi_dlight_buf = Some(buf);
+                            self.vxgi_gi_dlight_mem = Some(mem);
+                        }
+                    }
+                }
+            }
+            let set = self.vxgi_gi_set.unwrap();
+            // Upload this frame's dlights into the UBO.
+            if let Some(mem) = self.vxgi_gi_dlight_mem {
+                if let Ok(ptr) = ctx.device.map_memory(mem, 0, ubo_size, vk::MemoryMapFlags::empty()) {
+                    std::ptr::copy_nonoverlapping(&ubo as *const GiDLightUbo as *const u8, ptr as *mut u8, ubo_size as usize);
+                    ctx.device.unmap_memory(mem);
+                }
+            }
+            let dlight_buf = match self.vxgi_gi_dlight_buf { Some(b) => b, None => return };
+            let d_info = vk::DescriptorImageInfo::default().image_view(depth_view).sampler(depth_samp).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            let r_info = vk::DescriptorImageInfo::default().image_view(rad_view).sampler(rad_samp).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            let a_info = vk::DescriptorImageInfo::default().image_view(alb_view).sampler(alb_samp).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            let u_info = vk::DescriptorBufferInfo::default().buffer(dlight_buf).offset(0).range(ubo_size);
+            let writes = [
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(std::slice::from_ref(&d_info)),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(std::slice::from_ref(&r_info)),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(2).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(std::slice::from_ref(&a_info)),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(3).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).buffer_info(std::slice::from_ref(&u_info)),
+            ];
+            ctx.device.update_descriptor_sets(&writes, &[]);
+
+            let att = vk::RenderingAttachmentInfo::default()
+                .image_view(scene_color_view).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::LOAD).store_op(vk::AttachmentStoreOp::STORE);
+            let area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: sw, height: sh } };
+            let atts = [att];
+            let ri = vk::RenderingInfo::default().render_area(area).layer_count(1).color_attachments(&atts);
+            ctx.device.cmd_begin_rendering(cmd, &ri);
+            let vp = vk::Viewport { x: 0.0, y: 0.0, width: sw as f32, height: sh as f32, min_depth: 0.0, max_depth: 1.0 };
+            ctx.device.cmd_set_viewport(cmd, 0, &[vp]);
+            ctx.device.cmd_set_scissor(cmd, 0, &[area]);
+            ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
+            ctx.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, layout, 0, &[set], &[]);
+            #[repr(C)]
+            struct Push { inv_vp: [f32; 16], cam: [f32; 3], strength: f32, grid_min: [f32; 3], extent: f32, voxel_size: f32 }
+            let push = Push { inv_vp, cam: view_origin, strength, grid_min, extent, voxel_size };
+            let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, 104);
+            ctx.device.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
+            ctx.device.cmd_draw(cmd, 3, 1, 0, 0);
+            ctx.device.cmd_end_rendering(cmd);
+        });
+    }
+
+    /// Water ripple shimmer: fullscreen additive pass that throws animated caustic light from
+    /// the active water plane onto nearby geometry. Reuses the projective-shadow pass's
+    /// sampleable depth view (so it must run after that pass) and the VXGI irradiance volume
+    /// (which gates the effect to the water body's footprint and tints it).
+    fn render_water_shimmer(&mut self, cmd: vk::CommandBuffer, view_proj_flat: [f32; 16], plane_z: f32) {
+        use super::shadow_project as sp;
+        let grid = match super::vxgi::with_voxel_grid(|vg| (vg.rad_view, vg.rad_sampler, vg.grid_min, vg.extent)) {
+            Some(g) => g,
+            None => return,
+        };
+        let (rad_view, rad_samp, grid_min, extent) = grid;
+        let depth_view = match self.projective_shadow.depth_sample_view { Some(v) => v, None => return };
+        let depth_samp = match self.projective_shadow.sampler { Some(s) => s, None => return };
+        let (pipe, layout) = match self.pipelines.as_ref().and_then(|pm| pm.water_shimmer_pipeline()) {
+            Some(p) => p,
+            None => {
+                if let Some(pm) = self.pipelines.as_mut() {
+                    if let Err(e) = pm.create_water_shimmer_pipeline() {
+                        eprintln!("water shimmer pipeline: {e}");
+                    }
+                }
+                match self.pipelines.as_ref().and_then(|pm| pm.water_shimmer_pipeline()) { Some(p) => p, None => return }
+            }
+        };
+        let set_layout = match self.pipelines.as_ref().and_then(|pm| pm.water_shimmer_set_layout()) { Some(l) => l, None => return };
+        let scene_color_view = match self.post_processor.as_ref().and_then(|pp| pp.scene_fbo().color_view()) { Some(v) => v, None => return };
+        {
+            static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("[shimmer] pass active: plane_z={plane_z:.0}");
+            }
+        }
+        let (sw, sh) = (self.width, self.height);
+        let inv_vp = sp::invert(&view_proj_flat);
+        let time = self.frame_uniforms.time;
+        // Base scale chosen so r_water_shimmer 1 is clearly visible on walls near water
+        // (the caustic pattern averages well below 1, and the water light tint dims it too).
+        let strength = crate::vk_rmain::rcvars().r_water_shimmer.fresh_value().max(0.0) * 1.5;
+
+        gpu_device::with_device(|ctx| unsafe {
+            // SAFETY: device valid, main thread, recording command buffer. Set is (re)written
+            // every frame BEFORE this pass's submission like the GI pass — acceptable because
+            // the views only change on map reload, when the device idles anyway.
+            if self.shimmer_set.is_none() {
+                let sizes = [vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(2)];
+                let pool = match ctx.device.create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None) { Ok(p) => p, Err(_) => return };
+                let layouts = [set_layout];
+                let set = match ctx.device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) {
+                    Ok(s) => s[0], Err(_) => { ctx.device.destroy_descriptor_pool(pool, None); return; }
+                };
+                self.shimmer_pool = Some(pool);
+                self.shimmer_set = Some(set);
+            }
+            let set = self.shimmer_set.unwrap();
+            let d_info = vk::DescriptorImageInfo::default().image_view(depth_view).sampler(depth_samp)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            let r_info = vk::DescriptorImageInfo::default().image_view(rad_view).sampler(rad_samp)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            let writes = [
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(std::slice::from_ref(&d_info)),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(std::slice::from_ref(&r_info)),
+            ];
+            ctx.device.update_descriptor_sets(&writes, &[]);
+
+            let att = vk::RenderingAttachmentInfo::default()
+                .image_view(scene_color_view).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::LOAD).store_op(vk::AttachmentStoreOp::STORE);
+            let area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: sw, height: sh } };
+            let atts = [att];
+            let ri = vk::RenderingInfo::default().render_area(area).layer_count(1).color_attachments(&atts);
+            ctx.device.cmd_begin_rendering(cmd, &ri);
+            let vp = vk::Viewport { x: 0.0, y: 0.0, width: sw as f32, height: sh as f32, min_depth: 0.0, max_depth: 1.0 };
+            ctx.device.cmd_set_viewport(cmd, 0, &[vp]);
+            ctx.device.cmd_set_scissor(cmd, 0, &[area]);
+            ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
+            ctx.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, layout, 0, &[set], &[]);
+            #[repr(C)]
+            struct Push {
+                inv_vp: [f32; 16],
+                grid_min: [f32; 3],
+                plane_z: f32,
+                extent: f32,
+                time: f32,
+                strength: f32,
+                pad: f32,
+            }
+            let push = Push { inv_vp, grid_min, plane_z, extent, time, strength, pad: 0.0 };
+            let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, 96);
+            ctx.device.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
+            ctx.device.cmd_draw(cmd, 3, 1, 0, 0);
+            ctx.device.cmd_end_rendering(cmd);
+        });
     }
 
     /// Composite the 3D scene to the swapchain with post-processing (polyblend + gamma).
@@ -4422,6 +6440,13 @@ impl ModernRenderPath {
         let brightness   = crate::vk_rmain::rcvars().r_brightness.value;
         let lut_intensity = crate::vk_rmain::rcvars().r_color_grade_intensity.value;
         let lut_enabled  = crate::vk_rmain::rcvars().r_color_grade.value != 0.0;
+        // Bloom is folded into the composite (the standalone PostProcessor bloom path is dead
+        // code). 0 disables it; gated by r_bloom, scaled by r_bloom_intensity.
+        let bloom_intensity = if crate::vk_rmain::rcvars().r_bloom.value != 0.0 {
+            crate::vk_rmain::rcvars().r_bloom_intensity.value
+        } else {
+            0.0
+        };
 
         let uniforms = PostProcessUniforms {
             polyblend_color: polyblend,
@@ -4434,6 +6459,7 @@ impl ModernRenderPath {
             shadow_lift,
             lut_enabled: if lut_enabled { 1 } else { 0 },
             lut_intensity,
+            bloom_intensity,
         };
 
         gpu_device::with_device(|ctx| {
@@ -4550,6 +6576,22 @@ impl ModernRenderPath {
 /// Build a 4x4 model matrix from entity origin and Euler angles.
 ///
 /// Applies Quake's pitch negation hack (pitch is stored negated for models).
+/// World-space planar projection that flattens geometry onto the horizontal plane
+/// z = ground_z, for blob shadows. `skew` is a horizontal shadow vector (pointing toward the
+/// light): points higher above the ground are sheared by `-skew * height`, so the shadow
+/// leans AWAY from the light instead of sitting straight under the model. Straight-down when
+/// skew = (0,0). Column-major flat (mat4_multiply order). For p=(x,y,z,1):
+///   M·p = (x - skew.x*(z-g), y - skew.y*(z-g), g, 1).
+fn shadow_flatten_matrix(skew: [f32; 2], ground_z: f32) -> [f32; 16] {
+    let g = ground_z;
+    [
+        1.0,         0.0,         0.0, 0.0, // column 0 (x coeff)
+        0.0,         1.0,         0.0, 0.0, // column 1 (y coeff)
+        -skew[0],    -skew[1],    0.0, 0.0, // column 2 (z coeff: shear + discard z)
+        skew[0] * g, skew[1] * g, g,   1.0, // column 3 (const: restore shear at ground + set z)
+    ]
+}
+
 fn build_entity_matrix(origin: &myq2_common::q_shared::Vec3, angles: &myq2_common::q_shared::Vec3) -> [[f32; 4]; 4] {
     let pitch = -angles[0].to_radians(); // Quake pitch negation
     let yaw = angles[1].to_radians();

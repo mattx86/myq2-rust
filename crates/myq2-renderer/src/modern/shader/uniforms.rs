@@ -293,7 +293,8 @@ pub struct PostProcessUniforms {
     pub shadow_lift: f32,           // 4 bytes
     pub lut_enabled: i32,           // 4 bytes
     pub lut_intensity: f32,         // 4 bytes
-}                                   // 56 bytes total
+    pub bloom_intensity: f32,       // 4 bytes — 0 = off (gated by r_bloom)
+}                                   // 60 bytes total
 
 impl Default for PostProcessUniforms {
     fn default() -> Self {
@@ -308,6 +309,7 @@ impl Default for PostProcessUniforms {
             shadow_lift: 0.0,
             lut_enabled: 0,
             lut_intensity: 1.0,
+            bloom_intensity: 0.0,
         }
     }
 }

@@ -83,6 +83,9 @@ pub const SURF_TRANS33: u32 = 0x20;
 pub const SURF_TRANS66: u32 = 0x40;
 /// Flowing water/lava texture scroll flag.
 pub const SURF_FLOWING: u32 = 0x80;
+/// SURF_LIGHT (texinfo): an emissive light-texture surface — drawn brighter in an emissive
+/// pass so it blooms/glows.
+pub const SURF_LIGHT: u32 = 0x100;
 
 /// Per-surface draw information for PVS culling.
 #[derive(Clone, Debug)]
@@ -99,6 +102,27 @@ pub struct SurfaceDrawInfo {
     pub flags: u32,
     /// BSP leaf cluster this surface belongs to (-1 = unclassified).
     pub cluster: i32,
+    /// Original (pre-sort) BSP surface index. Brush-model (inline submodel)
+    /// draws look up their surfaces by this index range, since `build()`
+    /// reorders surfaces by texture.
+    pub orig_index: u32,
+    /// True if this surface belongs to an inline submodel (func_plat/door/etc.)
+    /// rather than the static world. Inline surfaces are excluded from the world
+    /// passes and drawn only via `draw_brush_model` at the entity's origin —
+    /// otherwise a mover renders twice (a static copy at its map position plus
+    /// the moving copy).
+    pub is_inline: bool,
+    /// For liquid (turb) surfaces: flat per-body light colour (0..1). `[-1,-1,-1]`
+    /// means none — the water pass then falls back to its per-pixel lightmap.
+    pub flat_light: [f32; 3],
+    /// Average vertex z of this surface (world units). Computed in `build()`.
+    pub plane_z: f32,
+    /// True if the surface is a (near-)horizontal plane — its vertex z-span is tiny.
+    /// Used to pick the water plane for planar reflections. Computed in `build()`.
+    pub is_horizontal: bool,
+    /// Surface centroid (average vertex position). Used to depth-sort translucent
+    /// surfaces back-to-front. Computed in `build()`.
+    pub centroid: [f32; 3],
 }
 
 /// A batch of surfaces sharing the same texture.
@@ -111,6 +135,8 @@ pub struct TextureBatch {
     pub index_count: u32,
     /// Surfaces in this batch (for PVS visibility checks).
     pub surfaces: Vec<usize>,
+    /// True if this is an emissive light-texture batch (SURF_LIGHT) — drawn in the glow pass.
+    pub is_light: bool,
 }
 
 /// Manages BSP world geometry.
@@ -189,6 +215,34 @@ impl BspGeometryManager {
                 sorted_indices.extend_from_slice(&indices[start..end]);
             }
 
+            // Surface plane info from its verts: centroid + whether it's a horizontal plane
+            // (tiny z-span). Water reflections pick the reflection plane from this; alpha
+            // surfaces depth-sort by the centroid.
+            let (plane_z, is_horizontal, centroid) = {
+                let idx_range = &sorted_indices[new_first as usize..];
+                let mut zmin = f32::INFINITY;
+                let mut zmax = f32::NEG_INFINITY;
+                let mut sum = [0.0f64; 3];
+                let mut cnt = 0u32;
+                for &vi in idx_range.iter().take(surf.index_count as usize) {
+                    if let Some(v) = vertices.get(vi as usize) {
+                        let z = v.position[2];
+                        zmin = zmin.min(z);
+                        zmax = zmax.max(z);
+                        sum[0] += v.position[0] as f64;
+                        sum[1] += v.position[1] as f64;
+                        sum[2] += z as f64;
+                        cnt += 1;
+                    }
+                }
+                if cnt > 0 {
+                    let inv = 1.0 / cnt as f64;
+                    let c = [(sum[0] * inv) as f32, (sum[1] * inv) as f32, (sum[2] * inv) as f32];
+                    (c[2], (zmax - zmin) < 1.0, c)
+                } else {
+                    (0.0, false, [0.0; 3])
+                }
+            };
             sorted_surfaces.push(SurfaceDrawInfo {
                 first_index: new_first,
                 index_count: surf.index_count,
@@ -196,6 +250,12 @@ impl BspGeometryManager {
                 lightmap_id: surf.lightmap_id,
                 flags: surf.flags,
                 cluster: surf.cluster,
+                orig_index: surf.orig_index,
+                is_inline: surf.is_inline,
+                flat_light: surf.flat_light,
+                plane_z,
+                is_horizontal,
+                centroid,
             });
         }
 
@@ -214,6 +274,9 @@ impl BspGeometryManager {
         // Maps cluster → opaque (non-alpha, non-turb) surface draw tuples.
         let mut cluster_draws: HashMap<i32, Vec<(u32, u32, u32)>> = HashMap::new();
         for surf in &self.surfaces {
+            if surf.is_inline {
+                continue; // inline submodels drawn separately as brush models
+            }
             if surf.flags & (SURF_TRANS33 | SURF_TRANS66 | SURF_DRAWTURB) != 0 {
                 continue;
             }
@@ -254,6 +317,12 @@ impl BspGeometryManager {
         let mut batches: Vec<TextureBatch> = Vec::new();
 
         for (i, surface) in self.surfaces.iter().enumerate() {
+            // Skip inline submodel surfaces — they are drawn as moving brush model
+            // entities, not as part of the static world.
+            if surface.is_inline {
+                continue;
+            }
+
             // Skip translucent surfaces (drawn separately with alpha blending)
             if surface.flags & (SURF_TRANS33 | SURF_TRANS66) != 0 {
                 continue;
@@ -280,6 +349,7 @@ impl BspGeometryManager {
                 first_index: surface.first_index,
                 index_count: surface.index_count,
                 surfaces: vec![i],
+                is_light: surface.flags & SURF_LIGHT != 0,
             });
         }
 
@@ -348,18 +418,32 @@ impl BspGeometryManager {
     /// Get surface draw info for a range of surfaces (used by brush models).
     ///
     /// Returns a slice of SurfaceDrawInfo for surfaces in [first..first+count].
-    pub fn draw_info_for_range(&self, first: usize, count: usize) -> &[SurfaceDrawInfo] {
-        let end = (first + count).min(self.surfaces.len());
-        if first >= self.surfaces.len() {
-            return &[];
-        }
-        &self.surfaces[first..end]
+    /// Return the draw info for an inline submodel's surfaces, identified by the
+    /// original (pre-sort) BSP surface index range `[first, first+count)`. Because
+    /// `build()` reorders surfaces by texture, we filter by `orig_index` rather
+    /// than slicing the sorted array.
+    pub fn draw_info_for_range(&self, first: usize, count: usize) -> Vec<&SurfaceDrawInfo> {
+        let end = first + count;
+        self.surfaces
+            .iter()
+            .filter(|s| {
+                let oi = s.orig_index as usize;
+                oi >= first && oi < end
+            })
+            .collect()
     }
 
-    /// Get all translucent surfaces (SURF_TRANS33 or SURF_TRANS66).
+    /// Get all translucent surfaces (SURF_TRANS33 or SURF_TRANS66) that are NOT
+    /// liquids. Translucent water is SURF_TRANS66 | SURF_DRAWTURB and is drawn by the
+    /// warp/water pass (which applies both the warp and the alpha); including it here
+    /// too would draw it twice and make it flicker between the two versions.
     pub fn alpha_surfaces(&self) -> Vec<&SurfaceDrawInfo> {
         self.surfaces.iter()
-            .filter(|s| s.flags & (SURF_TRANS33 | SURF_TRANS66) != 0)
+            .filter(|s| {
+                !s.is_inline
+                    && s.flags & (SURF_TRANS33 | SURF_TRANS66) != 0
+                    && s.flags & SURF_DRAWTURB == 0
+            })
             .collect()
     }
 
@@ -378,7 +462,7 @@ impl BspGeometryManager {
     /// Get all turbulent surfaces (water/lava/slime with SURF_DRAWTURB).
     pub fn turb_surfaces(&self) -> Vec<&SurfaceDrawInfo> {
         self.surfaces.iter()
-            .filter(|s| s.flags & SURF_DRAWTURB != 0)
+            .filter(|s| !s.is_inline && s.flags & SURF_DRAWTURB != 0)
             .collect()
     }
 
